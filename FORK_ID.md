@@ -7,7 +7,7 @@ the original author.
 
 ## What changed
 
-The program code is the same as upstream except two small fixes (below, items 7 and 8). The changes are prompt and check text in
+The program code is the same as upstream except three small changes (below, items 7, 8 and 9). The changes are prompt and check text in
 `src/frontend.ts` (and the matching `dist/frontend.js`, rebuilt with `tsc`), the
 docs and tests that quote that text, the README, and the repository links:
 
@@ -50,6 +50,10 @@ docs and tests that quote that text, the README, and the repository links:
    the chat's last reply won, so a connection set on the chat after that reply was
    ignored until a new reply came. A chat set to none still follows the last reply's
    connection. A test covers it, and it fails on the old build.
+
+9. **Refresh connections button** (`src/frontend.ts`, `docs/settings.md`): a button on the
+   Model tab, right under **Refine using**, that asks Lumiverse for the list of
+   connections again and says how many it found. A browser check covers it.
 
 The permissions and the version are the same as upstream. The
 manifest and `package.json` point to this repository instead of upstream, and

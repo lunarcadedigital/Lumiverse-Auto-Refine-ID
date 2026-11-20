@@ -11025,12 +11025,46 @@ export function setup(ctx: Ctx, overrides?: any) {
   }
 
   // ---- Model ----
+  // The list under Refine using is read when the panel starts, when this tab
+  // opens and when the page comes back. This asks for it on request, for a
+  // connection changed in Lumiverse while this tab stayed open.
+  let refreshWaiting = false;
+  let refreshSaid = "";
+  function buildRefreshConnections(): HTMLElement {
+    const row = el("div", "arf-col");
+    row.setAttribute("data-arf-refreshrow", "1");
+    const acts = el("div", "arf-row");
+    const go = button(refreshWaiting ? "Asking Lumiverse" : "Refresh connections", false);
+    go.setAttribute("data-arf-refresh", "connections");
+    go.disabled = refreshWaiting;
+    go.style.opacity = refreshWaiting ? "0.45" : "1";
+    go.addEventListener("click", () => {
+      refreshWaiting = true;
+      refreshSaid = "";
+      send({ type: "list_connections", requestId: newId() });
+      send({ type: "list_decision_connections", requestId: newId() });
+      paint();
+    });
+    acts.appendChild(go);
+    row.appendChild(acts);
+    const said = note(
+      refreshSaid ||
+        "Use this after you change a connection or its model in Lumiverse. It asks for the list of connections again.",
+    );
+    said.setAttribute("data-arf-refreshsaid", "1");
+    row.appendChild(said);
+    return row;
+  }
+
   function buildConnectionCard(): HTMLElement {
     const wrap = card(
       "Which model refines",
       "A refine is a second model call on every reply, so these decide what it costs. They default to the cheap answer.",
     );
-    for (const f of COST_FIELDS) wrap.appendChild(fieldRow(f));
+    for (const f of COST_FIELDS) {
+      wrap.appendChild(fieldRow(f));
+      if (f.key === "connectionId") wrap.appendChild(buildRefreshConnections());
+    }
     // Every cost on this panel is worked out here, so the one place to say what
     // it is worth is under the boxes that set it. Left off when no price is
     // typed, since nothing is being worked out to caveat.
@@ -18175,6 +18209,17 @@ export function setup(ctx: Ctx, overrides?: any) {
                   break;
                 }
             connections = list;
+            if (refreshWaiting) {
+              refreshWaiting = false;
+              refreshSaid =
+                list.length === 0
+                  ? "Lumiverse sent no connections. Check that this extension has the generation permission."
+                  : list.length === 1
+                    ? "1 connection on your account."
+                    : list.length + " connections on your account.";
+              paint();
+              return;
+            }
             if (!same) paint();
             return;
           }

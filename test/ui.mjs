@@ -1592,6 +1592,50 @@ console.log("\nloading a preset and the Model tab");
   ok("no errors loading a preset", errors.length === 0, errors.join("\n         "));
 }
 
+// ---- the button that asks for the connection list again ----
+// The list under Refine using is read when the panel starts. A connection
+// changed in Lumiverse since then is named the old way until it is asked for
+// again, so the Model tab carries a button that asks.
+console.log("\nthe Refresh connections button");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    await goTab(page, "Model");
+    const state = () =>
+      page.evaluate(() => {
+        const b = document.querySelector('#drawer [data-arf-refresh="connections"]');
+        const said = document.querySelector('#drawer [data-arf-refreshsaid]');
+        const field = document.querySelector('#drawer [data-arf-field="connectionId"]');
+        const think = document.querySelector('#drawer [data-arf-field="thinkingMode"]');
+        const below = field && think ? !!(field.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) && !!(b.compareDocumentPosition(think) & Node.DOCUMENT_POSITION_FOLLOWING) : false;
+        return {
+          there: !!b,
+          label: b ? b.textContent : "",
+          disabled: b ? b.disabled : null,
+          said: said ? said.textContent : "",
+          between: below,
+          asked: window.__sent.filter((m) => m.type === "list_connections").length,
+        };
+      });
+    const first = await state();
+    ok("the Model tab has the button", first.there, JSON.stringify(first));
+    ok("it sits between Refine using and Let it think first", first.between, JSON.stringify(first));
+    await page.evaluate(() => {
+      window.__sent.length = 0;
+      document.querySelector('#drawer [data-arf-refresh="connections"]').click();
+    });
+    await settle(page);
+    const waiting = await state();
+    ok("pressing it asks for the list again", waiting.asked === 1, JSON.stringify(waiting));
+    ok("and it waits for the answer, with the button held", waiting.disabled === true && /Asking/.test(waiting.label), JSON.stringify(waiting));
+    await page.evaluate(() => window.__fromBackend({ type: "connections", list: [{ id: "a", name: "Alpha", model: "m1" }, { id: "b", name: "Beta", model: "m2" }] }));
+    await settle(page);
+    const done = await state();
+    ok("the answer says how many connections there are", /2 connections/.test(done.said), JSON.stringify(done));
+    ok("and the button is ready to press again", done.disabled === false && /Refresh/.test(done.label), JSON.stringify(done));
+  });
+  ok("no errors with the refresh button", errors.length === 0, errors.join("\n         "));
+}
+
 // ---- loading a preset changes only the list you are on ----
 // A preset of your own holds both prompts as they were when it was saved.
 // Picking it on For replies must leave the prompt for your own messages as it

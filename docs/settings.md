@@ -118,6 +118,7 @@ Where the buttons come from:
 Not sure what to pick? [What to use](recommended.md) has settings that work well for most people.
 
 - **Refine using** picks the model that refines, from your connection profiles. Leave it on the default to use the model you chat with.
+  - **Refresh connections**, right under it, asks Lumiverse for the list again. Use it after you change a connection or its model in Lumiverse while this tab stays open. The list is also read again when the Model tab opens and when the page comes back after being away.
   - On the default, it refines with the connection you chat with. To see which one that is, it needs the `interceptor` permission.
   - Without that permission, it uses the chat's own connection, or your default one if the chat has none.
   - It also uses those two before a chat has had a reply since Auto Refine started.
