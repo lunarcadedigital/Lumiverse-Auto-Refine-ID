@@ -81,9 +81,9 @@ describe("the prompts that come with it", () => {
       expect({
         prompt: p.name,
         on: !!(score && score.on),
-        quotes: /quote/.test(t),
-        leavesDoubt: /might (fit|break a rule)/.test(t),
-        restStays: /Everything else goes back exactly as it came/.test(t),
+        quotes: /utip/.test(t),
+        leavesDoubt: /mungkin (ada satu baris yang cocok|melanggar aturan)/.test(t),
+        restStays: /Semua yang lain kembali persis seperti datangnya/.test(t),
       }).toEqual({ prompt: p.name, on: true, quotes: true, leavesDoubt: true, restStays: true });
     }
   });
@@ -94,8 +94,8 @@ describe("the prompts that come with it", () => {
       const a = String(p.blocks.find((x: any) => x.id === "answer").text);
       expect({
         prompt: p.name,
-        bands: /85 to 99: a line might fit, but you are not sure/.test(s),
-        onlyUnder: /Change only the areas that scored under 85/.test(s),
+        bands: /85 sampai 99: mungkin ada satu baris yang cocok, tapi kamu tidak yakin/.test(s),
+        onlyUnder: /Ubah hanya area yang skornya di bawah 85/.test(s),
         cardFirst: a.indexOf("<REFINE_NOTES>") >= 0 && a.indexOf("<REFINE_NOTES>") < a.indexOf("<REFINED>"),
       }).toEqual({ prompt: p.name, bands: true, onlyUnder: true, cardFirst: true });
     }
@@ -112,7 +112,7 @@ describe("the prompts that come with it", () => {
   // is no step before it to score in and no step after it to check in, so an
   // instruction for either is ignored or answered in the output. The words
   // here are the ones that ask for such a step.
-  const LOOK_BACK = /in your head|score it|scores? (it|each|every)|look again|twice\. first|go through it|before you (read|touch|start|hand)|catch yourself|re-?read|review|double-check|check (it|each|every|yours|your)|go back over|once you're done|when you're done/i;
+  const LOOK_BACK = /in your head|score it|scores? (it|each|every)|look again|twice\. first|go through it|before you (read|touch|start|hand)|catch yourself|re-?read|review|double-check|check (it|each|every|yours|your)|go back over|once you're done|when you're done|dalam hati|beri(kan)? skor|nilai ulang|periksa (lagi|ulang|kembali)|baca ulang|tinjau|sebelum kamu (membaca|menyentuh|mulai|menyerahkan)|tangkap dirimu/i;
 
   test("the ones for a model that does not reason ask for no step before or after the answer", () => {
     for (const p of BUILT_IN_PROMPTS.filter((x: any) => x.thinking === "off")) {
@@ -125,7 +125,7 @@ describe("the prompts that come with it", () => {
   });
 
   test("and the look-back words are still caught", () => {
-    for (const t of ["Score it in your head.", "Look again before you hand it in.", "Go through it twice. First for this.", "If you catch yourself adding, stop.", "Reread yours against theirs.", "Check each one."])
+    for (const t of ["Beri skor dalam hati.", "Periksa lagi sebelum kamu menyerahkannya.", "Baca ulang hasilmu.", "Score it in your head.", "Look again before you hand it in.", "Go through it twice. First for this.", "If you catch yourself adding, stop.", "Reread yours against theirs.", "Check each one."])
       expect(LOOK_BACK.test(t)).toBe(true);
   });
 
@@ -135,7 +135,7 @@ describe("the prompts that come with it", () => {
   test("every one keeps each line with its speaker", () => {
     for (const p of BUILT_IN_PROMPTS) {
       const cast = p.blocks.find((x: any) => x.id === "cast");
-      expect({ prompt: p.name, on: !!(cast && cast.on), speaker: /keeps its speaker|Who says each line/.test(String(cast && cast.text)) })
+      expect({ prompt: p.name, on: !!(cast && cast.on), speaker: /tetap bersama pengucapnya|Siapa yang mengucapkan setiap baris/.test(String(cast && cast.text)) })
         .toEqual({ prompt: p.name, on: true, speaker: true });
     }
   });
@@ -145,9 +145,9 @@ describe("the prompts that come with it", () => {
       const t = String(p.blocks.find((x: any) => x.id === "cast").text);
       expect({
         prompt: p.name,
-        tags: /a name or a plain speech tag/.test(t),
-        pronouns: /could mean two people, use the name/.test(t),
-        present: /still in it when you are done/.test(t),
+        tags: /nama atau tag ucapan polos/.test(t),
+        pronouns: /bisa berarti dua orang, pakai nama/.test(t),
+        present: /masih ada di dalamnya setelah kamu selesai/.test(t),
       }).toEqual({ prompt: p.name, tags: true, pronouns: true, present: true });
     }
   });
@@ -157,7 +157,7 @@ describe("the prompts that come with it", () => {
   test("and the rule about speech tags leaves a tag that only names the speaker", () => {
     for (const p of forReplies()) {
       const all = p.blocks.map((b: any) => String(b.text)).join("\n");
-      expect({ prompt: p.name, keeps: /tag that only says who is talking stays/.test(all) })
+      expect({ prompt: p.name, keeps: /tag polos yang hanya menyebut siapa yang bicara tetap dipertahankan/i.test(all) })
         .toEqual({ prompt: p.name, keeps: true });
     }
   });
@@ -293,7 +293,7 @@ describe("the prompts that come with it", () => {
       // The words these prompts use for standing back. Updated with the
       // prompts rather than loosened: the point is that a prompt for somebody's
       // own turn talks about leaving it alone, and it still has to say so.
-      expect(whole).toMatch(/leave the writing to them|not a repair|not yours|hands off|what they meant to type/i);
+      expect(whole).toMatch(/leave the writing to them|not a repair|not yours|hands off|what they meant to type|bukan perbaikan|jauhkan tanganmu|yang ingin kuketik|yang mereka maksudkan saat mengetik|milik mereka/i);
     }
   });
 
@@ -382,8 +382,8 @@ describe("the prompts that come with it", () => {
   test("each one holds the point of view and the strength of what it is given", () => {
     for (const p of BUILT_IN_PROMPTS) {
       const all = p.blocks.map((b) => String(b.text)).join("\n");
-      const holdsPov = /\bperson\b/.test(all) && /\btense\b/.test(all);
-      const holdsStrength = /\bstrength it went in\b/.test(all);
+      const holdsPov = /(sudut pandang|orang pertama)/.test(all) && /\bkala\b/.test(all);
+      const holdsStrength = /kekuatan yang sama seperti saat masuk/.test(all);
       expect({ prompt: p.name, pov: holdsPov, strength: holdsStrength })
         .toEqual({ prompt: p.name, pov: true, strength: true });
     }
@@ -614,7 +614,7 @@ describe("the paragraph about adults", () => {
   const quote = ((section.match(/^> (.+)$/m) || [])[1] || "").trim();
 
   test("the docs quote it", () => {
-    expect(quote).toMatch(/^Sex scenes are between adults, 18 and older\./);
+    expect(quote).toMatch(/^Adegan seks adalah antara orang dewasa, usia 18 tahun ke atas\./);
   });
 
   for (const p of BUILT_IN_PROMPTS) {

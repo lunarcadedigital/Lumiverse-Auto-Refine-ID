@@ -18,7 +18,7 @@ Ini adalah salinan [Auto Refine](https://github.com/starlitcode/Lumiverse-Auto-R
 - tujuh pemeriksaan baru untuk model kedua (kontras "bukan X, hanya Y", negasi yang dinarasikan, kalimat pengumuman, frasa klise Indonesia, hitungan bunyi, penutup lewat cuaca atau cahaya, bahasa terapis),
 - sembilan kelompok frasa Indonesia di blok **Instant Penalties**,
 - beberapa kata pengisi Indonesia di blok **Dead Weight**,
-- satu blok prompt baru, **Bahasa Indonesia**, di dua prompt bawaan untuk balasan.
+- **seluruh teks prompt bawaan diterjemahkan ke Bahasa Indonesia** (keempat prompt: A judge, A judge that thinks, A line judge, A line judge that thinks), ditambah satu blok baru, **Bahasa Indonesia**, di dua prompt untuk balasan. Nama blok dan tag (misalnya `<instant_penalties>`) tetap bahasa Inggris, karena dokumen dan tes memakainya sebagai acuan.
 
 Rinciannya ada di [FORK_ID.md](FORK_ID.md). Semua kredit untuk ekstensinya tetap milik pembuat aslinya. Masalah yang hanya terjadi pada versi asli sebaiknya dilaporkan ke repo aslinya.
 
@@ -114,7 +114,7 @@ Empat prompt sudah disertakan:
 
 Keempatnya hanya mengubah baris yang bisa dikutip model sebagai pelanggaran aturan. Dua yang untuk model yang berpikir memberi skor tiap area dan menuliskan skornya. Dua yang polos memberi batas yang sama sebagai aturan. Keduanya tidak meminta model memeriksa pekerjaannya, karena model yang tidak berpikir menulis jawabannya sekali jalan. Keempatnya bekerja dengan satu karakter maupun beberapa, termasuk di chat grup. Lihat [The scorecard](docs/prompt.md#the-scorecard).
 
-Pada fork ini, dua prompt untuk balasan punya satu blok tambahan, **Bahasa Indonesia**, yang menjaga bahasa dan register yang sudah ada di balasan dan mengubah sangkalan beserta jawabannya menjadi jawabannya saja.
+Pada fork ini, teks keempat prompt ditulis dalam Bahasa Indonesia, dan dua prompt untuk balasan punya satu blok tambahan, **Bahasa Indonesia**, yang menjaga bahasa dan register yang sudah ada di balasan dan mengubah sangkalan beserta jawabannya menjadi jawabannya saja. Deskripsi prompt di panel (teks "what") masih bahasa Inggris.
 
 **Show me the request**, di tab Context, menampilkan permintaan yang akan dikirim oleh refine pada balasan itu, tanpa memanggil model dan tanpa biaya. Dua hal yang hanya bisa diisi oleh refine sungguhan hanya disebut namanya: apa yang ditemukan pemeriksaan, dan putaran setelah yang pertama.
 

@@ -1143,12 +1143,12 @@ const THOUGHT_BLOCK: Block = {
   on: false,
   role: "system",
   text:
-    "<writers_plan>\n" +
-    "This is what the writer worked out before writing the passage. It's here " +
-    "so you know what they were going for. It isn't part of the passage, so " +
-    "none of it goes in your answer.\n\n" +
-    "{{reply_thinking}}\n" +
-    "</writers_plan>",
+    
+      "<writers_plan>\n" +
+      "Ini yang dirancang penulis sebelum menulis naskah. Ia ada di sini supaya kamu tahu apa yang ingin dicapainya. Ini bukan bagian dari naskah, jadi tidak satu pun dari ini masuk ke jawabanmu.\n" +
+      "\n" +
+      "{{reply_thinking}}\n" +
+      "</writers_plan>",
 };
 
 // The pages before this one. Redrawn every single turn, so it goes as late as it
@@ -1196,14 +1196,18 @@ const HOW_TO_ANSWER: Block = {
   on: true,
   role: "user",
   text:
-    "<hand_it_in>\n" +
-    "Hand it in like this:\n\n" +
-    "<REFINED>\nthe passage, rewritten\n</REFINED>\n\n" +
-    "Only what's between those two tags gets saved, so both go in every " +
-    "time. Inside them, just the passage, the way a reader would see it.\n\n" +
-    "If you need to tell the user something, like why you handed it back " +
-    "untouched, say it outside the tags. It reaches them and never the story." +
-    "\n</hand_it_in>",
+    
+      "<hand_it_in>\n" +
+      "Serahkan seperti ini:\n" +
+      "\n" +
+      "<REFINED>\n" +
+      "naskah, setelah ditulis ulang\n" +
+      "</REFINED>\n" +
+      "\n" +
+      "Hanya yang ada di antara kedua tag itu yang disimpan, jadi keduanya ditulis setiap kali. Di dalamnya hanya naskah, seperti yang akan dilihat pembaca.\n" +
+      "\n" +
+      "Kalau kamu perlu memberi tahu pengguna sesuatu, misalnya kenapa kamu mengembalikannya tanpa diubah, tulis di luar tag. Itu sampai ke mereka dan tidak pernah masuk ke cerita.\n" +
+      "</hand_it_in>",
 };
 
 // The reasoning version. A scorecard goes in a tag of its own, ahead of the
@@ -1227,19 +1231,25 @@ const THINKS_ANSWER: Block = {
   on: true,
   role: "user",
   text:
-    "<hand_it_in>\n" +
-    "Hand it in like this, in this order:\n\n" +
-    "<REFINE_NOTES>\nOne line per area, in the order the rules list them:\n" +
-    "Area: score. \"the worst line, quoted\"\nThen one line saying which " +
-    "areas scored under 85, and what you're changing in each.\n" +
-    "</REFINE_NOTES>\n<REFINED>\nthe passage, rewritten\n</REFINED>\n\n" +
-    "<REFINE_NOTES> holds the scorecard and that last line. Keep it to " +
-    "those, and don't open any other tag.\n\n" +
-    "None of it goes into the story, so it can't hurt the rewrite.\n\n" +
-    "Only what's between <REFINED> and </REFINED> gets saved. Inside them, " +
-    "just the passage, the way a reader would see it. Your reasons are " +
-    "already on the scorecard." +
-    "\n</hand_it_in>",
+    
+      "<hand_it_in>\n" +
+      "Serahkan seperti ini, dengan urutan ini:\n" +
+      "\n" +
+      "<REFINE_NOTES>\n" +
+      "Satu baris per area, sesuai urutan yang disebut aturan:\n" +
+      "Area: skor. \"baris terburuk, dikutip\"\n" +
+      "Lalu satu baris yang menyebut area mana yang skornya di bawah 85, dan apa yang kamu ubah di tiap area.\n" +
+      "</REFINE_NOTES>\n" +
+      "<REFINED>\n" +
+      "naskah, setelah ditulis ulang\n" +
+      "</REFINED>\n" +
+      "\n" +
+      "<REFINE_NOTES> berisi kartu skor dan baris terakhir itu. Batasi pada keduanya, dan jangan membuka tag lain.\n" +
+      "\n" +
+      "Tidak satu pun dari itu masuk ke cerita, jadi tidak bisa merusak hasil tulis ulangnya.\n" +
+      "\n" +
+      "Hanya yang ada di antara <REFINED> dan </REFINED> yang disimpan. Di dalamnya hanya naskah, seperti yang akan dilihat pembaca. Alasanmu sudah ada di kartu skor.\n" +
+      "</hand_it_in>",
 };
 
 // The note about the tokens standing in for protected formatting. It has a
@@ -1263,7 +1273,7 @@ const PROTECT_BLOCK: Block = {
 
 // The phrase list, the same in both lengths. These turn up in machine-written
 // fiction several times a session and in published fiction almost never.
-const PHRASES =
+const PHRASES_EN =
   // Grouped by kind, with a few examples each. A model reads a group as a
   // pattern and catches the ones not listed; a list of every filling is longer
   // and catches nothing more.
@@ -1293,18 +1303,25 @@ const PHRASES =
   "- a laugh, a breath or a sound that escapes somebody\n" +
   "- do-then-undo: reached out, then pulled back; opened her mouth, then closed it\n" +
   "- the same thing twice: she looked at him, really looked at him; he worked his jaw, his jaw worked\n" +
-  "- narrator flourishes: little did they know, only time would tell, nothing would ever be the same\n" +
-  // Indonesian. The same kinds as above, in the words a model actually reaches
-  // for when it writes Indonesian. Added in the Indonesian anti-slop fork.
-  "- (Indonesian) the denial and its answer: bukan X, melainkan Y; tidak X, tapi Y; bukan X, hanya Y, also split across two sentences (Bukan ke mana-mana. Hanya terbang.); bukan hanya X, tapi juga Y; lebih dari sekadar X; a string of denied options before the true one. Say the true thing directly: Ia terbang.\n" +
-  "- (Indonesian) narrated negation: tanpa + a verb, and tidak or belum + an action in narration (Dia tidak berkedip). Say what they do instead: Matanya tetap terbuka.\n" +
-  "- (Indonesian) bodies on autopilot: jantungnya berdegup kencang, napas tertahan, napas tercekat, rahang mengeras, menelan ludah, tubuhnya menegang, mata berkaca-kaca, suara bergetar, bulu kuduk merinding, pupil melebar, alis terangkat, menyipitkan mata, menghela napas, menggigit bibir bawah\n" +
-  "- (Indonesian) stock faces: seulas senyum tipis, tersenyum getir, senyum miring, tatapan dingin menusuk, tatapan tajam, tatapan predator\n" +
-  "- (Indonesian) the air and the silence doing the mood's job: hening yang canggung, keheningan menggantung, udara terasa berat, dunia seolah berhenti, waktu seolah berhenti, ketegangan yang merayap, atmosfer yang kental, getaran\n" +
-  "- (Indonesian) lines that announce or soothe: Aku ingin kau tahu bahwa..., Aku punya satu pertanyaan..., Kalau boleh aku menambahkan..., Kau melakukan hal yang benar, Aku di sini untukmu\n" +
-  "- (Indonesian) counting a sound out loud: berdering sekali, dua kali, tiga kali; exact numbers nobody gave (tiga detik, empat puluh derajat) where beberapa detik would do\n" +
-  "- (Indonesian) the closing shot: the sky growing darker, the light turning, a watcher on a roof, an arrival at a door\n" +
-  "- (Indonesian) English leaking into Indonesian prose: beat, density, micro-adjustment, fresh meat";
+  "- narrator flourishes: little did they know, only time would tell, nothing would ever be the same";
+
+// The same lists in Indonesian first, then the English ones, for a passage written in English.
+const PHRASES_ID =
+  "- sangkalan lalu jawabannya: bukan X, melainkan Y; tidak X, tapi Y; bukan X, hanya Y, juga bila terpisah dua kalimat (Bukan ke mana-mana. Hanya terbang.); bukan hanya X, tapi juga Y; lebih dari sekadar X; deretan pilihan yang disangkal sebelum yang benar. Katakan hal yang benar langsung: Ia terbang.\n" +
+  "- narasi yang melaporkan apa yang tidak dilakukan: tanpa diikuti kata kerja, tidak atau belum diikuti tindakan (Dia tidak berkedip). Katakan apa yang dilakukan: Matanya tetap terbuka.\n" +
+  "- tubuh yang berjalan sendiri: jantungnya berdegup kencang, napas tertahan, napas tercekat, rahang mengeras, menelan ludah, tubuhnya menegang, mata berkaca-kaca, suara bergetar, bulu kuduk merinding, pupil melebar, alis terangkat, menyipitkan mata, menghela napas, menggigit bibir bawah\n" +
+  "- wajah klise: seulas senyum tipis, tersenyum getir, senyum miring, tatapan dingin menusuk, tatapan tajam, tatapan predator\n" +
+  "- udara dan keheningan yang mengerjakan tugas suasana: hening yang canggung, keheningan menggantung, udara terasa berat, dunia seolah berhenti, waktu seolah berhenti, ketegangan yang merayap, atmosfer yang kental, getaran\n" +
+  "- kalimat yang mengumumkan atau menenangkan: Aku ingin kau tahu bahwa..., Aku punya satu pertanyaan..., Kalau boleh aku menambahkan..., Kau melakukan hal yang benar, Aku di sini untukmu\n" +
+  "- menghitung bunyi dengan lantang: berdering sekali, dua kali, tiga kali; angka pasti yang tidak diberikan siapa pun (tiga detik, empat puluh derajat) padahal beberapa detik cukup\n" +
+  "- bidikan penutup: langit yang makin gelap, cahaya yang berubah, pengamat di atap, kedatangan di ambang pintu\n" +
+  "- bahasa Inggris yang bocor ke prosa Indonesia: beat, density, micro-adjustment, fresh meat";
+
+const PHRASES =
+  "Dalam bahasa Indonesia:\n" +
+  PHRASES_ID +
+  "\n\nDalam bahasa Inggris, bila naskahnya berbahasa Inggris:\n" +
+  PHRASES_EN;
 
 const FILLER =
   "suddenly, slowly, slightly, just, really, very, almost, somehow, " +
@@ -1319,21 +1336,21 @@ const COPY_EXACTLY: Block = {
   on: true,
   role: "system",
   text:
-    "<out_of_bounds>\n" +
-    "Some of what you get isn't prose, and you don't touch it. These come " +
-    "through character for character, right where they are:\n\n" +
-    "- HTML and XML tags, with everything inside the angle brackets\n- " +
-    "tokens shaped like [[AR1]], standing in for formatting lifted out " +
-    "before you saw it\n- code, fenced or inline, and anything in backticks\n" +
-    "- links, image links and file paths\n- stat blocks, status bars, " +
-    "trackers, inventories, timestamps, and any line printed to the same " +
-    "shape every time\n- a second language beside the first, with the line " +
-    "translating it: both stay as they are, in the order they are in\n- " +
-    "names as spelled, including odd spellings and capitalization\n- " +
-    "numbers, dates, times and measurements\n\n" +
-    "If you're not sure whether something counts as prose, assume it " +
-    "doesn't and leave it." +
-    "\n</out_of_bounds>",
+    
+      "<out_of_bounds>\n" +
+      "Sebagian dari yang kamu terima bukan prosa, dan kamu tidak menyentuhnya. Ini harus lewat karakter demi karakter, tepat di tempatnya:\n" +
+      "\n" +
+      "- tag HTML dan XML, beserta semua yang ada di dalam tanda kurung sudutnya\n" +
+      "- token berbentuk [[AR1]], pengganti format yang diangkat sebelum kamu melihatnya\n" +
+      "- kode, baik blok maupun sebaris, dan apa pun di dalam tanda kutip balik\n" +
+      "- tautan, tautan gambar, dan jalur berkas\n" +
+      "- blok statistik, bilah status, tracker, inventaris, cap waktu, dan baris apa pun yang dicetak dengan bentuk yang sama setiap kali\n" +
+      "- bahasa kedua di samping yang pertama, dengan baris yang menerjemahkannya: keduanya tetap, dengan urutan yang sama\n" +
+      "- nama sesuai ejaannya, termasuk ejaan dan huruf besar yang tidak biasa\n" +
+      "- angka, tanggal, jam, dan ukuran\n" +
+      "\n" +
+      "Kalau kamu tidak yakin sesuatu termasuk prosa, anggap bukan dan biarkan.\n" +
+      "</out_of_bounds>",
 };
 
 const JOB_BLOCK: Block = {
@@ -1342,32 +1359,18 @@ const JOB_BLOCK: Block = {
   on: true,
   role: "system",
   text:
-    "<the_judge>\n" +
-    "You're judging this story line by line, and you've got the red pen. " +
-    "You've read a thousand shivers down a thousand spines by now. So has " +
-    "the user. Catch them.\n\n" +
-    "The passage below was written for the user, and you get it before " +
-    "they do. How it reads is your job. What happens in it is theirs. If " +
-    "someone slams a door in the original, that door still gets slammed, and whoever said a line still says it and means it. " +
-    "Don't write past where it ends. Keep the language, the person, the tense, and whose head we're in. Cutting " +
-    "an action or a line of dialogue counts as changing what happens.\n\n" +
-    "Only mark lines that break a rule below, even when some other line " +
-    "reads badly or makes no sense to you. The user put it there. Leave " +
-    "everything else the hell alone. Four good fixes outscore forty fussy " +
-    "ones.\n\n" +
-    "The user sets the tone. Maybe it's a cozy café scene. Maybe it's " +
-    "smut, or somebody's getting their throat cut. Doesn't matter, you " +
-    "judge it all by the same rules. It comes back at the strength it went " +
-    "in. Gentle stays gentle, so don't go adding heat nobody wrote, and " +
-    "graphic stays graphic, with the same detail in the same places. Sex, " +
-    "gore, swearing and insults keep their actual words. Don't swap in " +
-    "polite ones. How it reads is your business. What it shows is theirs.\n\n" +
-    "Sex scenes are between adults, 18 and older. If one involves anyone " +
-    "younger than that, or anyone written to seem younger, don't edit it. " +
-    "Hand the passage back exactly as it came, and say outside the tags " +
-    "that's why. Characters of any age in scenes with nothing sexual in " +
-    "them get edited like anyone else." +
-    "\n</the_judge>",
+    
+      "<the_judge>\n" +
+      "Kamu menilai cerita ini baris demi baris, dan kamu pegang pena merah. Kamu sudah membaca seribu bulu kuduk yang merinding dan seribu jantung yang berdegup kencang. Pengguna juga. Tangkap semuanya.\n" +
+      "\n" +
+      "Naskah di bawah ditulis untuk pengguna, dan kamu melihatnya lebih dulu. Cara naskah itu terbaca urusanmu. Apa yang terjadi di dalamnya bukan urusanmu. Kalau di aslinya ada yang membanting pintu, pintu itu tetap dibanting, dan siapa pun yang mengucapkan sebuah baris tetap mengucapkannya dan memaksudkannya. Jangan menulis melewati akhir naskah. Pertahankan bahasa, sudut pandang orang, kala, dan kepala siapa yang sedang kita masuki. Menghapus sebuah tindakan atau sebaris dialog dihitung sebagai mengubah apa yang terjadi.\n" +
+      "\n" +
+      "Tandai hanya baris yang melanggar aturan di bawah, bahkan kalau ada baris lain yang terbaca jelek atau tidak masuk akal bagimu. Pengguna yang menaruhnya di sana. Biarkan semua yang lain apa adanya. Empat perbaikan yang tepat lebih berharga daripada empat puluh yang rewel.\n" +
+      "\n" +
+      "Pengguna yang menentukan nadanya. Mungkin adegan kafe yang hangat. Mungkin adegan seks, atau ada yang digorok lehernya. Tidak masalah, semuanya kamu nilai dengan aturan yang sama. Hasilnya kembali dengan kekuatan yang sama seperti saat masuk. Yang lembut tetap lembut, jadi jangan menambah panas yang tidak ditulis siapa pun, dan yang vulgar tetap vulgar, dengan detail yang sama di tempat yang sama. Seks, gore, umpatan, dan hinaan tetap memakai kata aslinya. Jangan menukarnya dengan kata yang sopan. Cara teks terbaca urusanmu. Apa yang ditampilkannya urusan mereka.\n" +
+      "\n" +
+      "Adegan seks adalah antara orang dewasa, usia 18 tahun ke atas. Kalau ada yang melibatkan siapa pun yang lebih muda dari itu, atau siapa pun yang ditulis tampak lebih muda, jangan sunting. Kembalikan naskahnya persis seperti datangnya, dan katakan di luar tag bahwa itulah alasannya. Karakter dengan usia berapa pun dalam adegan yang tidak ada unsur seksualnya disunting seperti biasa.\n" +
+      "</the_judge>",
 };
 
 
@@ -1378,15 +1381,14 @@ const LEAVE_ALONE: Block = {
   on: true,
   role: "system",
   text:
-    "<clean_run>\n" +
-    "A passage that already reads fine goes back untouched, and that " +
-    "counts as a perfect score.\n\n" +
-    "Rewriting a line that didn't need it is about the worst thing you can " +
-    "do here. The user picked that line. Now it's gone, and they can't " +
-    "even see what moved.\n\n" +
-    "Yours comes out about as long as theirs, or shorter. A fix swaps out " +
-    "what was there. It doesn't stack new stuff on top." +
-    "\n</clean_run>",
+    
+      "<clean_run>\n" +
+      "Naskah yang sudah terbaca baik dikembalikan tanpa disentuh, dan itu dihitung sebagai nilai sempurna.\n" +
+      "\n" +
+      "Menulis ulang baris yang tidak perlu adalah salah satu hal terburuk yang bisa kamu lakukan di sini. Pengguna memilih baris itu. Sekarang baris itu hilang, dan mereka bahkan tidak bisa melihat apa yang bergeser.\n" +
+      "\n" +
+      "Hasilmu sepanjang aslinya, atau lebih pendek. Sebuah perbaikan menukar apa yang ada. Ia tidak menumpuk hal baru di atasnya.\n" +
+      "</clean_run>",
 };
 
 
@@ -1406,18 +1408,20 @@ const CAST_BLOCK: Block = {
   on: true,
   role: "system",
   text:
-    "<roll_call>\n" +
-    "The scene might have one person in it. It might have eight.\n\n" +
-    "Who says each line and who does each action doesn't change. Dialogue " +
-    "never switches owners.\n\n" +
-    "In a crowded scene, a name or a plain speech tag is sometimes the " +
-    "only way anyone knows who's talking. Leave it.\n\n" +
-    "Where he, she or they could mean two people, use the name.\n\n" +
-    "Everybody keeps their own voice. If two characters sounded different " +
-    "going in, they'd better sound different coming out.\n\n" +
-    "Anyone in the passage is still in it when you are done, including " +
-    "whoever only got one line." +
-    "\n</roll_call>",
+    
+      "<roll_call>\n" +
+      "Adegannya mungkin hanya berisi satu orang. Mungkin delapan.\n" +
+      "\n" +
+      "Siapa yang mengucapkan setiap baris dan siapa yang melakukan setiap tindakan tidak berubah. Dialog tidak pernah berpindah pemilik.\n" +
+      "\n" +
+      "Di adegan yang ramai, kadang nama atau tag ucapan polos adalah satu-satunya cara orang tahu siapa yang bicara. Biarkan.\n" +
+      "\n" +
+      "Di mana dia, ia, atau mereka bisa berarti dua orang, pakai nama.\n" +
+      "\n" +
+      "Setiap orang mempertahankan suaranya sendiri. Kalau dua karakter terdengar berbeda saat masuk, mereka harus tetap terdengar berbeda saat keluar.\n" +
+      "\n" +
+      "Siapa pun di dalam naskah masih ada di dalamnya setelah kamu selesai, termasuk orang yang hanya mendapat satu baris.\n" +
+      "</roll_call>",
 };
 
 // Who is in the scene, for the user's own turn. Shorter than the one for
@@ -1430,12 +1434,12 @@ const YOURS_CAST: Block = {
   on: true,
   role: "system",
   text:
-    "<roll_call>\n" +
-    "They might be writing one character or a few at once. Every line of " +
-    "dialogue keeps its speaker, and every action keeps whoever did it.\n\n" +
-    "Leave everybody else alone. If the user didn't write a reply for " +
-    "someone, you don't get to write one either." +
-    "\n</roll_call>",
+    
+      "<roll_call>\n" +
+      "Mereka mungkin menulis satu karakter atau beberapa sekaligus. Setiap baris dialog tetap bersama pengucapnya, dan setiap tindakan tetap bersama pelakunya.\n" +
+      "\n" +
+      "Biarkan semua orang lain. Kalau pengguna tidak menulis balasan untuk seseorang, kamu juga tidak berhak menulisnya.\n" +
+      "</roll_call>",
 };
 
 // The written scorecard, for the two that reason. The anchors say what each band means rather
@@ -1452,21 +1456,21 @@ const THINKS_SCORE_BLOCK: Block = {
   on: true,
   role: "system",
   text:
-    "<scorecard>\n" +
-    "Do the scorecard before you touch anything. An area is one kind of " +
-    "fault the rules above go after. Give each area a score out of 100 and " +
-    "back it up with a line from the passage, quoted.\n\n" +
-    "For each area, find what fits and quote the worst offender. Nothing " +
-    "to quote means 100.\n\n" +
-    "- 100: clean.\n- 85 to 99: a line might fit, but you are not sure, or " +
-    "fixing it would do more harm than good.\n- 60 to 84: one or two lines " +
-    "fit.\n- under 60: it's all over the place.\n\n" +
-    "Change only the areas that scored under 85, and in those, only the " +
-    "lines that earned it. Everything else goes back exactly as it came, " +
-    "even if you'd have written it differently.\n\n" +
-    "Score what's actually on the page. A passage that gets 100 everywhere " +
-    "comes back unchanged, and that's a legit result." +
-    "\n</scorecard>",
+    
+      "<scorecard>\n" +
+      "Isi kartu skor sebelum menyentuh apa pun. Satu area adalah satu jenis kesalahan yang dikejar aturan di atas. Beri tiap area skor dari 100 dan dukung dengan satu baris dari naskah, dikutip.\n" +
+      "\n" +
+      "Untuk tiap area, cari yang cocok dan kutip pelanggar terburuknya. Tidak ada yang bisa dikutip berarti 100.\n" +
+      "\n" +
+      "- 100: bersih.\n" +
+      "- 85 sampai 99: mungkin ada satu baris yang cocok, tapi kamu tidak yakin, atau memperbaikinya lebih banyak merugikan daripada menguntungkan.\n" +
+      "- 60 sampai 84: satu atau dua baris cocok.\n" +
+      "- di bawah 60: berantakan di mana-mana.\n" +
+      "\n" +
+      "Ubah hanya area yang skornya di bawah 85, dan di area itu, hanya baris yang pantas diubah. Semua yang lain kembali persis seperti datangnya, meski kamu akan menulisnya dengan cara lain.\n" +
+      "\n" +
+      "Nilai apa yang benar-benar ada di halaman. Naskah yang mendapat 100 di semua area kembali tanpa perubahan, dan itu hasil yang sah.\n" +
+      "</scorecard>",
 };
 
 // The same limit for the two that do not reason, given as a rule. A model that
@@ -1480,16 +1484,14 @@ const SCORE_BLOCK: Block = {
   on: true,
   role: "system",
   text:
-    "<scorecard>\n" +
-    "Here's how the marks work. A line loses points when it clearly breaks " +
-    "a rule above, and you could quote it as the proof. Those are the lines " +
-    "you change.\n\n" +
-    "A line that might break a rule keeps full marks and stays as it is. " +
-    "So does a line where the fix would do more harm than good.\n\n" +
-    "Everything else goes back exactly as it came, even if you'd have " +
-    "written it differently. A passage where no line breaks a rule comes " +
-    "back unchanged, and that's a perfect score." +
-    "\n</scorecard>",
+    
+      "<scorecard>\n" +
+      "Beginilah cara penilaiannya. Sebuah baris kehilangan poin ketika ia jelas melanggar sebuah aturan di atas, dan kamu bisa mengutipnya sebagai buktinya. Baris-baris itulah yang kamu ubah.\n" +
+      "\n" +
+      "Baris yang mungkin melanggar aturan tetap mendapat nilai penuh dan dibiarkan apa adanya. Begitu juga baris yang perbaikannya lebih banyak merugikan daripada menguntungkan.\n" +
+      "\n" +
+      "Semua yang lain kembali persis seperti datangnya, meski kamu akan menulisnya dengan cara lain. Naskah yang tidak punya satu pun baris yang melanggar aturan kembali tanpa perubahan, dan itu nilai sempurna.\n" +
+      "</scorecard>",
 };
 
 // ---- a model that does not reason, in full ----
@@ -1503,39 +1505,25 @@ const INDONESIAN_BLOCK: Block = {
   on: true,
   role: "system",
   text:
-    "<bahasa_indonesia>\n" +
-    "Applies only when the passage is in Indonesian. Skip this block for any other language.\n\n" +
-    "Language first. The rewrite stays in Indonesian and never drifts into " +
-    "English. Keep the register the passage already has, for each speaker: " +
-    "aku, kau, kamu, saya, Anda, and any casual particles (sih, kok, dong, " +
-    "nggak). Do not make anyone more formal or more casual, and keep a " +
-    "narrator who calls the user kamu calling them kamu.\n\n" +
-    "Say the true thing directly. A denial followed by its answer becomes the " +
-    "answer alone, in narration and in dialogue:\n" +
-    "- Dia tidak berkedip. > Matanya tetap terbuka.\n" +
-    "- Bukan ke mana-mana. Hanya terbang. > Ia terbang.\n" +
-    "- Itu bukan kegagalan. Itu kejujuran. > Itu kejujuran.\n" +
-    "- Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan. > Dia akan bertanya kapan.\n" +
-    "The pattern is a denial, then tapi, melainkan, hanya, cuma or sekadar, " +
-    "even across two sentences. One plain denial that is the actual point of " +
-    "the line stays. Narration that reports what someone did not do (tanpa " +
-    "plus a verb, tidak or belum plus an action) becomes what they did, or goes.\n\n" +
-    "Speech says the thing. Cut the run-up (Aku ingin kau tahu bahwa..., " +
-    "Aku punya satu pertanyaan...), the soothing line (Kau melakukan hal " +
-    "yang benar), and speeches about what something means. Keep what the " +
-    "character wants to get across, in fewer words.\n\n" +
-    "Plain numbers. Counting a sound out loud (Berdering sekali. Dua kali. " +
-    "Tiga kali.) becomes Berdering. An exact number nobody gave (tiga detik) " +
-    "becomes beberapa detik.\n\n" +
-    "Stock Indonesian: jantungnya berdegup kencang, napas tertahan, rahang " +
-    "mengeras, menelan ludah, seulas senyum tipis, dunia seolah berhenti, " +
-    "keheningan menggantung. Replace each with what this person is actually " +
-    "doing in this room, or cut it.\n\n" +
-    "Natural Indonesian, not translated English: drop sebuah and adalah where " +
-    "Indonesian drops them, prefer bisa over dapat in speech, and let the " +
-    "verb carry the present instead of sedang. Name a character instead of " +
-    "alternating dia, ia and -nya when two of the same gender share a sentence." +
-    "\n</bahasa_indonesia>",
+    
+      "<bahasa_indonesia>\n" +
+      "Bahasa dulu. Hasil tulis ulang tetap berbahasa Indonesia dan tidak melantur ke bahasa Inggris. Pertahankan register yang sudah dimiliki naskah, untuk tiap pembicara: aku, kau, kamu, saya, Anda, dan partikel santai (sih, kok, dong, nggak). Jangan membuat siapa pun lebih formal atau lebih santai, dan narator yang menyebut pengguna kamu tetap menyebutnya kamu.\n" +
+      "\n" +
+      "Katakan hal yang benar secara langsung. Sangkalan yang diikuti jawabannya menjadi jawabannya saja, di narasi maupun di dialog:\n" +
+      "- Dia tidak berkedip. > Matanya tetap terbuka.\n" +
+      "- Bukan ke mana-mana. Hanya terbang. > Ia terbang.\n" +
+      "- Itu bukan kegagalan. Itu kejujuran. > Itu kejujuran.\n" +
+      "- Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan. > Dia akan bertanya kapan.\n" +
+      "Polanya adalah sangkalan, lalu tapi, melainkan, hanya, cuma, atau sekadar, bahkan ketika terpisah dua kalimat. Satu sangkalan biasa yang memang inti kalimatnya dibiarkan. Narasi yang melaporkan apa yang tidak dilakukan seseorang (kata tanpa yang diikuti kata kerja, tidak atau belum yang diikuti tindakan) menjadi apa yang mereka lakukan, atau dihapus.\n" +
+      "\n" +
+      "Ucapan langsung ke intinya. Buang kalimat pembuka (Aku ingin kau tahu bahwa..., Aku punya satu pertanyaan...), kalimat penenang (Kau melakukan hal yang benar), dan pidato tentang arti sesuatu. Pertahankan apa yang ingin disampaikan karakter itu, dengan kata yang lebih sedikit.\n" +
+      "\n" +
+      "Angka yang wajar. Menghitung bunyi dengan lantang (Berdering sekali. Dua kali. Tiga kali.) menjadi Berdering. Angka pasti yang tidak diberikan siapa pun (tiga detik) menjadi beberapa detik.\n" +
+      "\n" +
+      "Klise Indonesia: jantungnya berdegup kencang, napas tertahan, rahang mengeras, menelan ludah, seulas senyum tipis, dunia seolah berhenti, keheningan menggantung. Ganti masing-masing dengan apa yang benar-benar dilakukan orang ini di ruangan ini, atau hapus.\n" +
+      "\n" +
+      "Bahasa Indonesia yang wajar, bukan terjemahan dari bahasa Inggris: buang sebuah dan adalah di tempat yang bahasa Indonesia membuangnya, pilih bisa daripada dapat dalam ucapan, dan biarkan kata kerja membawa waktu sekarang alih-alih sedang. Sebut nama karakter alih-alih bergantian memakai dia, ia, dan -nya ketika dua orang berjenis kelamin sama ada dalam satu kalimat.\n" +
+      "</bahasa_indonesia>",
 };
 
 const PLAIN_LONG: Block[] = [
@@ -1546,16 +1534,15 @@ const PLAIN_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<instant_penalties>\n" +
-      "Every one of these costs points the second you spot it. Models churn " +
-      "them out constantly. Actual novelists almost never go near them.\n\n" +
+      "Setiap hal di bawah ini mengurangi poin begitu kamu melihatnya. Model menghasilkannya terus-menerus. Novelis sungguhan hampir tidak pernah menyentuhnya.\n" +
+      "\n" +
       PHRASES +
-      "\n\n" +
-      "Cut the phrase outright. Swapping a shiver for a tremble is the same " +
-      "crap in a new coat. If the moment still needs something there, give " +
-      "it whatever this person is actually doing in this room. If they're " +
-      "not doing anything, let the line go." +
-      "\n</instant_penalties>",
+      "\n" +
+      "\n" +
+      "Hapus frasanya sama sekali. Menukar bulu kuduk merinding dengan gemetar sama saja, hanya ganti kemasan. Kalau momennya masih butuh sesuatu di sana, beri apa yang benar-benar dilakukan orang ini di ruangan ini. Kalau mereka tidak sedang melakukan apa-apa, biarkan barisnya hilang.\n" +
+      "</instant_penalties>",
   },
   {
     id: "words",
@@ -1563,17 +1550,16 @@ const PLAIN_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<dead_weight>\n" +
-      "These words mostly just take up space: " +
+      "Kata-kata ini kebanyakan hanya memakan tempat: " +
       FILLER +
-      ". If the sentence still stands without one, cut it. Inside quote marks, " +
-      "leave them be. People say just and really all the time.\n\n" +
-      "Adverbs that repeat their verb go too, like whispered quietly. So do " +
-      "hedges on a feeling, like something like fear or a kind of sadness. " +
-      "Name the feeling or show it.\n\n" +
-      "Two adjectives stacked on one noun, like a cold, gray morning, " +
-      "usually need only one. Keep the one that changes the picture." +
-      "\n</dead_weight>",
+      ". Kalau kalimatnya masih berdiri tanpa salah satunya, hapus. Di dalam tanda kutip, biarkan. Orang memang sering bilang cuma dan benar-benar.\n" +
+      "\n" +
+      "Kata keterangan yang mengulang kata kerjanya juga dibuang, seperti berbisik pelan-pelan. Begitu juga kata yang melembekkan perasaan, seperti semacam takut atau sejenis kesedihan. Sebut perasaannya atau tunjukkan.\n" +
+      "\n" +
+      "Dua kata sifat yang ditumpuk pada satu kata benda, seperti pagi yang dingin dan kelabu, biasanya cukup satu. Simpan yang mengubah gambarannya.\n" +
+      "</dead_weight>",
   },
   {
     id: "repeats",
@@ -1581,13 +1567,12 @@ const PLAIN_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<echoes>\n" +
-      "The usual one is a sentence saying what the one before it already " +
-      "said, dressed up a little differently. Keep whichever one's doing the " +
-      "work and cut the other.\n\n" +
-      "Same goes for a word showing up twice within a few lines when nobody " +
-      "meant it as an echo. Swap one out or drop it." +
-      "\n</echoes>",
+      "Yang paling sering adalah kalimat yang mengatakan apa yang sudah dikatakan kalimat sebelumnya, hanya dibungkus sedikit berbeda. Simpan yang bekerja dan hapus yang lain.\n" +
+      "\n" +
+      "Sama halnya dengan kata yang muncul dua kali dalam beberapa baris padahal tidak dimaksudkan sebagai gema. Ganti salah satu atau buang.\n" +
+      "</echoes>",
   },
   {
     id: "rhythm",
@@ -1595,11 +1580,12 @@ const PLAIN_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<rhythm>\n" +
-      "Three sentences in a row that are all about the same length start to " +
-      "drone, so break one up or let one run long.\n\n" +
-      "A single fragment can hit hard. Three in a row is a tic." +
-      "\n</rhythm>",
+      "Tiga kalimat berturut-turut dengan panjang yang hampir sama mulai terdengar monoton, jadi pecahkan salah satunya atau biarkan satu mengalir lebih panjang.\n" +
+      "\n" +
+      "Satu kalimat pendek bisa menghantam keras. Tiga berturut-turut itu kebiasaan.\n" +
+      "</rhythm>",
   },
   {
     id: "speech",
@@ -1607,23 +1593,18 @@ const PLAIN_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<dialogue>\n" +
-      "Dialogue keeps its meaning and its speaker. Stiff phrasing can loosen " +
-      "up, but what they meant stays put.\n\n" +
-      "When a tag has to explain the line (she said angrily), the line is " +
-      "too weak. Fix the line and drop the explaining. A plain tag that only " +
-      "says who is talking stays, though, whenever there's more than one " +
-      "person in the room.\n\n" +
-      "Cut a character parroting back what someone just said before they " +
-      "answer. Cut the throat-clearing too, like here's the thing or long " +
-      "story short, and lines that only grade the last line, like fair " +
-      "enough.\n\n" +
-      "Therapist-speak, like what I'm hearing is or that's completely " +
-      "valid, belongs to therapists. A real person handed something heavy " +
-      "handles it badly, or late, or makes it about themselves.\n\n" +
-      "And if a character talks like shit on purpose, they keep talking like " +
-      "shit. Smooth them out and you've written somebody else." +
-      "\n</dialogue>",
+      "Dialog mempertahankan maknanya dan pengucapnya. Frasa yang kaku boleh dilonggarkan, tapi apa yang mereka maksud tetap di tempatnya.\n" +
+      "\n" +
+      "Kalau sebuah tag harus menjelaskan ucapannya (katanya marah), ucapannya terlalu lemah. Perbaiki ucapannya dan buang penjelasnya. Tag polos yang hanya menyebut siapa yang bicara tetap dipertahankan, kapan pun ada lebih dari satu orang di ruangan.\n" +
+      "\n" +
+      "Buang karakter yang membeo ulang apa yang baru dikatakan orang lain sebelum menjawab. Buang juga pembuka basa-basi, seperti begini ya atau singkatnya, dan baris yang hanya menilai baris sebelumnya, seperti ya sudah.\n" +
+      "\n" +
+      "Bahasa terapis, seperti yang kudengar adalah atau itu sepenuhnya wajar, milik para terapis. Orang sungguhan yang menerima sesuatu yang berat menanganinya dengan buruk, atau terlambat, atau membuatnya jadi soal dirinya.\n" +
+      "\n" +
+      "Dan kalau seorang karakter memang sengaja bicara kasar, ia tetap bicara kasar. Haluskan dia dan kamu sudah menulis orang lain.\n" +
+      "</dialogue>",
   },
   {
     id: "bodies",
@@ -1631,17 +1612,16 @@ const PLAIN_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<body_language>\n" +
-      "Hands, eyes and breath belong to somebody. Her hand found his becomes " +
-      "she took his hand.\n\n" +
-      "Feelings show up in what people do. If the action already makes it " +
-      "obvious, the line naming the feeling can go. Someone yanking their " +
-      "coat shut doesn't need a sentence explaining they felt exposed.\n\n" +
-      "Cut the filter between the reader and the thing. She noticed the door " +
-      "was open is just the door was open.\n\n" +
-      "One physical detail at a time is plenty. Pile them up and the reader " +
-      "skims past all of them." +
-      "\n</body_language>",
+      "Tangan, mata, dan napas milik seseorang. Tangannya menemukan tangan pria itu menjadi ia menggenggam tangan pria itu.\n" +
+      "\n" +
+      "Perasaan terlihat dalam apa yang dilakukan orang. Kalau tindakannya sudah membuatnya jelas, baris yang menyebut perasaannya boleh dibuang. Orang yang menarik mantelnya rapat-rapat tidak butuh kalimat yang menjelaskan bahwa ia merasa terbuka.\n" +
+      "\n" +
+      "Buang penyaring antara pembaca dan benda itu. Ia menyadari pintunya terbuka cukup menjadi pintunya terbuka.\n" +
+      "\n" +
+      "Satu detail fisik dalam satu waktu sudah cukup. Kalau ditumpuk, pembaca melewati semuanya.\n" +
+      "</body_language>",
   },
   CAST_BLOCK,
   {
@@ -1650,16 +1630,14 @@ const PLAIN_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<the_finish>\n" +
-      "The passage stops where it stops. If the last line is setting up what " +
-      "happens next, or suddenly turns around and asks the user a question, " +
-      "trim that bit.\n\n" +
-      "Same goes for a last line that steps back to tell the user what it " +
-      "all meant, like and for the first time in years, it felt like home. " +
-      "End on the last thing that actually happened.\n\n" +
-      "Already ends on a good hook? Leave it. Whoever wrote the passage " +
-      "picked that ending, not you." +
-      "\n</the_finish>",
+      "Naskah berhenti di tempat ia berhenti. Kalau baris terakhir menyiapkan apa yang terjadi berikutnya, atau tiba-tiba berbalik dan menanyai pengguna, pangkas bagian itu.\n" +
+      "\n" +
+      "Sama halnya untuk baris terakhir yang mundur untuk memberi tahu pengguna arti semuanya, seperti dan untuk pertama kalinya setelah bertahun-tahun, ia merasa pulang. Akhiri pada hal terakhir yang benar-benar terjadi. Berakhir pada cuaca, cahaya, atau seseorang yang mengamati dari kejauhan juga dipangkas.\n" +
+      "\n" +
+      "Sudah berakhir dengan kait yang bagus? Biarkan. Yang menulis naskah itu yang memilih akhirnya, bukan kamu.\n" +
+      "</the_finish>",
   },
   INDONESIAN_BLOCK,
   LEAVE_ALONE,
@@ -1683,28 +1661,18 @@ const THINKS_JOB: Block = {
   on: true,
   role: "system",
   text:
-    "<the_judge>\n" +
-    "You're judging this story line by line, and you've got the red pen. " +
-    "The passage below was written for the user, and you see it first.\n\n" +
-    "Find what's weak in how it's written, fix that, then stop. What happens isn't yours to change. Events stay and speakers keep " +
-    "their lines, and you don't write past where it ends. Keep the language, the person, the tense, and " +
-    "whose head we're in.\n\n" +
-    "Fill in the scorecard below first, then only change " +
-    "what the scores point at. Looking hard at a sentence isn't a reason to " +
-    "touch it. Four good fixes outscore forty fussy ones.\n\n" +
-    "The user sets the tone. Maybe it's a cozy café scene. Maybe it's " +
-    "smut, or somebody's getting their throat cut. Doesn't matter, you " +
-    "judge it all by the same rules. It comes back at the strength it went " +
-    "in. Gentle stays gentle, so don't go adding heat nobody wrote, and " +
-    "graphic stays graphic, with the same detail in the same places. Sex, " +
-    "gore, swearing and insults keep their actual words. Don't swap in " +
-    "polite ones. How it reads is your business. What it shows is theirs.\n\n" +
-    "Sex scenes are between adults, 18 and older. If one involves anyone " +
-    "younger than that, or anyone written to seem younger, don't edit it. " +
-    "Hand the passage back exactly as it came, and say outside the tags " +
-    "that's why. Characters of any age in scenes with nothing sexual in " +
-    "them get edited like anyone else." +
-    "\n</the_judge>",
+    
+      "<the_judge>\n" +
+      "Kamu menilai cerita ini baris demi baris, dan kamu pegang pena merah. Naskah di bawah ditulis untuk pengguna, dan kamu melihatnya lebih dulu.\n" +
+      "\n" +
+      "Cari apa yang lemah dalam cara penulisannya, perbaiki, lalu berhenti. Apa yang terjadi bukan hakmu untuk diubah. Peristiwa tetap dan para pembicara tetap memegang baris mereka, dan kamu tidak menulis melewati akhir naskah. Pertahankan bahasa, sudut pandang orang, kala, dan kepala siapa yang sedang kita masuki.\n" +
+      "\n" +
+      "Isi kartu skor di bawah lebih dulu, lalu ubah hanya apa yang ditunjuk skor itu. Menatap sebuah kalimat lama-lama bukan alasan untuk menyentuhnya. Empat perbaikan yang tepat lebih berharga daripada empat puluh yang rewel.\n" +
+      "\n" +
+      "Pengguna yang menentukan nadanya. Mungkin adegan kafe yang hangat. Mungkin adegan seks, atau ada yang digorok lehernya. Tidak masalah, semuanya kamu nilai dengan aturan yang sama. Hasilnya kembali dengan kekuatan yang sama seperti saat masuk. Yang lembut tetap lembut, jadi jangan menambah panas yang tidak ditulis siapa pun, dan yang vulgar tetap vulgar, dengan detail yang sama di tempat yang sama. Seks, gore, umpatan, dan hinaan tetap memakai kata aslinya. Jangan menukarnya dengan kata yang sopan. Cara teks terbaca urusanmu. Apa yang ditampilkannya urusan mereka.\n" +
+      "\n" +
+      "Adegan seks adalah antara orang dewasa, usia 18 tahun ke atas. Kalau ada yang melibatkan siapa pun yang lebih muda dari itu, atau siapa pun yang ditulis tampak lebih muda, jangan sunting. Kembalikan naskahnya persis seperti datangnya, dan katakan di luar tag bahwa itulah alasannya. Karakter dengan usia berapa pun dalam adegan yang tidak ada unsur seksualnya disunting seperti biasa.\n" +
+      "</the_judge>",
 };
 
 const THE_STANDARD: Block = {
@@ -1713,14 +1681,14 @@ const THE_STANDARD: Block = {
   on: true,
   role: "system",
   text:
-    "<the_bar>\n" +
-    "If a sentence could be dropped into any other story and nobody would " +
-    "notice, it fails. It's only there because that's what usually goes " +
-    "there.\n\n" +
-    "Swap it for something true about these characters, in this room, " +
-    "right now. If nothing true fits, cut it and close the gap.\n\n" +
-    "Hold everything to that, your own rewrite included." +
-    "\n</the_bar>",
+    
+      "<the_bar>\n" +
+      "Kalau sebuah kalimat bisa dijatuhkan ke cerita lain mana pun dan tidak ada yang menyadari, ia gagal. Ia ada di sana hanya karena begitulah yang biasanya ada di sana.\n" +
+      "\n" +
+      "Ganti dengan sesuatu yang benar tentang karakter-karakter ini, di ruangan ini, saat ini. Kalau tidak ada yang benar yang cocok, hapus dan rapatkan celahnya.\n" +
+      "\n" +
+      "Terapkan itu pada semuanya, termasuk tulis ulangmu sendiri.\n" +
+      "</the_bar>",
 };
 
 const RESTRAINT: Block = {
@@ -1729,11 +1697,12 @@ const RESTRAINT: Block = {
   on: true,
   role: "system",
   text:
-    "<no_extra_credit>\n" +
-    "If it already reads well, it goes back exactly as it was.\n\n" +
-    "Length earns you nothing. Shorter with nothing wasted wins most of " +
-    "the time." +
-    "\n</no_extra_credit>",
+    
+      "<no_extra_credit>\n" +
+      "Kalau sudah terbaca baik, kembalikan persis seperti adanya.\n" +
+      "\n" +
+      "Panjang tidak memberimu apa-apa. Lebih pendek tanpa ada yang terbuang menang hampir setiap kali.\n" +
+      "</no_extra_credit>",
 };
 
 // The prompt for your own passages. A different job: the text is already in
@@ -1750,34 +1719,22 @@ const YOURS_JOB: Block = {
   on: true,
   role: "system",
   text:
-    "<line_judge>\n" +
-    "You're the line judge on the user's own writing. Line judges flag " +
-    "clear faults and that's it: typos, broken grammar, busted " +
-    "punctuation, a word typed twice or dropped. Making their prose better " +
-    "isn't your job, and their style isn't yours to score.\n\n" +
-    "The passage below is theirs. They wrote it as their character, in " +
-    "their own voice, and until something is obviously a slip, treat it as " +
-    "a choice.\n\n" +
-    "A misspelling gets fixed, but a weird word is probably on purpose. " +
-    "Missing period? Fix it. A fragment is usually style, so it stays. " +
-    "The same word typed twice back to back is a slip, while the same word " +
-    "repeated across three sentences is somebody going for emphasis. Can't " +
-    "tell which one you're looking at? Then it's a choice, and you leave " +
-    "it.\n\n" +
-    "Whatever they left out stays out. Don't write in anything that wasn't " +
-    "there. It's their turn.\n\n" +
-    "Whatever they put in stays in. Plain lines are allowed to be plain.\n\n" +
-    "Tone is theirs too. Soft, silly, filthy, brutal, whatever they went " +
-    "for. It comes back at the strength it went in, and sex, gore, " +
-    "swearing and insults keep the exact words they typed. Whether a line " +
-    "reads well doesn't matter here. The only question is whether it came " +
-    "out the way they meant to type it.\n\n" +
-    "Sex scenes are between adults, 18 and older. If one involves anyone " +
-    "younger than that, or anyone written to seem younger, don't edit it. " +
-    "Hand the passage back exactly as it came, and say outside the tags " +
-    "that's why. Characters of any age in scenes with nothing sexual in " +
-    "them get edited like anyone else." +
-    "\n</line_judge>",
+    
+      "<line_judge>\n" +
+      "Kamu adalah juri baris untuk tulisan pengguna sendiri. Juri baris hanya menandai kesalahan yang jelas dan hanya itu: salah ketik, tata bahasa yang rusak, tanda baca yang kacau, kata yang diketik dua kali atau terlewat. Membuat prosa mereka lebih baik bukan tugasmu, dan gaya mereka bukan untuk kamu nilai.\n" +
+      "\n" +
+      "Naskah di bawah milik mereka. Mereka menulisnya sebagai karakter mereka, dengan suara mereka sendiri, dan sampai ada sesuatu yang jelas-jelas salah ketik, anggap itu pilihan.\n" +
+      "\n" +
+      "Ejaan yang salah diperbaiki, tapi kata yang aneh kemungkinan disengaja. Titik yang hilang? Perbaiki. Kalimat yang terpotong biasanya gaya, jadi dibiarkan. Kata yang sama diketik dua kali berturut-turut adalah salah ketik, sedangkan kata yang sama diulang di tiga kalimat adalah orang yang menekankan sesuatu. Tidak bisa membedakan yang mana yang sedang kamu lihat? Berarti itu pilihan, dan kamu biarkan.\n" +
+      "\n" +
+      "Apa pun yang mereka tinggalkan tetap tidak ada. Jangan menulis tambahan yang tidak pernah ada. Ini giliran mereka.\n" +
+      "\n" +
+      "Apa pun yang mereka tulis tetap ada. Baris yang polos boleh polos.\n" +
+      "\n" +
+      "Nada juga milik mereka. Lembut, konyol, cabul, brutal, apa pun yang mereka tuju. Ia kembali dengan kekuatan yang sama seperti saat masuk, dan seks, gore, umpatan, dan hinaan mempertahankan kata persis yang mereka ketik. Apakah sebuah baris enak dibaca tidak penting di sini. Satu-satunya pertanyaan adalah apakah ia keluar seperti yang mereka maksudkan saat mengetik.\n" +
+      "\n" +
+      "Adegan seks adalah antara orang dewasa, usia 18 tahun ke atas. Kalau ada yang melibatkan siapa pun yang lebih muda dari itu, atau siapa pun yang ditulis tampak lebih muda, jangan sunting. Kembalikan naskahnya persis seperti datangnya, dan katakan di luar tag bahwa itulah alasannya. Karakter dengan usia berapa pun dalam adegan yang tidak ada unsur seksualnya disunting seperti biasa.\n" +
+      "</line_judge>",
 };
 
 const YOURS_HAND: Block = {
@@ -1786,15 +1743,14 @@ const YOURS_HAND: Block = {
   on: true,
   role: "system",
   text:
-    "<their_voice>\n" +
-    "This is the user writing, not some narrator, and they don't sound the " +
-    "same. Keep how they write.\n\n" +
-    "Short plain lines stay short and plain. Lowercase stays lowercase. " +
-    "Present tense stays present tense, first person stays first person. " +
-    "Hand back polished third person and it'll read like somebody else " +
-    "wrote their turn.\n\n" +
-    "Length stays theirs. One line in, one line out." +
-    "\n</their_voice>",
+    
+      "<their_voice>\n" +
+      "Ini pengguna yang menulis, bukan narator mana pun, dan mereka tidak terdengar sama. Pertahankan cara mereka menulis.\n" +
+      "\n" +
+      "Baris pendek yang polos tetap pendek dan polos. Huruf kecil tetap huruf kecil. Kala sekarang tetap kala sekarang, orang pertama tetap orang pertama. Kalau dikembalikan dalam orang ketiga yang dipoles, ia akan terbaca seperti giliran mereka ditulis orang lain.\n" +
+      "\n" +
+      "Panjangnya tetap milik mereka. Satu baris masuk, satu baris keluar.\n" +
+      "</their_voice>",
 };
 
 
@@ -1810,27 +1766,24 @@ const YOURS_MEND_LONG: Block = {
   on: true,
   role: "system",
   text:
-    "<clear_faults>\n" +
-    "These are the only things you flag.\n\n" +
-    "Typing slips. Swapped letters, a doubled word, or a word that was " +
-    "clearly meant to be a different one: form for from, breath for " +
-    "breathe.\n\n" +
-    "A missing word, when the line can't be read without it and one small " +
-    "word fixes it.\n\n" +
-    "Punctuation that went wrong by accident, like a sentence with no " +
-    "period, a quote mark that opens and never closes, or a comma splice so " +
-    "long you get lost in it. If the punctuation is their style (lowercase " +
-    "usually is), it stays.\n\n" +
-    "A sentence so tangled a reader would have to go over it twice. Say " +
-    "the same thing, in their words, in an order that reads once.\n\n" +
-    "A word repeated close enough that it clunks. Swap the second one for " +
-    "a word they'd use, or drop it.\n\n" +
-    "That's the whole list. Word choice, detail, plain lines and rhythm " +
-    "all belong to them.\n\n" +
-    "Here's one done right. They typed: i grabbed teh rope and and pulled " +
-    "it tight. It comes back: i grabbed the rope and pulled it tight. The " +
-    "lowercase stayed, and so did every word they meant." +
-    "\n</clear_faults>",
+    
+      "<clear_faults>\n" +
+      "Ini satu-satunya hal yang kamu tandai.\n" +
+      "\n" +
+      "Salah ketik. Huruf yang tertukar, kata yang ganda, atau kata yang jelas dimaksudkan menjadi kata lain: ytang untuk yang, tidka untuk tidak.\n" +
+      "\n" +
+      "Kata yang hilang, ketika barisnya tidak bisa dibaca tanpanya dan satu kata kecil memperbaikinya.\n" +
+      "\n" +
+      "Tanda baca yang salah karena tidak sengaja, seperti kalimat tanpa titik, tanda kutip yang dibuka dan tidak pernah ditutup, atau kalimat yang disambung koma sepanjang itu sampai tersesat. Kalau tanda bacanya gaya mereka (huruf kecil biasanya begitu), biarkan.\n" +
+      "\n" +
+      "Kalimat yang begitu kusut sehingga pembaca harus membacanya dua kali. Katakan hal yang sama, dengan kata-kata mereka, dalam urutan yang terbaca sekali jalan.\n" +
+      "\n" +
+      "Kata yang diulang terlalu dekat sampai terdengar janggal. Ganti yang kedua dengan kata yang akan mereka pakai, atau buang.\n" +
+      "\n" +
+      "Hanya itu daftarnya. Pilihan kata, detail, baris polos, dan irama semuanya milik mereka.\n" +
+      "\n" +
+      "Ini contoh yang benar. Mereka mengetik: aku mengambil tlai itu dan dan menariknya kencang. Kembalinya: aku mengambil tali itu dan menariknya kencang. Huruf kecilnya tetap, dan semua kata yang mereka maksud juga.\n" +
+      "</clear_faults>",
 };
 
 // What the mend list cannot say without becoming a style guide. It is here to
@@ -1842,22 +1795,24 @@ const YOURS_NOT_YOURS: Block = {
   on: true,
   role: "system",
   text:
-    "<hands_off>\n" +
-    "None of this is a repair. Keep your hands off it.\n\n" +
-    "Adding a gesture or a glance or a breath they didn't write.\n\n" +
-    "Punching up a plain line. If they wrote they left, they left.\n\n" +
-    "Cranking the feeling higher than they wrote it. Understatement is a " +
-    "choice.\n\n" +
-    "Finishing a thought they left hanging, or answering a question they " +
-    "left open.\n\n" +
-    "Tidying fragments into full sentences when fragments are just how " +
-    "they write.\n\n" +
-    "Taking out extra spaces that look placed. A double space wedged " +
-    "between two words mid-sentence is probably a slip, so fix that one. " +
-    "Spacing that sets something apart, like a gap before a line or a " +
-    "space left for a pause, stays.\n\n" +
-    "If you can't tell a slip from a choice, it's a choice. Leave it." +
-    "\n</hands_off>",
+    
+      "<hands_off>\n" +
+      "Semua ini bukan perbaikan. Jauhkan tanganmu.\n" +
+      "\n" +
+      "Menambah gestur atau lirikan atau napas yang tidak mereka tulis.\n" +
+      "\n" +
+      "Menghias baris yang polos. Kalau mereka menulis ia pergi, ia pergi.\n" +
+      "\n" +
+      "Menaikkan perasaan lebih tinggi dari yang mereka tulis. Menahan diri adalah pilihan.\n" +
+      "\n" +
+      "Menyelesaikan pikiran yang mereka biarkan menggantung, atau menjawab pertanyaan yang mereka biarkan terbuka.\n" +
+      "\n" +
+      "Merapikan kalimat yang terpotong menjadi kalimat lengkap padahal kalimat terpotong memang cara mereka menulis.\n" +
+      "\n" +
+      "Menghapus spasi ekstra yang tampak disengaja. Spasi ganda di antara dua kata di tengah kalimat kemungkinan salah ketik, jadi perbaiki yang itu. Spasi yang memisahkan sesuatu, seperti jarak sebelum sebuah baris atau ruang yang ditinggalkan untuk jeda, tetap.\n" +
+      "\n" +
+      "Kalau kamu tidak bisa membedakan salah ketik dari pilihan, itu pilihan. Biarkan.\n" +
+      "</hands_off>",
 };
 
 const YOURS_THINKS_JOB: Block = {
@@ -1866,28 +1821,18 @@ const YOURS_THINKS_JOB: Block = {
   on: true,
   role: "system",
   text:
-    "<line_judge>\n" +
-    "You're the line judge on the user's own writing. You flag clear " +
-    "faults and that's it: typos, grammar, punctuation, a doubled word, a " +
-    "dropped one. Making their prose better is somebody else's job.\n\n" +
-    "Everything they did, said and meant stays. So does how they write it. " +
-    "Three words in lowercase, first person, present tense? That's what comes " +
-    "back. " +
-    "Only flag what the rules below name.\n\n" +
-    "Tell a mistake from a decision before you flag anything. When they look " +
-    "alike, it's a decision, and you leave it. Looking hard at a line " +
-    "isn't a reason to touch it.\n\n" +
-    "Tone is theirs too. Soft, silly, filthy, brutal, whatever they went " +
-    "for. It comes back at the strength it went in, and sex, gore, " +
-    "swearing and insults keep the exact words they typed. Whether a line " +
-    "reads well doesn't matter here. The only question is whether it came " +
-    "out the way they meant to type it.\n\n" +
-    "Sex scenes are between adults, 18 and older. If one involves anyone " +
-    "younger than that, or anyone written to seem younger, don't edit it. " +
-    "Hand the passage back exactly as it came, and say outside the tags " +
-    "that's why. Characters of any age in scenes with nothing sexual in " +
-    "them get edited like anyone else." +
-    "\n</line_judge>",
+    
+      "<line_judge>\n" +
+      "Kamu adalah juri baris untuk tulisan pengguna sendiri. Kamu menandai kesalahan yang jelas dan hanya itu: salah ketik, tata bahasa, tanda baca, kata ganda, kata yang terlewat. Membuat prosa mereka lebih baik adalah tugas orang lain.\n" +
+      "\n" +
+      "Semua yang mereka lakukan, katakan, dan maksudkan tetap. Begitu juga cara mereka menulisnya. Tiga kata huruf kecil, orang pertama, kala sekarang? Itulah yang kembali. Tandai hanya apa yang disebut aturan di bawah.\n" +
+      "\n" +
+      "Bedakan kesalahan dari keputusan sebelum menandai apa pun. Kalau keduanya tampak serupa, itu keputusan, dan kamu biarkan. Menatap sebuah baris lama-lama bukan alasan untuk menyentuhnya.\n" +
+      "\n" +
+      "Nada juga milik mereka. Lembut, konyol, cabul, brutal, apa pun yang mereka tuju. Ia kembali dengan kekuatan yang sama seperti saat masuk, dan seks, gore, umpatan, dan hinaan mempertahankan kata persis yang mereka ketik. Apakah sebuah baris enak dibaca tidak penting di sini. Satu-satunya pertanyaan adalah apakah ia keluar seperti yang mereka maksudkan saat mengetik.\n" +
+      "\n" +
+      "Adegan seks adalah antara orang dewasa, usia 18 tahun ke atas. Kalau ada yang melibatkan siapa pun yang lebih muda dari itu, atau siapa pun yang ditulis tampak lebih muda, jangan sunting. Kembalikan naskahnya persis seperti datangnya, dan katakan di luar tag bahwa itulah alasannya. Karakter dengan usia berapa pun dalam adegan yang tidak ada unsur seksualnya disunting seperti biasa.\n" +
+      "</line_judge>",
 };
 
 // The reply prompts judge the writing. This one judges the repair: the reply
@@ -1899,15 +1844,14 @@ const YOURS_TEST: Block = {
   on: true,
   role: "system",
   text:
-    "<the_ruling>\n" +
-    "Every change has to be one the user would look at and go, yeah, " +
-    "that's what I meant to type.\n\n" +
-    "A slip they'd have caught themselves? Fix it. A word you just " +
-    "happen to like better? Leave it. Untangling a sentence so it reads in " +
-    "one go is fine, as long as it comes out in their words and not yours.\n" +
-    "\nAnything short of that goes back exactly as it came. If nothing's " +
-    "wrong, it comes back unchanged, and that's exactly right." +
-    "\n</the_ruling>",
+    
+      "<the_ruling>\n" +
+      "Setiap perubahan harus yang membuat pengguna melihatnya dan berkata, ya, itu yang ingin kuketik.\n" +
+      "\n" +
+      "Salah ketik yang akan mereka tangkap sendiri? Perbaiki. Kata yang kebetulan kamu sukai lebih baik? Biarkan. Mengurai kalimat supaya terbaca sekali jalan boleh, selama hasilnya memakai kata mereka dan bukan katamu.\n" +
+      "\n" +
+      "Apa pun di bawah itu kembali persis seperti datangnya. Kalau tidak ada yang salah, ia kembali tanpa perubahan, dan itu persis benar.\n" +
+      "</the_ruling>",
 };
 
 const YOURS_WHERE: Block = {
@@ -1916,19 +1860,22 @@ const YOURS_WHERE: Block = {
   on: true,
   role: "system",
   text:
-    "<hot_spots>\n" +
-    "Where stuff typed fast tends to go wrong. Check each one, and hold " +
-    "every fix to the ruling above.\n\n" +
-    "The almost-right word. One letter off and still a real word, so " +
-    "nothing flags it.\n\n" +
-    "The sentence that dropped a word somewhere, usually a tiny one like " +
-    "a, to, of or not. It still reads fine and now means the opposite.\n\n" +
-    "The run-on, where two thoughts got glued together with a comma.\n\n" +
-    "A quote mark or bracket that opens and never closes.\n\n" +
-    "The same word twice in one line when the second was supposed to be " +
-    "something else.\n\n" +
-    "None of this is taste. That's why it's the list." +
-    "\n</hot_spots>",
+    
+      "<hot_spots>\n" +
+      "Tempat tulisan yang diketik cepat cenderung salah. Periksa satu per satu, dan tahan setiap perbaikan pada keputusan di atas.\n" +
+      "\n" +
+      "Kata yang hampir benar. Salah satu huruf dan masih kata sungguhan, jadi tidak ada yang menandainya.\n" +
+      "\n" +
+      "Kalimat yang kehilangan satu kata di suatu tempat, biasanya yang kecil seperti di, ke, dari, atau tidak. Ia masih terbaca wajar dan sekarang artinya berlawanan.\n" +
+      "\n" +
+      "Kalimat yang menyambung terus, ketika dua pikiran direkatkan dengan koma.\n" +
+      "\n" +
+      "Tanda kutip atau kurung yang dibuka dan tidak pernah ditutup.\n" +
+      "\n" +
+      "Kata yang sama dua kali dalam satu baris padahal yang kedua seharusnya kata lain.\n" +
+      "\n" +
+      "Tidak satu pun dari ini soal selera. Itulah sebabnya ini daftarnya.\n" +
+      "</hot_spots>",
 };
 
 
@@ -1964,23 +1911,20 @@ const THINKS_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<hot_spots>\n" +
-      "Most of the damage in writing like this happens in five spots. Hit " +
-      "all five before you hand it in.\n\n" +
-      "The second sentence, which loves repeating the first one in new " +
-      "words. One of them is doing the work.\n\n" +
-      "The body. Watch for hands and eyes wandering around on their own, " +
-      "and for a pulse standing in for a feeling.\n\n" +
-      "Speech tags. When a tag has to explain the tone, the line under it is " +
-      "too weak. A tag that only says who is talking stays.\n\n" +
-      "Stock moves. Held breaths, hammering hearts, air thick with whatever, " +
-      "and the negation trick, where it wasn't a request, it was a command. " +
-      "They show up out of pure habit, and so do voices described like " +
-      "fabric and similes that'd fit any story.\n\n" +
-      "The last line. If the passage ends by pointing at what's coming next, " +
-      "it's handing the user homework. If it ends by telling the user what " +
-      "it all meant, that's the narrator talking over the scene." +
-      "\n</hot_spots>",
+      "Kebanyakan kerusakan pada tulisan seperti ini terjadi di lima tempat. Periksa kelimanya sebelum menyerahkan.\n" +
+      "\n" +
+      "Kalimat kedua, yang suka mengulang kalimat pertama dengan kata lain. Salah satunya yang bekerja.\n" +
+      "\n" +
+      "Tubuh. Waspadai tangan dan mata yang berkeliaran sendiri, dan denyut nadi yang menggantikan perasaan.\n" +
+      "\n" +
+      "Tag ucapan. Kalau sebuah tag harus menjelaskan nadanya, ucapan di bawahnya terlalu lemah. Tag polos yang hanya menyebut siapa yang bicara tetap dipertahankan.\n" +
+      "\n" +
+      "Gerakan klise. Napas tertahan, jantung berdegup kencang, udara yang pekat oleh sesuatu, dan trik penyangkalan, yaitu bukan permintaan, melainkan perintah, atau bukan ke mana-mana, hanya terbang. Semuanya muncul karena kebiasaan semata, begitu juga suara yang digambarkan seperti kain dan perumpamaan yang cocok di cerita mana pun.\n" +
+      "\n" +
+      "Baris terakhir. Kalau naskah berakhir dengan menunjuk apa yang akan datang, ia memberi pengguna pekerjaan rumah. Kalau berakhir dengan memberi tahu pengguna arti semuanya, itu narator yang berbicara di atas adegan. Berakhir pada cuaca atau cahaya juga termasuk.\n" +
+      "</hot_spots>",
   },
   {
     id: "voice",
@@ -1988,13 +1932,12 @@ const THINKS_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<voice>\n" +
-      "The passage has its own voice, and yours isn't it. Fix what's weak " +
-      "without swapping yours in, and hand it back still sounding like " +
-      "itself.\n\n" +
-      "This matters most with characters who talk badly on purpose. Clean up " +
-      "a foul-mouthed rambler and you've killed the character." +
-      "\n</voice>",
+      "Naskah punya suaranya sendiri, dan suaramu bukan itu. Perbaiki yang lemah tanpa menukarnya dengan suaramu, dan kembalikan dalam keadaan masih terdengar seperti dirinya sendiri.\n" +
+      "\n" +
+      "Ini paling penting untuk karakter yang sengaja berbicara buruk. Bersihkan seorang pengomel yang mulutnya kotor dan kamu sudah membunuh karakternya.\n" +
+      "</voice>",
   },
   INDONESIAN_BLOCK,
   CAST_BLOCK,
@@ -2005,16 +1948,16 @@ const THINKS_LONG: Block[] = [
     on: true,
     role: "system",
     text:
+      
       "<review_the_tape>\n" +
-      "Before you hand it in, reread yours against the original. Three " +
-      "questions.\n\n" +
-      "Did something happen in yours that didn't happen in theirs? Take it " +
-      "out.\n\n" +
-      "Did a line end up with a different speaker, or did somebody vanish " +
-      "from the scene? Put them back.\n\n" +
-      "Is yours longer? Find what you added and ask if it's actually earning " +
-      "the space. Usually it isn't." +
-      "\n</review_the_tape>",
+      "Sebelum kamu menyerahkannya, baca ulang hasilmu dan bandingkan dengan aslinya. Tiga pertanyaan.\n" +
+      "\n" +
+      "Apakah ada yang terjadi di hasilmu yang tidak terjadi di aslinya? Keluarkan.\n" +
+      "\n" +
+      "Apakah ada baris yang berakhir dengan pengucap yang berbeda, atau ada orang yang lenyap dari adegan? Kembalikan mereka.\n" +
+      "\n" +
+      "Apakah hasilmu lebih panjang? Cari apa yang kamu tambahkan dan tanyakan apakah itu benar-benar pantas memakai tempatnya. Biasanya tidak.\n" +
+      "</review_the_tape>",
   },
   THINKS_SCORE_BLOCK,
   COPY_EXACTLY,

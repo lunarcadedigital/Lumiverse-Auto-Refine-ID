@@ -7,8 +7,9 @@ the original author.
 
 ## What changed
 
-Only text in `src/frontend.ts` (and the matching `dist/frontend.js`,
-rebuilt with `tsc`), plus one list in `docs/two-models.md`:
+The program code is the same as upstream. The changes are prompt and check text in
+`src/frontend.ts` (and the matching `dist/frontend.js`, rebuilt with `tsc`), the
+docs and tests that quote that text, the README, and the repository links:
 
 1. **`JUDGE_CHECKS`** (what the second model checks): 7 new checks for Indonesian,
    so the list is 14 long. They cover contrast framing ("Bukan ke mana-mana. Hanya
@@ -19,18 +20,27 @@ rebuilt with `tsc`), plus one list in `docs/two-models.md`:
    Indonesian groups of the same kinds as the English ones.
 3. **`FILLER`**: a few Indonesian filler words (tiba-tiba, perlahan, sedikit,
    seolah-olah, sepertinya, tampaknya, benar-benar, sungguh, nyaris).
-4. **A new prompt block, "Bahasa Indonesia"**, added to the two built-in reply prompts
+4. **All built-in prompt text is in Indonesian** (the four prompts: A judge, A judge
+   that thinks, A line judge, A line judge that thinks). Block names, block ids and
+   tags such as `<instant_penalties>` stay in English, because the docs and tests
+   refer to them. The macros, the `<REFINED>` and `<REFINE_NOTES>` tags and the
+   `[[AR1]]` tokens are unchanged. The tests that pinned English phrases now pin
+   the Indonesian ones. The phrase lists keep their English examples, after the
+   Indonesian ones, for a passage written in English. The paragraph about who a sex
+   scene is between keeps its meaning and is quoted in `docs/prompt.md`.
+5. **A new prompt block, "Bahasa Indonesia"**, added to the two built-in reply prompts
    (A judge, and A judge that thinks), right after The Finish and after Voice. It
    keeps the rewrite in Indonesian and in the register the passage already has,
    turns a denial plus its answer into the answer alone (with before and after
    pairs), cuts announcing and soothing lines, plain numbers, stock Indonesian
-   phrases, and translated-sounding wording. The line judges for your own
-   messages are unchanged.
-5. **`docs/two-models.md`**: the list of checks, kept identical to the code, as the
+   phrases, and translated-sounding wording. The two line judges, for your own
+   messages, do not get this block.
+6. **`docs/two-models.md`**: the list of checks, kept identical to the code, as the
    test suite requires.
 
-Nothing else was touched. The permissions, the manifest, the version and the
-backend are the same as upstream.
+The permissions, the version and the backend are the same as upstream. The
+manifest and `package.json` point to this repository instead of upstream, and
+`README.md` is in Indonesian.
 
 ## Checks
 
