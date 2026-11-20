@@ -15,6 +15,17 @@ describe("the defaults said to have moved", () => {
     expect(Array.isArray(MOVED_DEFAULTS)).toBe(true);
   });
 
+  // The checks and the notes that go with them were rewritten in Indonesian.
+  // A reader still holding the English text is told, with a button to take the
+  // new one.
+  test("the English checks and notes are covered, so a reader on them is told", () => {
+    const keys = ["judgeChecks", "judgeBeforeChecks", "judgeWornCheck", "judgeFoundLead", "protectNote"];
+    for (const k of keys) expect({ key: k, rows: MOVED_DEFAULTS.filter((m: any) => m.key === k).length > 0 }).toEqual({ key: k, rows: true });
+    // Two old lists for the checks: the original one and the one with seven added.
+    expect(MOVED_DEFAULTS.filter((m: any) => m.key === "judgeChecks").length).toBe(2);
+    for (const m of MOVED_DEFAULTS.filter((x: any) => x.key === "judgeChecks")) expect(String(m.was)).toContain("`reply` uses the same phrase");
+  });
+
   test("each row names a setting that exists", () => {
     for (const m of MOVED_DEFAULTS) expect(Object.keys(CONFIG)).toContain(m.key);
   });

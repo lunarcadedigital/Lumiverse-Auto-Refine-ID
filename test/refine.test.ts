@@ -1181,8 +1181,8 @@ test("{{checks_found}} lists the checks that reached the line, strongest first",
     await wait(50);
     const text = sentText(h);
     expect(text).toContain("<found>");
-    expect(text).toContain("Treat each one as a lead to check.");
-    expect(text).toContain("line of 30%");
+    expect(text).toContain("Perlakukan tiap pemeriksaan sebagai petunjuk yang perlu dicek.");
+    expect(text).toContain("ambang pengguna sebesar 30%");
     const first = text.indexOf("- reply uses stock phrases. (90%)");
     const second = text.indexOf("- reply repeats itself. (60%)");
     expect(first).toBeGreaterThan(-1);
@@ -1201,7 +1201,7 @@ test("the line is the reader's own, not a fixed half", async () => {
     await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
     await wait(50);
     const text = sentText(h);
-    expect(text).toContain("line of 65%");
+    expect(text).toContain("ambang pengguna sebesar 65%");
     expect(text).toContain("- reply uses stock phrases. (70%)");
     expect(text).not.toContain("repeats itself");
   });
@@ -2855,8 +2855,8 @@ describe("seeing what gets sent", () => {
       .find((m) => m.type === "prompt_preview")
       .messages.map((m: any) => m.content)
       .join("\n");
-    expect(whole).toContain("tokens shaped like");
-    expect(whole).toContain("unchanged and in the same place");
+    expect(whole).toContain("token berbentuk");
+    expect(whole).toContain("tanpa diubah dan di tempat yang sama");
   });
 
   // Nothing to protect, nothing to say about protecting it.
@@ -2868,7 +2868,7 @@ describe("seeing what gets sent", () => {
       .find((m) => m.type === "prompt_preview")
       .messages.map((m: any) => m.content)
       .join("\n");
-    expect(whole).not.toContain("tokens shaped like");
+    expect(whole).not.toContain("token berbentuk");
   });
 
   // The note is the reader's to change, on the Context tab. Their own wording
@@ -2887,19 +2887,19 @@ describe("seeing what gets sent", () => {
   test("a note of the reader's own is sent in place of the built-in one", async () => {
     const whole = await previewText({ protectNote: "Keep every [[AR1]] where it stands, spelled the same." });
     expect(whole).toContain("Keep every [[AR1]] where it stands, spelled the same.");
-    expect(whole).not.toContain("tokens shaped like");
+    expect(whole).not.toContain("token berbentuk");
   });
 
   test("and an empty note sends none", async () => {
     const whole = await previewText({ protectNote: "" });
-    expect(whole).not.toContain("tokens shaped like");
+    expect(whole).not.toContain("token berbentuk");
     expect(whole).not.toContain("[[AR1]] where it stands");
   });
 
   // A phrase from the token note and from nowhere else in a built-in prompt. The
-  // obvious one, "tokens shaped like", is no good here: What to Copy Exactly
+  // obvious one, "token berbentuk", is no good here: What to Copy Exactly
   // says it too, in every prompt, whether anything was protected or not.
-  const NOTE_ONLY = "Do not change, split, translate or remove any of them.";
+  const NOTE_ONLY = "Jangan mengubah, memecah, menerjemahkan, atau menghapus satu pun.";
 
   // The note about the tokens is a block of its own in every built-in prompt, so
   // it can carry a tag like the other macros do. The two below are the pair that

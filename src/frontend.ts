@@ -284,20 +284,18 @@ const PERMS: Array<{ id: string; label: string; why: string; without: string; fa
 // asks only about a question put to the user, which the refine always trims,
 // and not about an ending that points ahead, which The Finish keeps as a hook.
 const JUDGE_CHECKS = [
-  "`reply` uses the same phrase of three or more words twice within a few sentences.",
-  "`reply` starts three or more sentences in a row with the same word.",
-  "`reply` contains a stock phrase, such as \"a breath she didn't know she was holding\", \"a shiver ran down his spine\", \"her heart hammered\" or \"a smile that didn't reach his eyes\".",
-  "`reply` says what someone did not do or what something was not, then what they did or what it was, as in \"it wasn't a request, it was a command\" or \"she didn't just leave, she ran\".",
-  "`reply` follows an action with a comment that judges how it came out, as in \"she laughed, and it came out thin\" or \"he said it, and it sounded wrong\".",
-  "`reply` has a character start an action, then take it back, as in \"reached out, then pulled back\" or \"opened her mouth, then closed it\".",
-  "`reply` ends with a question to the user about what they do next, as in \"What do you do?\".",
-  "`reply` denies something in Indonesian, then names what it really is or does, as in \"Bukan ke mana-mana. Hanya terbang.\", \"Itu bukan kegagalan, melainkan kejujuran.\" or \"Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan.\".",
-  "`reply` narrates what a character does not do in Indonesian, as in \"Dia tidak berkedip.\" or \"Tony tidak menjawab sindiran itu.\".",
-  "`reply` has a character announce what they are about to say, as in \"Aku ingin kau tahu bahwa...\" or \"Aku punya satu pertanyaan...\".",
-  "`reply` contains a stock phrase in Indonesian, such as \"jantungnya berdegup kencang\", \"dunia seolah berhenti\", \"seulas senyum tipis\" or \"rahang mengeras\".",
-  "`reply` counts a sound or a knock one by one, as in \"Telepon berdering sekali. Dua kali. Tiga kali.\".",
-  "`reply` ends on the weather, the light, or someone watching from a distance, as in \"langit mulai berwarna lebih gelap\" or \"seseorang mengamati dari atap\".",
-  "`reply` has a character reassure or praise another in therapy language, as in \"Kau melakukan hal yang benar.\" or \"Aku di sini untukmu.\".",
+  "`reply` memakai frasa yang sama sepanjang tiga kata atau lebih dua kali dalam beberapa kalimat.",
+  "`reply` memulai tiga kalimat atau lebih berturut-turut dengan kata yang sama.",
+  "`reply` memuat frasa klise, seperti \"jantungnya berdegup kencang\", \"napas tertahan\", \"seulas senyum tipis\", \"dunia seolah berhenti\" atau \"rahang mengeras\".",
+  "`reply` menyangkal sesuatu lalu menyebut apa yang sebenarnya, seperti \"Bukan ke mana-mana. Hanya terbang.\", \"Itu bukan kegagalan, melainkan kejujuran.\" atau \"Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan.\".",
+  "`reply` mengikuti sebuah tindakan dengan komentar yang menilai hasilnya, seperti \"dia tertawa, dan suaranya terdengar tipis\" atau \"ia mengatakannya, dan kedengarannya salah\".",
+  "`reply` membuat seorang karakter memulai sebuah tindakan lalu menariknya kembali, seperti \"mengulurkan tangan, lalu menariknya\" atau \"membuka mulut, lalu menutupnya\".",
+  "`reply` berakhir dengan pertanyaan kepada pengguna tentang apa yang mereka lakukan selanjutnya, seperti \"Apa yang kamu lakukan?\".",
+  "`reply` menarasikan apa yang tidak dilakukan seorang karakter, seperti \"Dia tidak berkedip.\" atau \"Tony tidak menjawab sindiran itu.\".",
+  "`reply` membuat seorang karakter mengumumkan apa yang akan ia katakan, seperti \"Aku ingin kau tahu bahwa...\" atau \"Aku punya satu pertanyaan...\".",
+  "`reply` menghitung sebuah bunyi atau ketukan satu per satu, seperti \"Telepon berdering sekali. Dua kali. Tiga kali.\".",
+  "`reply` berakhir pada cuaca, cahaya, atau seseorang yang mengamati dari kejauhan, seperti \"langit mulai berwarna lebih gelap\" atau \"seseorang mengamati dari atap\".",
+  "`reply` membuat seorang karakter menenangkan atau memuji karakter lain dengan bahasa terapis, seperti \"Kau melakukan hal yang benar.\" atau \"Aku di sini untukmu.\".",
 ].join("\n");
 
 // More checks a reader can add to What the second model checks. Each one finds
@@ -306,14 +304,14 @@ const JUDGE_CHECKS = [
 // names something narrow, such as a feeling written as an object, or needs a
 // count, so ordinary prose and dialogue do not trip it.
 const MORE_CHECKS = [
-  "`reply` gives a feeling or a silence weight or force, as in \"the quiet pressed down on the room\" or \"her answer hit him like a slap\".",
-  "`reply` says something inside a character changed without naming what, as in \"something in him loosened\" or \"a part of her went still\".",
-  "`reply` puts a feeling into the body as if it were an object, as in \"dread pooled in his gut\" or \"guilt lodged in her throat\".",
-  "`reply` has a smell or taste that nothing in the scene gives off, such as ozone, copper or something metallic, added only for tension.",
-  "`reply` starts a sentence of narration, outside anyone's speech, with \"And yet\" or \"Everything changed\".",
-  "`reply` ends on a summary or a lesson about what the scene meant, as in \"and for the first time, he understood what home meant\".",
-  "`reply` describes how words or a silence were taken before anyone acts, as in \"the words settled between them\" or \"the question lingered\".",
-  "`reply` shrinks three or more gestures with \"small\", \"slight\" or \"faint\", as in \"a small nod\" and \"a faint smile\".",
+  "`reply` memberi sebuah perasaan atau keheningan bobot atau tenaga, seperti \"keheningan menekan ruangan\" atau \"jawabannya menghantamnya seperti tamparan\".",
+  "`reply` mengatakan ada sesuatu di dalam karakter yang berubah tanpa menyebut apa, seperti \"ada sesuatu dalam dirinya yang mengendur\" atau \"sebagian dari dirinya menjadi diam\".",
+  "`reply` menaruh sebuah perasaan di tubuh seolah-olah benda, seperti \"rasa takut mengendap di perutnya\" atau \"rasa bersalah tersangkut di tenggorokannya\".",
+  "`reply` memuat bau atau rasa yang tidak dikeluarkan oleh apa pun di adegan, seperti ozon, tembaga, atau sesuatu yang metalik, ditambahkan hanya demi ketegangan.",
+  "`reply` memulai sebuah kalimat narasi, di luar ucapan siapa pun, dengan \"Namun begitu\" atau \"Semuanya berubah\".",
+  "`reply` berakhir dengan ringkasan atau pelajaran tentang arti adegan itu, seperti \"dan untuk pertama kalinya, ia memahami arti pulang\".",
+  "`reply` menggambarkan bagaimana kata-kata atau keheningan diterima sebelum ada yang bertindak, seperti \"kata-kata itu mengendap di antara mereka\" atau \"pertanyaan itu menggantung\".",
+  "`reply` mengecilkan tiga gestur atau lebih dengan \"kecil\", \"tipis\" atau \"samar\", seperti \"anggukan kecil\" dan \"senyum samar\".",
 ].join("\n");
 
 // What the second model is asked about the reply before this one, with Also
@@ -323,16 +321,16 @@ const MORE_CHECKS = [
 // speaking first, which in a scene of two is true of nearly every reply. The
 // backend holds the same list for a reader whose settings do not carry it.
 const BEFORE_CHECKS = [
-  "`reply` has the same events happen in the same order as `previous_reply`, such as a character arriving, speaking, then turning away in both.",
-  "`reply` has a character say something they already said in `previous_reply`, in the same or other words, such as a threat or a promise made again.",
-  "`reply` describes the surroundings with details `previous_reply` already gave, such as the same light, smell or sound.",
-  "`reply` opens the same way as `previous_reply`, such as both starting on a character's face or on the weather.",
-  "`reply` ends the same way as `previous_reply`, such as both ending on a character waiting for an answer.",
+  "`reply` memuat kejadian yang sama dalam urutan yang sama dengan `previous_reply`, seperti seorang karakter tiba, berbicara, lalu berbalik pergi di keduanya.",
+  "`reply` membuat seorang karakter mengatakan sesuatu yang sudah ia katakan di `previous_reply`, dengan kata yang sama atau lain, seperti ancaman atau janji yang diulang.",
+  "`reply` menggambarkan sekeliling dengan detail yang sudah diberikan `previous_reply`, seperti cahaya, bau, atau bunyi yang sama.",
+  "`reply` dibuka dengan cara yang sama seperti `previous_reply`, seperti keduanya dimulai pada wajah seorang karakter atau pada cuaca.",
+  "`reply` berakhir dengan cara yang sama seperti `previous_reply`, seperti keduanya berakhir dengan karakter yang menunggu jawaban.",
 ].join("\n");
 
 // The check sent with the worn-out phrases, with Also check for worn-out
 // phrases on. The backend holds the same text for settings that do not carry it.
-const WORN_CHECK = "`reply` contains at least one phrase listed in `worn_phrases`.";
+const WORN_CHECK = "`reply` memuat setidaknya satu frasa yang tercantum di `worn_phrases`.";
 
 // What the refine model is told before the checks in {{checks_found}}.
 // {{second_model}} becomes the second model's name and {{checks_line}} the
@@ -340,20 +338,13 @@ const WORN_CHECK = "`reply` contains at least one phrase listed in `worn_phrases
 // the checks leads, since the second model can be wrong, and a model told to
 // fix each one would change writing that was fine.
 const FOUND_LEAD =
-  "Another model, {{second_model}}, read this passage before you and scored it against checks the user picked. " +
-  "The checks below reached the user's line of {{checks_line}}%, strongest first. " +
-  "In them, \"reply\" means the passage you are rewriting. Look at these first. " +
-  "Treat each one as a lead to check. If a check does not fit the passage, leave that part as it is. " +
-  "Everything else in these instructions still applies.";
+  "Model lain, {{second_model}}, membaca naskah ini sebelum kamu dan menilainya terhadap pemeriksaan yang dipilih pengguna. Pemeriksaan di bawah mencapai ambang pengguna sebesar {{checks_line}}%, mulai dari yang terkuat. Di dalamnya, \"reply\" berarti naskah yang sedang kamu tulis ulang. Lihat ini lebih dulu. Perlakukan tiap pemeriksaan sebagai petunjuk yang perlu dicek. Kalau sebuah pemeriksaan tidak cocok dengan naskah, biarkan bagian itu apa adanya. Semua yang lain dalam instruksi ini tetap berlaku.";
 
 // What {{protect_notes}} puts in when something was hidden. The stand-ins are
 // this extension's own, so nothing in a chat could describe them. The backend
 // holds the same text.
 const PROTECT_NOTE =
-  "Parts of this passage have been replaced with tokens shaped like [[AR1]], " +
-  "[[AR2]] and so on. Each stands in for formatting that has to survive the " +
-  "edit exactly as it is. Copy every one into your answer unchanged and in the " +
-  "same place. Do not change, split, translate or remove any of them.";
+  "Bagian dari naskah ini sudah diganti dengan token berbentuk [[AR1]], [[AR2]], dan seterusnya. Masing-masing mewakili format yang harus bertahan persis seperti adanya. Salin setiap token ke jawabanmu tanpa diubah dan di tempat yang sama. Jangan mengubah, memecah, menerjemahkan, atau menghapus satu pun.";
 
 // The notes that go with an ask made again after a failure, when Send a note
 // when it asks again is on. The backend holds the same texts.
@@ -2171,6 +2162,79 @@ const MOVED_DEFAULTS: Array<{ key: string; was: any; label: string; why: string;
     label: SWIPE_LABEL,
     why: "the built-in list now finds the arrow by the box Lumiverse puts the swipe arrows in, which works in every language. Marks no Lumiverse button has were taken out.",
     needs: { key: "asSwipe", is: true },
+  },
+  {
+    key: "judgeChecks",
+    was: [
+      "`reply` uses the same phrase of three or more words twice within a few sentences.",
+      "`reply` starts three or more sentences in a row with the same word.",
+      "`reply` contains a stock phrase, such as \"a breath she didn't know she was holding\", \"a shiver ran down his spine\", \"her heart hammered\" or \"a smile that didn't reach his eyes\".",
+      "`reply` says what someone did not do or what something was not, then what they did or what it was, as in \"it wasn't a request, it was a command\" or \"she didn't just leave, she ran\".",
+      "`reply` follows an action with a comment that judges how it came out, as in \"she laughed, and it came out thin\" or \"he said it, and it sounded wrong\".",
+      "`reply` has a character start an action, then take it back, as in \"reached out, then pulled back\" or \"opened her mouth, then closed it\".",
+      "`reply` ends with a question to the user about what they do next, as in \"What do you do?\".",
+    ].join("\n"),
+    label: "What the second model checks",
+    why: "the built-in checks are now written in Indonesian, with Indonesian examples.",
+    needs: { key: "judgeMode", is: "two" },
+  },
+  {
+    key: "judgeChecks",
+    was: [
+      "`reply` uses the same phrase of three or more words twice within a few sentences.",
+      "`reply` starts three or more sentences in a row with the same word.",
+      "`reply` contains a stock phrase, such as \"a breath she didn't know she was holding\", \"a shiver ran down his spine\", \"her heart hammered\" or \"a smile that didn't reach his eyes\".",
+      "`reply` says what someone did not do or what something was not, then what they did or what it was, as in \"it wasn't a request, it was a command\" or \"she didn't just leave, she ran\".",
+      "`reply` follows an action with a comment that judges how it came out, as in \"she laughed, and it came out thin\" or \"he said it, and it sounded wrong\".",
+      "`reply` has a character start an action, then take it back, as in \"reached out, then pulled back\" or \"opened her mouth, then closed it\".",
+      "`reply` ends with a question to the user about what they do next, as in \"What do you do?\".",
+      "`reply` denies something in Indonesian, then names what it really is or does, as in \"Bukan ke mana-mana. Hanya terbang.\", \"Itu bukan kegagalan, melainkan kejujuran.\" or \"Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan.\".",
+      "`reply` narrates what a character does not do in Indonesian, as in \"Dia tidak berkedip.\" or \"Tony tidak menjawab sindiran itu.\".",
+      "`reply` has a character announce what they are about to say, as in \"Aku ingin kau tahu bahwa...\" or \"Aku punya satu pertanyaan...\".",
+      "`reply` contains a stock phrase in Indonesian, such as \"jantungnya berdegup kencang\", \"dunia seolah berhenti\", \"seulas senyum tipis\" or \"rahang mengeras\".",
+      "`reply` counts a sound or a knock one by one, as in \"Telepon berdering sekali. Dua kali. Tiga kali.\".",
+      "`reply` ends on the weather, the light, or someone watching from a distance, as in \"langit mulai berwarna lebih gelap\" or \"seseorang mengamati dari atap\".",
+      "`reply` has a character reassure or praise another in therapy language, as in \"Kau melakukan hal yang benar.\" or \"Aku di sini untukmu.\".",
+    ].join("\n"),
+    label: "What the second model checks",
+    why: "the built-in checks are now written in Indonesian, with Indonesian examples.",
+    needs: { key: "judgeMode", is: "two" },
+  },
+  {
+    key: "judgeBeforeChecks",
+    was: [
+      "`reply` has the same events happen in the same order as `previous_reply`, such as a character arriving, speaking, then turning away in both.",
+      "`reply` has a character say something they already said in `previous_reply`, in the same or other words, such as a threat or a promise made again.",
+      "`reply` describes the surroundings with details `previous_reply` already gave, such as the same light, smell or sound.",
+      "`reply` opens the same way as `previous_reply`, such as both starting on a character's face or on the weather.",
+      "`reply` ends the same way as `previous_reply`, such as both ending on a character waiting for an answer.",
+    ].join("\n"),
+    label: "What it compares",
+    why: "the built-in comparison checks are now written in Indonesian.",
+    needs: { key: "judgeMode", is: "two" },
+    also: { key: "judgeBefore", is: true },
+  },
+  {
+    key: "judgeWornCheck",
+    was: "`reply` contains at least one phrase listed in `worn_phrases`.",
+    label: "How it asks",
+    why: "the check sent with the worn-out phrases is now written in Indonesian.",
+    needs: { key: "judgeMode", is: "two" },
+    also: { key: "judgeWorn", is: true },
+  },
+  {
+    key: "judgeFoundLead",
+    was: "Another model, {{second_model}}, read this passage before you and scored it against checks the user picked. The checks below reached the user's line of {{checks_line}}%, strongest first. In them, \"reply\" means the passage you are rewriting. Look at these first. Treat each one as a lead to check. If a check does not fit the passage, leave that part as it is. Everything else in these instructions still applies.",
+    label: "What the refine model is told about the checks",
+    why: "the built-in text is now written in Indonesian.",
+    needs: { key: "judgeMode", is: "two" },
+  },
+  {
+    key: "protectNote",
+    was: "Parts of this passage have been replaced with tokens shaped like [[AR1]], [[AR2]] and so on. Each stands in for formatting that has to survive the edit exactly as it is. Copy every one into your answer unchanged and in the same place. Do not change, split, translate or remove any of them.",
+    label: "What the model is told about the stand-ins",
+    why: "the built-in text is now written in Indonesian.",
+    needs: { key: "protectOn", is: true },
   },
 ];
 

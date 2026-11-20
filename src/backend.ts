@@ -1041,10 +1041,7 @@ function unshield(text: string, parts: string[]): { text: string; lost: number[]
 // What {{protect_notes}} puts in by default. The panel holds the same text and
 // the reader can change it, under protectNote.
 const SHIELD_NOTE =
-  'Parts of this passage have been replaced with tokens shaped like [[AR1]], ' +
-  '[[AR2]] and so on. Each stands in for formatting that has to survive the ' +
-  'edit exactly as it is. Copy every one into your answer unchanged and in the ' +
-  'same place. Do not change, split, translate or remove any of them.';
+  'Bagian dari naskah ini sudah diganti dengan token berbentuk [[AR1]], [[AR2]], dan seterusnya. Masing-masing mewakili format yang harus bertahan persis seperti adanya. Salin setiap token ke jawabanmu tanpa diubah dan di tempat yang sama. Jangan mengubah, memecah, menerjemahkan, atau menghapus satu pun.';
 
 // The model's own working, which is not prose and is not the reader's writing.
 // It is cut off before the refine and put back afterwards, so a rewrite can
@@ -6146,24 +6143,20 @@ async function decisionConnections(userId: string | undefined): Promise<{ list: 
 // repeating, so a reply that carries the same scene on is not caught by it.
 // The check sent with the worn-out phrases, when the reader has not written
 // their own. The same text as the panel's box.
-const WORN_CHECK = '`reply` contains at least one phrase listed in `worn_phrases`.';
+const WORN_CHECK = "`reply` memuat setidaknya satu frasa yang tercantum di `worn_phrases`.";
 
 // What the refine model is told before the checks in {{checks_found}}, when
 // the reader has not written their own. The same text as the panel's box.
 // {{second_model}} and {{checks_line}} are filled in here.
 const FOUND_LEAD =
-  'Another model, {{second_model}}, read this passage before you and scored it against checks the user picked. ' +
-  "The checks below reached the user's line of {{checks_line}}%, strongest first. " +
-  'In them, "reply" means the passage you are rewriting. Look at these first. ' +
-  'Treat each one as a lead to check. If a check does not fit the passage, leave that part as it is. ' +
-  'Everything else in these instructions still applies.';
+  "Model lain, {{second_model}}, membaca naskah ini sebelum kamu dan menilainya terhadap pemeriksaan yang dipilih pengguna. Pemeriksaan di bawah mencapai ambang pengguna sebesar {{checks_line}}%, mulai dari yang terkuat. Di dalamnya, \"reply\" berarti naskah yang sedang kamu tulis ulang. Lihat ini lebih dulu. Perlakukan tiap pemeriksaan sebagai petunjuk yang perlu dicek. Kalau sebuah pemeriksaan tidak cocok dengan naskah, biarkan bagian itu apa adanya. Semua yang lain dalam instruksi ini tetap berlaku.";
 
 const BEFORE_CHECKS = [
-  "`reply` has the same events happen in the same order as `previous_reply`, such as a character arriving, speaking, then turning away in both.",
-  "`reply` has a character say something they already said in `previous_reply`, in the same or other words, such as a threat or a promise made again.",
-  "`reply` describes the surroundings with details `previous_reply` already gave, such as the same light, smell or sound.",
-  "`reply` opens the same way as `previous_reply`, such as both starting on a character's face or on the weather.",
-  "`reply` ends the same way as `previous_reply`, such as both ending on a character waiting for an answer.",
+  "`reply` memuat kejadian yang sama dalam urutan yang sama dengan `previous_reply`, seperti seorang karakter tiba, berbicara, lalu berbalik pergi di keduanya.",
+  "`reply` membuat seorang karakter mengatakan sesuatu yang sudah ia katakan di `previous_reply`, dengan kata yang sama atau lain, seperti ancaman atau janji yang diulang.",
+  "`reply` menggambarkan sekeliling dengan detail yang sudah diberikan `previous_reply`, seperti cahaya, bau, atau bunyi yang sama.",
+  "`reply` dibuka dengan cara yang sama seperti `previous_reply`, seperti keduanya dimulai pada wajah seorang karakter atau pada cuaca.",
+  "`reply` berakhir dengan cara yang sama seperti `previous_reply`, seperti keduanya berakhir dengan karakter yang menunggu jawaban.",
 ];
 
 // The checks, and the worn phrases when there are any, put to the second model

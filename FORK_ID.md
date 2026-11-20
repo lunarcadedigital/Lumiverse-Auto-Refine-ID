@@ -7,12 +7,13 @@ the original author.
 
 ## What changed
 
-The program code is the same as upstream except three small changes (below, items 7, 8 and 9). The changes are prompt and check text in
+The program code is the same as upstream except small changes (below, items 7 to 10). The changes are prompt and check text in
 `src/frontend.ts` (and the matching `dist/frontend.js`, rebuilt with `tsc`), the
 docs and tests that quote that text, the README, and the repository links:
 
-1. **`JUDGE_CHECKS`** (what the second model checks): 7 new checks for Indonesian,
-   so the list is 14 long. They cover contrast framing ("Bukan ke mana-mana. Hanya
+1. **`JUDGE_CHECKS`** (what the second model checks): written in Indonesian, 12 checks,
+   with Indonesian examples (the first version of this fork had the English ones plus
+   7 Indonesian). They cover contrast framing ("Bukan ke mana-mana. Hanya
    terbang."), narrated negation ("Dia tidak berkedip."), lines that announce what
    is about to be said, stock Indonesian phrases, counting a sound out loud,
    closing on weather or light, and reassurance in therapy language.
@@ -51,7 +52,12 @@ docs and tests that quote that text, the README, and the repository links:
    ignored until a new reply came. A chat set to none still follows the last reply's
    connection. A test covers it, and it fails on the old build.
 
-9. **Refresh connections button** (`src/frontend.ts`, `docs/settings.md`): a button on the
+9. **Second-model text in Indonesian**: besides `JUDGE_CHECKS`, the optional `MORE_CHECKS`, the
+   comparison checks, the worn-phrases check, the text that tells the refine model
+   what the checks found, and the note about protected formatting are in Indonesian
+   (in `src/frontend.ts` and the copies in `src/backend.ts`). A reader who still holds the old
+   English text is told, with a **Take it** button, through `MOVED_DEFAULTS`.
+10. **Refresh connections button** (`src/frontend.ts`, `docs/settings.md`): a button on the
    Model tab, right under **Refine using**, that asks Lumiverse for the list of
    connections again and says how many it found. A browser check covers it.
 
