@@ -612,6 +612,18 @@ describe("the connection a refine goes to", () => {
     expect(h.asked[0].connection_id).toBeUndefined();
   });
 
+  // The chat's setting is read from the chat on every refine. A reply seen
+  // earlier names the connection that reply used, which is out of date once the
+  // chat has been set to another one.
+  test("a chat set to another connection since its last reply goes to the new one", async () => {
+    const h = await armed(reply, {}, chat(), { chatMeta: { connection_profile_id: "conn-new", connection_model: "lamplight-large" } });
+    await h.intercept([], { chatId: "c1", connectionId: "conn-old", generationType: "normal", userId: "u1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked[0].connection_id).toBe("conn-new");
+    expect(h.asked[0].parameters).toMatchObject({ model: "lamplight-large" });
+  });
+
   test("a chat set to no connection leaves it to Lumiverse", async () => {
     const h = await armed(reply);
     await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });

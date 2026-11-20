@@ -4726,7 +4726,10 @@ async function askModel(
     // last reply used, or the one the chat is set to, with the model set on it.
     if (!useConnection && scene.chatId) {
       const bound = await chatConnection(scene.chatId, userId);
-      useConnection = seenConnection.get(scene.chatId) || bound.id;
+      // The connection the chat is set to is read from the chat each time, so
+      // it is current. The one a reply last used is only as new as that reply,
+      // so it is the fallback for a chat that is set to none.
+      useConnection = bound.id || seenConnection.get(scene.chatId) || '';
       if (useConnection && useConnection === bound.id && bound.model && !(params && (params as any).model))
         params = Object.assign({}, params || {}, { model: bound.model });
     }
