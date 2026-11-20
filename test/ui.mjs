@@ -1,0 +1,16055 @@
+// Panel checks that need a real browser.
+//
+// The tab is styled entirely from the host's --lumiverse-* variables, which
+// means it is drawn by a theme this repository has never seen. Nothing about
+// that can be checked by reading a diff: whether a label is readable on somebody
+// else's palette is a measurement, and so is whether the panel fits a phone.
+// These drive the built dist/frontend.js in headless Chromium against a stub of
+// the host and measure what was actually painted.
+//
+//   bun run test:ui
+//
+// Playwright is not a dependency of this project and should not become one: it
+// pulls a few hundred megabytes of browsers, and the install path here is
+// "Lumiverse clones the repo". If it is not present this skips and exits
+// cleanly. To run it:
+//
+//   bun add -d playwright && bunx playwright install chromium
+//
+// Everything that can be checked without a browser is in `bun test`, which
+// needs nothing extra.
+
+import { readFileSync, existsSync, readdirSync } from "node:fs";
+import { inflateSync } from "node:zlib";
+import { join } from "node:path";
+// The defaults, read from the panel's own source rather than copied here, so a
+// setting added without one is caught instead of being described twice.
+import { __testing } from "../src/frontend.ts";
+// The settings a fresh install starts on, so a check against "the defaults" is
+// reading the same numbers the panel has rather than a copy that goes stale.
+const STOCK_DEFAULTS = __testing.CONFIG;
+
+const { CONFIG, MACROS } = __testing;
+
+const root = join(import.meta.dir, "..");
+
+let chromium;
+try {
+  ({ chromium } = await import("playwright"));
+} catch (_) {
+  console.log(
+    "playwright is not installed, skipping the browser checks.\n" +
+      "  bun add -d playwright && bunx playwright install chromium",
+  );
+  process.exit(0);
+}
+
+const bundle = join(root, "dist", "frontend.js");
+if (!existsSync(bundle)) {
+  console.error("dist/frontend.js is missing. Run `bun run build` first.");
+  process.exit(1);
+}
+const SOURCE = readFileSync(bundle, "utf8") + "\nwindow.__setup = setup;\nwindow.__moved = __testing.MOVED_DEFAULTS;\n";
+
+// Lumiverse's stock theme. A reader's theme overrides these, which is the whole
+// reason the readability sweep exists, so the checks below run against this and
+// against palettes built to break it.
+// Lumiverse's own page-wide rules, from its reset.css and global.css. Every
+// part of the extension sits under these in Lumiverse, so every check does
+// too. A rule here can outrank one of the extension's: its slider rules beat a
+// selector of one class, and phones get a 16px floor on every text box.
+const HOST_CSS = `
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+img,picture,video,canvas,svg{display:block;max-width:100%;-webkit-user-select:none;user-select:none}
+input,button,textarea,select{font:inherit;color:inherit}
+@media screen and (max-width:600px){input,textarea,select{font-size:max(16px,1em)!important}}
+button,a,[role="button"]{-webkit-user-select:none;user-select:none}
+button{cursor:pointer;border:none;background:none}
+a{color:inherit;text-decoration:none}
+ul,ol{list-style:none}
+input[type="range"]{-webkit-appearance:none;appearance:none;min-height:44px;background:transparent;cursor:pointer;touch-action:none}
+input[type="range"]::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--lumiverse-fill-medium,rgba(0,0,0,.15))}
+input[type="range"]::-moz-range-track{height:4px;border-radius:2px;background:var(--lumiverse-fill-medium,rgba(0,0,0,.15));border:none}
+input[type="range"]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;background:var(--lumiverse-primary,#8c82ff);border:2px solid var(--lumiverse-bg,#1c1826);box-shadow:0 0 0 1px var(--lumiverse-primary-020,rgba(140,130,255,.2)),0 1px 4px rgba(0,0,0,.3);margin-top:-9px;cursor:pointer}
+input[type="range"]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:var(--lumiverse-primary,#8c82ff);border:2px solid var(--lumiverse-bg,#1c1826);box-shadow:0 0 0 1px var(--lumiverse-primary-020,rgba(140,130,255,.2)),0 1px 4px rgba(0,0,0,.3);cursor:pointer}
+select{background-color:var(--lumiverse-bg-deep,#0a0812);color:var(--lumiverse-text,rgba(255,255,255,.9))}
+select option{background-color:var(--lumiverse-bg-deep,#0a0812);color:var(--lumiverse-text,rgba(255,255,255,.9))}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--lumiverse-primary-020);border-radius:3px}
+:focus-visible{outline:1.5px solid var(--lumiverse-primary-050);outline-offset:2px}
+input:focus-visible,textarea:focus-visible,select:focus-visible,[contenteditable]:focus-visible{outline:none;border-color:var(--lumiverse-primary-050)}
+`;
+
+const THEME = HOST_CSS + `:root{
+--lumiverse-primary:rgba(147,112,219,.9);--lumiverse-primary-hover:rgba(167,132,239,.95);
+--lumiverse-primary-text:rgba(186,135,255,.95);--lumiverse-secondary:rgba(128,128,128,.15);
+--lumiverse-secondary-hover:rgba(128,128,128,.25);--lumiverse-secondary-border:rgba(128,128,128,.25);
+--lumiverse-danger:#ef4444;--lumiverse-success:#22c55e;--lumiverse-bg:rgba(28,24,38,.95);
+--lumiverse-bg-elevated:rgba(35,30,48,.9);--lumiverse-border:rgba(147,112,219,.12);
+--lumiverse-text:rgba(255,255,255,.9);--lumiverse-text-muted:rgba(255,255,255,.65);
+--lumiverse-radius-sm:5px;--lumiverse-radius:8px;--lumiverse-radius-md:10px;
+--lumiverse-radius-lg:12px;--lumiverse-fill-subtle:rgba(0,0,0,.1);
+--lumiverse-fill:rgba(0,0,0,.15);--lumiverse-transition:200ms ease;
+--lumiverse-font-family:system-ui,sans-serif;--lumiverse-font-scale:1;--lumiverse-ui-scale:1;}
+body{background:rgb(10,8,18);margin:0}
+/* The drawer Lumiverse hands the tab. The width cap is what makes a narrow
+   viewport mean anything: pinned wide, a 320px phone would still measure a
+   wide panel and the page would scroll sideways to hold it. */
+#drawer{background:rgb(35,30,48);width:380px;max-width:100%;padding:12px;box-sizing:border-box}`;
+
+let failures = 0;
+let ran = 0;
+function ok(name, pass, detail) {
+  ran++;
+  if (pass) {
+    console.log("  ok   " + name);
+  } else {
+    failures++;
+    console.log("  FAIL " + name + (detail ? "\n         " + detail : ""));
+  }
+}
+
+// A step that comes out of nowhere once a movement is slowing down: more
+// than 2px, and more than three times each of the two frames before it.
+// Something that came in one step came as the card was built again, after its
+// movement had ended. Read from the first frame where the movement starts to
+// slow, since a movement starting is meant to speed up, and in plain
+// distances, since a slow frame on the test machine covers twice the ground
+// at most, not three times. `tops` is how far something has moved, one entry
+// a frame.
+function lateJump(tops) {
+  const d = tops.map((t, i) => Math.abs(t - (i ? tops[i - 1] : 0)));
+  let peak = d.length;
+  for (let i = 1; i < d.length - 1; i++) if (d[i] > 0.5 && d[i + 1] < d[i]) { peak = i; break; }
+  let worst = 0;
+  for (let i = Math.max(2, peak + 1); i < d.length; i++)
+    if (d[i] > 2 && d[i] > 3 * Math.max(d[i - 1], d[i - 2])) worst = Math.max(worst, d[i]);
+  return Math.round(worst);
+}
+
+// Two frames, which is what the panel takes to build and then repair itself.
+const settle = (page) =>
+  page.evaluate(
+    () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))),
+  );
+
+// A row switched off closes over a few frames rather than going in one, the same
+// way a deleted block does, so anything asking whether it is gone waits that out
+// first. Long enough for the 240ms fold plus a frame either side.
+const closed = async (page) => {
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 320)));
+  await settle(page);
+};
+
+// Boots the extension in a page with the tab mounted, and hands the callback the
+// page plus whatever the stub host recorded.
+// The chat input as Lumiverse actually renders it, kept beside this file and
+// copied from a running install rather than written here. A shape invented to
+// match the selector being checked can only ever agree with itself: this one
+// carries the action bar, the attachment input, the mirror div, the send button
+// and the spindle mounts, so anything the real markup would trip over trips over
+// this first.
+const COMPOSER_HTML = readFileSync(join(root, "test", "input-area.html"), "utf8")
+  .replace(/^<!--[\s\S]*?-->\s*/, "")
+  .trim();
+
+async function inTab(browser, { css = "", viewport, touch = false, saved = null, presets = null, setups = null, storage = null, noMenu = false, noConfirm = false, moved = null } = {}, fn) {
+  const page = await browser.newPage(
+    viewport ? { viewport, hasTouch: touch, isMobile: touch } : {},
+  );
+  const errors = [];
+  page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
+  page.on("console", (m) => {
+    if (m.type() === "error") errors.push("console: " + m.text());
+  });
+
+  // A real origin rather than about:blank, or localStorage throws and the
+  // panel's saved settings cannot be set up at all.
+  await page.route("http://lumiverse.test/", (r) =>
+    r.fulfill({
+      contentType: "text/html",
+      body:
+        '<!doctype html><meta charset="utf-8">' +
+        '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+        "<title>tab</title><div id=drawer></div>",
+    }),
+  );
+  await page.goto("http://lumiverse.test/");
+  await page.addStyleTag({ content: THEME + css });
+  if (saved) {
+    await page.evaluate((s) => {
+      localStorage.setItem("lv-auto-refine:settings:v1", JSON.stringify(s));
+    }, saved);
+  }
+  // Presets are read once on the way up, so anything wanting one already saved
+  // has to put it there before the extension starts. Model setups are read the
+  // same way, which is what lets a check start from one saved by an older
+  // version.
+  if (presets) {
+    await page.evaluate((list) => {
+      localStorage.setItem("lv-auto-refine:presets:v1", JSON.stringify(list));
+    }, presets);
+  }
+  if (setups) {
+    await page.evaluate((list) => {
+      localStorage.setItem("lv-auto-refine:setups:v1", JSON.stringify(list));
+    }, setups);
+  }
+  // Anything else the panel reads on the way up, as key and text.
+  if (storage) {
+    await page.evaluate((all) => {
+      for (const k of Object.keys(all)) localStorage.setItem(k, all[k]);
+    }, storage);
+  }
+  await page.addScriptTag({ content: SOURCE, type: "module" });
+  await page.waitForFunction(() => !!window.__setup);
+  await page.evaluate((html) => {
+    window.__makeComposer = (text) => {
+      const host = document.createElement("div");
+      host.innerHTML = html;
+      const area = host.firstElementChild;
+      document.body.appendChild(area);
+      // Inside the one just added, not the first on the page: a check that makes
+      // a second input area was writing its text into the first and then asking
+      // why the extension read an empty box.
+      //
+      // By name, not by tag: the real markup has a mirror div beside it and an
+      // attachment input above it, and "the first textarea in there" would be a
+      // guess that happens to be right today.
+      const box = area.querySelector('textarea[name="chat-message"]');
+      // The real box is sized by the app's own stylesheet, which is not here, so
+      // it is given a size: the extension will not take a box with no box.
+      box.style.width = "200px";
+      box.style.height = "40px";
+      box.value = text;
+      return box;
+    };
+  }, COMPOSER_HTML);
+  // Rows for the moved-defaults table. It is empty between moves, so a check
+  // of the notice brings its own rows, put in before the panel starts.
+  if (moved) await page.evaluate((rows) => { window.__moved.push(...rows); }, moved);
+  if (noMenu) await page.evaluate(() => { window.__noMenu = true; });
+  // A Lumiverse with no confirm dialog of its own, which is what the armed
+  // fallback is for.
+  if (noConfirm) await page.evaluate(() => { window.__noConfirm = true; });
+
+  await page.evaluate(() => {
+    window.__sent = [];
+    window.__handlers = {};
+    window.__teardown = window.__setup({
+      events: {
+        on: (name, fn) => {
+          (window.__handlers[name] = window.__handlers[name] || []).push(fn);
+          return () => {};
+        },
+      },
+      ui: {
+        registerDrawerTab: (spec) => {
+          window.__tabSpec = spec;
+          const host = document.getElementById("drawer");
+          return {
+            root: host,
+            setBadge: (v) => {
+              window.__badge = v;
+            },
+            // Counted, so a check can see the tab was opened again.
+            activate: () => {
+              window.__activated = (window.__activated || 0) + 1;
+            },
+            destroy: () => {},
+          };
+        },
+        // The host's own modal. It is a second thing on the screen, and a check
+        // that wants to know whether two ever show at once has to be able to
+        // see it.
+        // The host's own confirm dialog. Recorded so a check can read what it
+        // was asked, and answered with whatever the check set beforehand.
+        ...(window.__noConfirm
+          ? {}
+          : {
+              showConfirm: (spec) => {
+                (window.__confirms = window.__confirms || []).push(spec);
+                if (!window.__confirmLocks)
+                  return Promise.resolve({ confirmed: window.__confirmSay !== false });
+                // A host modal as one really behaves: it stops the page behind
+                // it scrolling while it is up, which is done by stopping the
+                // page scrolling at all, and lets go when it closes. The lock
+                // sets the scroll to nought and letting go does not put it
+                // back.
+                const html = document.documentElement;
+                html.style.overflow = "hidden";
+                document.body.style.overflow = "hidden";
+                return new Promise((r) =>
+                  setTimeout(() => {
+                    html.style.overflow = "";
+                    document.body.style.overflow = "";
+                    r({ confirmed: window.__confirmSay !== false });
+                  }, 120),
+                );
+              },
+            }),
+        showModal: (spec) => {
+          window.__modalSpec = spec || null;
+          const host = document.createElement("div");
+          host.id = "hostmodal";
+          document.body.appendChild(host);
+          return {
+            root: host,
+            onDismiss: () => {},
+            dismiss: () => host.remove(),
+          };
+        },
+        // Only present when a check asks for it. A host without it is a host
+        // whose floating button has no menu, which is the case that decides
+        // whether the Extras row hides for the button or stays put.
+        ...(window.__noMenu
+          ? {}
+          : {
+              showContextMenu: (spec) => {
+                window.__menu = spec;
+                return Promise.resolve({ selectedKey: window.__menuPick || null });
+              },
+            }),
+        createFloatWidget: (spec) => {
+          // Mounting a component costs the real host something, and a check
+          // that wants to know whether the extension does host work in the
+          // frame somebody clicked in has to be able to say so.
+          window.__slowHost && window.__slowHost();
+          const host = document.createElement("div");
+          host.id = "float";
+          // The host owns the box the button is drawn in, so what it was asked
+          // for is the only place the size is observable.
+          window.__widgetSpec = spec || null;
+          host.style.width = ((spec && spec.width) || 0) + "px";
+          host.style.height = ((spec && spec.height) || 0) + "px";
+          document.body.appendChild(host);
+          window.__widget = true;
+          return {
+            root: host,
+            destroy: () => {
+              window.__slowHost && window.__slowHost();
+              window.__widget = false;
+              host.remove();
+            },
+          };
+        },
+        registerInputBarAction: (spec) => {
+          // There is more than one of these now, so they are kept by id.
+          // __inputAction stays as "is there a row at all", which is what the
+          // checks about the row appearing and going away are asking.
+          window.__inputActions = window.__inputActions || {};
+          window.__inputActions[spec.id] = spec;
+          window.__inputAction = spec;
+          return {
+            onClick: (fn) => {
+              window.__inputClicks = window.__inputClicks || {};
+              window.__inputClicks[spec.id] = fn;
+              // The one that rewrites what you are typing, which the older
+              // checks reach for by name.
+              if (spec.id === "auto-refine-input") window.__inputClick = fn;
+              return () => {};
+            },
+            destroy: () => {
+              delete window.__inputActions[spec.id];
+              const left = Object.keys(window.__inputActions);
+              window.__inputAction = left.length ? window.__inputActions[left[0]] : null;
+            },
+          };
+        },
+      },
+      // Lumiverse's notifications come from an extension's server side, and the
+      // page has no way to show one itself, so the stub has none either. What
+      // the panel asks the backend to show is kept as __toasts.
+      sendToBackend: (m) => {
+        window.__sent.push(m);
+        if (m && m.type === "notify") (window.__toasts = window.__toasts || []).push(m.text);
+      },
+      onBackendMessage: (fn) => {
+        window.__fromBackend = fn;
+        return () => {};
+      },
+    });
+  });
+  await page.waitForFunction(() => document.querySelectorAll("#drawer .arf-tab").length > 0);
+  // The readability sweep runs a frame after the panel is built, so anything
+  // measuring what was painted has to let that frame happen first.
+  await settle(page);
+
+  try {
+    await fn(page, errors);
+  } finally {
+    await page.close();
+  }
+  return errors;
+}
+
+// Move to a named tab. Everything below lives on one, so nearly every check
+// starts here.
+async function goTab(page, label) {
+  await page.evaluate((want) => {
+    const t = Array.from(document.querySelectorAll("#drawer .arf-tab")).find(
+      (b) => b.textContent.trim() === want,
+    );
+    if (!t) throw new Error("no tab called " + want);
+    t.click();
+  }, label);
+  await settle(page);
+}
+
+// Whether a setting is on the card to be used. A row that hangs off a switch is
+// built either way and hidden when the switch is off, so being in the tree is
+// not the question; being drawn is.
+async function onScreen(page, key) {
+  return page.evaluate((k) => {
+    const box = document.querySelector('#drawer [data-arf-field="' + k + '"]');
+    return !!box && !!box.offsetParent;
+  }, key);
+}
+
+// What the sweep had to repair.
+async function repaired(page) {
+  return page.evaluate(() =>
+    document.querySelectorAll('#drawer [data-arf-painted="ink"]').length,
+  );
+}
+
+// Every repair, measured against what the line looked like before it. A panel
+// that repaints healthy colors is overriding a theme it should be inheriting,
+// and this is how that shows: the inline color is lifted off, the line is
+// measured as the theme drew it, and anything that was already above its own
+// floor should never have been touched.
+//
+// This replaced a check that the stock theme is repaired nought times. That was
+// true only while the floor was the large-text one applied to everything; the
+// stock theme does put a 12px button label at 4.33, and repairing it is the
+// sweep doing its job, not overreaching.
+async function overreached(page) {
+  return page.evaluate(() => {
+    const parse = (s) => {
+      const m = /rgba?\(([^)]+)\)/.exec(s || "");
+      if (!m) return null;
+      const p = m[1].split(",").map((x) => parseFloat(x.trim()));
+      return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+    };
+    const over = (f, b) => ({
+      r: f.r * f.a + b.r * (1 - f.a), g: f.g * f.a + b.g * (1 - f.a),
+      b: f.b * f.a + b.b * (1 - f.a), a: 1,
+    });
+    const lum = (c) => {
+      const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+      return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+    };
+    const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+    const backdrop = (node) => {
+      const stack = []; let el = node;
+      while (el && el !== document.documentElement) {
+        const c = parse(getComputedStyle(el).backgroundColor);
+        if (c && c.a > 0) { stack.push(c); if (c.a >= 0.999) break; }
+        el = el.parentElement;
+      }
+      let base = { r: 255, g: 255, b: 255, a: 1 };
+      const pg = parse(getComputedStyle(document.body).backgroundColor);
+      if (pg && pg.a >= 0.999) base = pg;
+      for (let i = stack.length - 1; i >= 0; i--) base = over(stack[i], base);
+      return base;
+    };
+    const out = [];
+    for (const el of document.querySelectorAll('#drawer [data-arf-painted="ink"]')) {
+      const put = el.style.color;
+      el.style.color = "";
+      const st = getComputedStyle(el);
+      const fg = parse(st.color);
+      const px = parseFloat(st.fontSize) || 16;
+      const big = px >= 24 || ((parseInt(st.fontWeight, 10) || 400) >= 700 && px >= 18.66);
+      const floor = big ? 3 : 4.5;
+      const bg = backdrop(el);
+      const was = fg ? ratio(over(fg, bg), bg) : 0;
+      el.style.color = put;
+      if (was >= floor)
+        out.push((el.className || el.tagName) + " was already " + was.toFixed(2) + " against " + floor);
+    }
+    return out;
+  });
+}
+
+// The measured contrast of every visible text node against what is behind it.
+// The mark on the floating button, measured against what is actually behind it.
+//
+// worstText walks text nodes, and the button has none: its mark is an SVG drawn
+// in currentColor. So the one part of this extension that sits over somebody
+// else's chat, in their theme, has never been measured at all. A color change
+// could have taken it to nothing and every check would have stayed green.
+//
+// Held to 3, which is what the standard asks of a graphic rather than the 4.5
+// it asks of body text.
+async function markContrast(page, sel) {
+  return page.evaluate((q) => {
+    const parse = (str) => {
+      const m = /rgba?\(([^)]+)\)/.exec(str || "");
+      if (!m) return null;
+      const p = m[1].split(",").map((x) => parseFloat(x.trim()));
+      return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+    };
+    const over = (fg, bg) => ({
+      r: fg.r * fg.a + bg.r * (1 - fg.a),
+      g: fg.g * fg.a + bg.g * (1 - fg.a),
+      b: fg.b * fg.a + bg.b * (1 - fg.a),
+      a: 1,
+    });
+    const lum = (c) => {
+      const f = (v) => {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+    };
+    const ratio = (a, b) => {
+      const x = lum(a);
+      const y = lum(b);
+      return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05);
+    };
+    const btn = document.querySelector(q);
+    if (!btn) return null;
+    // What is behind the mark: the button's own fill composited over whatever
+    // is under it, since a fill with alpha in it shows the page through.
+    let stack = [];
+    let el = btn;
+    while (el && el !== document.documentElement) {
+      const c = parse(getComputedStyle(el).backgroundColor);
+      if (c && c.a > 0) {
+        stack.push(c);
+        if (c.a >= 0.999) break;
+      }
+      el = el.parentElement;
+    }
+    let base = { r: 255, g: 255, b: 255, a: 1 };
+    const page = parse(getComputedStyle(document.body).backgroundColor);
+    if (page && page.a >= 0.999) base = page;
+    for (let i = stack.length - 1; i >= 0; i--) base = over(stack[i], base);
+    const ink = parse(getComputedStyle(btn).color);
+    if (!ink) return null;
+    return { r: Math.round(ratio(over(ink, base), base) * 100) / 100, want: 3 };
+  }, sel);
+}
+
+async function worstText(page) {
+  return page.evaluate(() => {
+    const parse = (s) => {
+      const m = /rgba?\(([^)]+)\)/.exec(s || "");
+      if (!m) return null;
+      const p = m[1].split(",").map((x) => parseFloat(x.trim()));
+      return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+    };
+    const over = (fg, bg) => ({
+      r: fg.r * fg.a + bg.r * (1 - fg.a),
+      g: fg.g * fg.a + bg.g * (1 - fg.a),
+      b: fg.b * fg.a + bg.b * (1 - fg.a),
+      a: 1,
+    });
+    const lum = (c) => {
+      const f = (v) => {
+        v /= 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      };
+      return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+    };
+    const ratio = (a, b) => {
+      const l1 = lum(a);
+      const l2 = lum(b);
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    };
+    // What is actually behind a node: the first ancestor painting an opaque
+    // background, composited down. A transparent panel over a dark page reads
+    // as the page, and measuring against "transparent" is how a check comes
+    // back with a meaningless number.
+    const backdrop = (node) => {
+      let stack = [];
+      let el = node;
+      while (el && el !== document.documentElement) {
+        const c = parse(getComputedStyle(el).backgroundColor);
+        if (c && c.a > 0) {
+          stack.push(c);
+          if (c.a >= 0.999) break;
+        }
+        el = el.parentElement;
+      }
+      let base = { r: 255, g: 255, b: 255, a: 1 };
+      const pageBg = parse(getComputedStyle(document.body).backgroundColor);
+      if (pageBg && pageBg.a >= 0.999) base = pageBg;
+      for (let i = stack.length - 1; i >= 0; i--) base = over(stack[i], base);
+      return base;
+    };
+
+    // Against each line's own floor, not one number for the panel. 4.5 is what
+    // the standard asks of body text and 3 is the concession for large text,
+    // and reading a 12px label against the large-text figure is how text at
+    // 3.77 was called readable while somebody was telling us it was not.
+    let worst = 99;
+    let where = "";
+    let want = 4.5;
+    let short = 99;
+    const nodes = document.querySelectorAll("#drawer *");
+    for (const el of nodes) {
+      const text = Array.from(el.childNodes).some(
+        (n) => n.nodeType === 3 && n.textContent.trim(),
+      );
+      if (!text) continue;
+      const box = el.getBoundingClientRect();
+      if (!box.width || !box.height) continue;
+      const st = getComputedStyle(el);
+      const fg = parse(st.color);
+      if (!fg) continue;
+      const px = parseFloat(st.fontSize) || 16;
+      const big = px >= 24 || ((parseInt(st.fontWeight, 10) || 400) >= 700 && px >= 18.66);
+      const floor = big ? 3 : 4.5;
+      const bg = backdrop(el);
+      const r = ratio(over(fg, bg), bg);
+      // The furthest short of what it needs, so a heading at 3.1 does not hide
+      // a 12px hint at 4.4.
+      if (r / floor < short) {
+        short = r / floor;
+        worst = r;
+        want = floor;
+        where =
+          (el.className || el.tagName) + " at " + px + "px: " + el.textContent.trim().slice(0, 40);
+      }
+    }
+    return { worst: worst, want: want, where: where, ok: worst >= want };
+  });
+}
+
+
+// Where Chromium actually is.
+//
+// Left to itself Playwright looks under its own download directory for a build
+// named the way it would have downloaded it, and an image that carries a browser
+// under any other name sends it to a path that does not exist. So the
+// environment's own copy is looked for first, and CHROMIUM_PATH still wins.
+function findChromium() {
+  if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
+  const root = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (!root || !existsSync(root)) return undefined;
+  const inside = [
+    "chrome-linux/chrome",
+    "chrome-linux64/chrome",
+    "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+    "chrome-win/chrome.exe",
+  ];
+  try {
+    for (const dir of readdirSync(root)) {
+      if (!/^chromium(-|$)/.test(dir)) continue;
+      for (const rel of inside) {
+        const p = join(root, dir, rel);
+        if (existsSync(p)) return p;
+      }
+    }
+  } catch (_) {}
+  return undefined;
+}
+
+const chromePath = findChromium();
+let browser;
+try {
+  browser = await chromium.launch({ executablePath: chromePath });
+} catch (e) {
+  const why = String((e && e.message) || e).split("\n")[0];
+  // A browser that is there and will not start is a failure, not a skip.
+  // Exiting 0 on that turns a red run green and nobody finds out.
+  if (chromePath) {
+    console.error("chromium is at " + chromePath + " and would not start:\n  " + why);
+    process.exit(1);
+  }
+  console.log(
+    "no browser to run against, skipping the browser checks.\n" +
+      "  bunx playwright install chromium   (or set CHROMIUM_PATH)\n" +
+      "  " + why,
+  );
+  process.exit(0);
+}
+
+// Decodes a PNG far enough to read its pixels, for a check of what is drawn
+// that the page's own styles cannot answer.
+function decodePixels(buf) {
+  let pos = 8, width = 0, height = 0, depth = 0, color = 0;
+  const idat = [];
+  while (pos < buf.length) {
+    const len = buf.readUInt32BE(pos);
+    const type = buf.toString("ascii", pos + 4, pos + 8);
+    const data = buf.subarray(pos + 8, pos + 8 + len);
+    if (type === "IHDR") {
+      width = data.readUInt32BE(0); height = data.readUInt32BE(4);
+      depth = data[8]; color = data[9];
+    } else if (type === "IDAT") idat.push(data);
+    else if (type === "IEND") break;
+    pos += 12 + len;
+  }
+  if (depth !== 8 || (color !== 6 && color !== 2)) return null;
+  const ch = color === 6 ? 4 : 3;
+  const raw = inflateSync(Buffer.concat(idat));
+  const stride = width * ch;
+  const out = Buffer.alloc(height * stride);
+  const px = [];
+  for (let y = 0; y < height; y++) {
+    const filter = raw[y * (stride + 1)];
+    const line = raw.subarray(y * (stride + 1) + 1, y * (stride + 1) + 1 + stride);
+    for (let i = 0; i < stride; i++) {
+      const a = i >= ch ? out[y * stride + i - ch] : 0;
+      const b = y > 0 ? out[(y - 1) * stride + i] : 0;
+      const c = i >= ch && y > 0 ? out[(y - 1) * stride + i - ch] : 0;
+      let v = line[i];
+      if (filter === 1) v += a;
+      else if (filter === 2) v += b;
+      else if (filter === 3) v += (a + b) >> 1;
+      else if (filter === 4) {
+        const pp = a + b - c, pa = Math.abs(pp - a), pb = Math.abs(pp - b), pc = Math.abs(pp - c);
+        v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
+      }
+      out[y * stride + i] = v & 255;
+    }
+    for (let x = 0; x < width; x++) {
+      const o = y * stride + x * ch;
+      px.push({ r: out[o], g: out[o + 1], b: out[o + 2] });
+    }
+  }
+  return px;
+}
+
+console.log("\nthe tab as the host mounts it");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    const spec = await page.evaluate(() => window.__tabSpec);
+    ok("it registers a drawer tab and nothing else", !!spec && spec.id === "auto-refine");
+    ok(
+      "the tab carries an icon and palette keywords",
+      !!spec.iconSvg && Array.isArray(spec.keywords) && spec.keywords.length > 3,
+    );
+    const armed = await page.evaluate(() =>
+      window.__sent.filter((m) => m.type === "set_settings").length,
+    );
+    ok("it tells the backend its settings on the way up", armed > 0);
+  });
+  ok("no errors in the console", errors.length === 0, errors.join("\n         "));
+}
+
+
+console.log("\na theme's own custom CSS");
+// A theme's own custom CSS, written the way Lumiverse themes are written. Its
+// class selectors aim at Lumiverse's hashed class names, which carry an
+// underscore on each side, and none of them may reach the panel. Its element
+// rules reach every box on the page, Lumiverse's and the panel's alike, so a
+// box painted light with no text color of its own still has to read.
+const THEME_CLASSES =
+  '[class*="_card_"],[class*="_btn_"],[class*="_button_"],[class*="_toggle_"],[class*="_switch_"],' +
+  '[class*="_container_"],[class*="_label_"],[class*="_row_"],[class*="_header_"],[class*="_input_"],' +
+  '[class*="_panel_"],[class*="_modal_"],[class*="_tab_"],[class*="_pill_"],[class*="_list_"]';
+const THEME_SHEET =
+  THEME_CLASSES + "{display:none!important;background:#ff00ff!important}" +
+  "input,textarea,select{background:#fff6e0!important}";
+const THEME_PROBE = ([rootSel, classes]) => {
+  const root = document.querySelector(rootSel);
+  const all = root ? [...root.querySelectorAll("*")] : [];
+  const reached = all.filter((e) => e.matches(classes)).map((e) => e.tagName.toLowerCase() + "." + String(e.className)).slice(0, 5);
+  const rgba = (c) => {
+    const n = (String(c).match(/[\d.]+/g) || []).map(Number);
+    return [n[0] || 0, n[1] || 0, n[2] || 0, n.length > 3 ? n[3] : 1];
+  };
+  const lum = ([r, g, b]) => {
+    const f = (v) => ((v /= 255) <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+    return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(b);
+  };
+  const fields = all.filter(
+    (e) => /^(INPUT|TEXTAREA|SELECT)$/.test(e.tagName) &&
+      !/^(checkbox|range|file|radio|hidden)$/.test(e.type) &&
+      e.getClientRects().length > 0 && e.getBoundingClientRect().width > 0,
+  );
+  let worst = 99, where = "";
+  for (const f of fields) {
+    const cs = getComputedStyle(f);
+    const bg = rgba(cs.backgroundColor);
+    const t = rgba(cs.color);
+    const mix = [0, 1, 2].map((i) => t[i] * t[3] + bg[i] * (1 - t[3]));
+    const a = lum(mix), b = lum(bg);
+    const ratio = (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05);
+    if (ratio < worst) { worst = ratio; where = f.tagName.toLowerCase() + (f.getAttribute("aria-label") ? " " + f.getAttribute("aria-label") : ""); }
+  }
+  return { reached, fields: fields.length, worst: Math.round(worst * 100) / 100, where };
+};
+
+for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+  for (const tab of ["Setup", "Model", "Prompt", "Context", "Limits"]) {
+    await inTab(browser, { css: THEME_SHEET, viewport, touch, saved: { judgeMode: "two" } }, async (page) => {
+      await goTab(page, tab);
+      await settle(page);
+      const out = await page.evaluate(THEME_PROBE, ["#drawer", THEME_CLASSES]);
+      ok(`${label}, ${tab}: a theme's class selectors reach nothing in the panel`, out.reached.length === 0, JSON.stringify(out.reached));
+      ok(`${label}, ${tab}: there are boxes to measure`, out.fields > 0, JSON.stringify(out));
+      ok(`${label}, ${tab}: a box the theme paints light still reads (${out.worst}:1)`, out.worst >= 4.5, JSON.stringify(out));
+    });
+  }
+}
+// A theme that changes Lumiverse's input color changes every box here too.
+for (const tab of ["Setup", "Model", "Prompt", "Context", "Limits"]) {
+  await inTab(browser, { css: ":root{--lumiverse-input-bg:rgb(12,34,56)}", saved: { judgeMode: "two" } }, async (page) => {
+    await goTab(page, tab);
+    await settle(page);
+    const out = await page.evaluate(([rootSel]) => {
+    const root = document.querySelector(rootSel);
+    const boxes = [...root.querySelectorAll("input,textarea,select")].filter(
+      (e) => !/^(checkbox|range|file|radio|hidden)$/.test(e.type) && e.getClientRects().length > 0,
+    );
+    return { n: boxes.length, other: boxes.map((e) => getComputedStyle(e).backgroundColor).filter((c) => c !== "rgb(12, 34, 56)") };
+  }, ["#drawer"]);
+    ok(tab + ": every box takes Lumiverse's input color", out.n > 0 && out.other.length === 0, JSON.stringify(out));
+  });
+}
+
+console.log("\ncolor on somebody else's theme");
+{
+  await inTab(browser, {}, async (page) => {
+    const over = await overreached(page);
+    ok(
+      "the stock theme is inherited, and only what fails is repainted",
+      over.length === 0,
+      over.join("; "),
+    );
+    const m = await worstText(page);
+    ok(
+      "every label is readable as painted",
+      m.ok,
+      "worst was " + m.worst.toFixed(2) + " against " + m.want + " on " + m.where,
+    );
+  });
+
+  // Muted text at a tenth of its usual strength. Nothing here is wrong with the
+  // panel: it is a theme that has made its own text invisible, and the sweep is
+  // what puts it back.
+  const cruel = ":root{--lumiverse-text-muted:rgba(255,255,255,.1);" +
+    "--lumiverse-text:rgba(255,255,255,.2)}";
+  await inTab(browser, { css: cruel }, async (page) => {
+    const fixed = await repaired(page);
+    ok("a theme that hides its own text is repaired", fixed > 0, "repainted " + fixed);
+    const m = await worstText(page);
+    ok(
+      "and the result is readable",
+      m.ok,
+      "worst was " + m.worst.toFixed(2) + " against " + m.want + " on " + m.where,
+    );
+  });
+
+  // The repair has to land on the frame the reader sees. Doing it a frame late
+  // paints the panel once in the theme's colors and once in the repaired ones,
+  // which is the flicker on every press, and the tabs carry a color transition
+  // so theirs faded across it.
+  await inTab(browser, { css: cruel }, async (page) => {
+    const out = await page.evaluate(async () => {
+      const root = document.getElementById("drawer");
+      const runs = [];
+      root.addEventListener("transitionrun", (e) => runs.push(e.propertyName), true);
+      const read = () => [...root.querySelectorAll("*")].map((n) => getComputedStyle(n).color);
+      const press = [...root.querySelectorAll(".arf-tab")].find(
+        (b) => b.getAttribute("aria-selected") !== "true",
+      );
+      press.click();
+      // What the next frame is painted with, read before it gets one.
+      const atOnce = read();
+      await new Promise((r) => setTimeout(r, 400));
+      const later = read();
+      let moved = 0;
+      for (let i = 0; i < Math.min(atOnce.length, later.length); i++)
+        if (atOnce[i] !== later[i]) moved++;
+      return { moved, count: atOnce.length, colors: runs.filter((p) => p === "color").length };
+    });
+    ok(
+      "and there is something on the panel for it to repair, or this proves nothing",
+      out.count > 40,
+      String(out.count),
+    );
+    ok(
+      "the repair is on the first frame, so a press does not repaint twice",
+      out.moved === 0,
+      out.moved + " of " + out.count + " changed color after the frame",
+    );
+    ok(
+      "and nothing fades from one color to the other",
+      out.colors === 0,
+      out.colors + " color transitions ran",
+    );
+  });
+
+  // A theme whose accent is light, which is where a filled button goes wrong.
+  //
+  // The accent at full strength with a hardcoded white label is white on
+  // lavender here. The contrast sweep would rescue it, but a rescue can be seen
+  // happening, so the check is not that it ends up readable: it is that nothing
+  // had to touch it.
+  const paleAccent =
+    ":root{--lumiverse-primary:#e8d0ff;--lumiverse-primary-hover:#f0e0ff;" +
+    "--lumiverse-primary-text:#e0c4ff;--lumiverse-primary-020:rgba(232,208,255,.2);" +
+    "--lumiverse-primary-050:rgba(232,208,255,.5)}";
+  const loudButton = (page) =>
+    page.evaluate(() => {
+      const el = document.querySelector("#drawer .arf-primary");
+      const quiet = [...document.querySelectorAll("#drawer .arf-btn")].find(
+        (n) => !n.classList.contains("arf-primary") && !n.classList.contains("arf-danger"),
+      );
+      if (!el || !quiet) return null;
+      const a = getComputedStyle(el);
+      const b = getComputedStyle(quiet);
+      return {
+        inline: el.style.color,
+        painted: el.getAttribute("data-arf-painted"),
+        fill: a.backgroundColor,
+        ink: a.color,
+        quietFill: b.backgroundColor,
+        quietInk: b.color,
+        weight: a.fontWeight,
+      };
+    });
+
+  await inTab(browser, { css: paleAccent }, async (page) => {
+    const b = await loudButton(page);
+    ok("the loud button is readable on a light accent without being repaired",
+      !!b && !b.inline && !b.painted, JSON.stringify(b));
+    // Readable was bought once by tinting it, which cost it its loudness: it
+    // came out looking like every other button on the panel. It has to be both.
+    ok("and still looks nothing like the quiet ones",
+      !!b && b.fill !== b.quietFill && b.ink !== b.quietInk, JSON.stringify(b));
+    const m = await worstText(page);
+    ok(
+      "and nothing else on the panel needs rescuing either",
+      m.ok,
+      "worst was " + m.worst.toFixed(2) + " against " + m.want + " on " + m.where,
+    );
+  });
+
+  // A light theme, which is where a panel written dark-first goes wrong.
+  const light =
+    ":root{--lumiverse-bg:#fff;--lumiverse-bg-elevated:#f4f2f8;" +
+    "--lumiverse-text:rgba(0,0,0,.9);--lumiverse-text-muted:rgba(0,0,0,.55);" +
+    "--lumiverse-fill:rgba(0,0,0,.05)}body{background:#fff}#drawer{background:#fff}";
+  await inTab(browser, { css: light }, async (page) => {
+    const scheme = await page.evaluate(
+      () => getComputedStyle(document.querySelector("#drawer .arf, #drawer")).colorScheme,
+    );
+    ok("the browser is told the panel is light", /light/.test(scheme), "colorScheme was " + scheme);
+    const m = await worstText(page);
+    ok(
+      "and the text is readable on it",
+      m.ok,
+      "worst was " + m.worst.toFixed(2) + " against " + m.want + " on " + m.where,
+    );
+  });
+
+  // The theme swapped underneath a panel that is already drawn, which is what
+  // happens when somebody moves their phone from dark to light. What the sweep
+  // wrote is only right for the theme it measured, and nothing repaints on a
+  // theme change, so every repair it made is still sitting on the elements
+  // afterwards: text repainted white to survive a dark card, still white once
+  // that card is white. Measured before this was watched for, the worst line on
+  // the panel came out at 1.06, which is invisible.
+  await inTab(browser, {}, async (page) => {
+    const before = await worstText(page);
+    ok(
+      "readable on the dark theme it was drawn on",
+      before.ok,
+      "worst was " + before.worst.toFixed(2),
+    );
+    await page.addStyleTag({ content: light });
+    // The watch settles before it re-measures, so this waits for that and a
+    // frame after it.
+    await page.waitForTimeout(600);
+    await settle(page);
+    const after = await worstText(page);
+    ok(
+      "and readable again once the theme is swapped to light under it",
+      after.ok,
+      "worst was " + after.worst.toFixed(2) + " against " + after.want + " on " + after.where,
+    );
+    const scheme = await page.evaluate(
+      () => getComputedStyle(document.querySelector("#drawer .arf, #drawer")).colorScheme,
+    );
+    ok(
+      "and the browser is told the panel is light now",
+      /light/.test(scheme),
+      "colorScheme was " + scheme,
+    );
+  });
+
+  // A description open at the moment the theme changes. It hangs off the page
+  // rather than off the panel, so the walk that re-measures the panel does not
+  // reach it, and it would sit there in the colors of the theme that has gone.
+  // Opened on a theme that has made its own text invisible, so the sweep really
+  // does write a color onto it, and then swapped to light underneath. Starting
+  // on a theme that needs no repair proves nothing: there would be nothing left
+  // behind to be wrong.
+  await inTab(browser, { css: cruel, viewport: { width: 420, height: 900 }, touch: true }, async (page) => {
+    await goTab(page, "Limits");
+    await page.evaluate(() => {
+      const q = document.querySelector("#drawer .arf-q");
+      q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      q.click();
+    });
+    await settle(page);
+    const repaired = await page.evaluate(() => {
+      const pop = document.querySelector('[role="tooltip"]');
+      return !!(pop && pop.getAttribute("data-arf-painted"));
+    });
+    ok("the theme made the description unreadable and it was repaired", repaired);
+    await page.addStyleTag({ content: light });
+    await page.waitForTimeout(600);
+    await settle(page);
+    const r = await page.evaluate(() => {
+      const parse = (c) => (c.match(/[\d.]+/g) || []).map(Number);
+      const lum = (n) => {
+        const f = (v) => {
+          v /= 255;
+          return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * f(n[0]) + 0.7152 * f(n[1]) + 0.0722 * f(n[2]);
+      };
+      const pop = document.querySelector('[role="tooltip"]');
+      if (!pop) return { open: false };
+      const cs = getComputedStyle(pop);
+      const fg = parse(cs.color);
+      // The surface is a flat tint laid as a gradient over a solid color, so
+      // backgroundColor alone reports the solid underneath and not what was
+      // painted. The first stop is the whole tint.
+      const stop = (cs.backgroundImage || "").match(/rgba?\([^)]*\)/);
+      const bg = parse(stop ? stop[0] : cs.backgroundColor);
+      const a = lum(fg) + 0.05;
+      const b = lum(bg) + 0.05;
+      return { open: true, ratio: Math.round((a > b ? a / b : b / a) * 100) / 100 };
+    });
+    ok("a description open across a theme change is still open", r.open, r);
+    ok("and readable on the theme that is on the screen now", r.open && r.ratio >= 4.5, JSON.stringify(r));
+  });
+
+  // And back, since a repair written for the light theme is just as wrong on
+  // the dark one.
+  await inTab(browser, { css: light }, async (page) => {
+    await page.addStyleTag({
+      content:
+        ":root{--lumiverse-bg:rgba(28,24,38,.95);--lumiverse-bg-elevated:rgba(35,30,48,.9);" +
+        "--lumiverse-text:rgba(255,255,255,.9);--lumiverse-text-muted:rgba(255,255,255,.65);" +
+        "--lumiverse-fill:rgba(0,0,0,.15)}body{background:rgb(10,8,18)}" +
+        "#drawer{background:rgb(35,30,48)}",
+    });
+    await page.waitForTimeout(600);
+    await settle(page);
+    const after = await worstText(page);
+    ok(
+      "and readable again going the other way, light to dark",
+      after.ok,
+      "worst was " + after.worst.toFixed(2) + " against " + after.want + " on " + after.where,
+    );
+  });
+}
+
+console.log("\non a phone");
+{
+  await inTab(
+    browser,
+    { viewport: { width: 320, height: 680 }, touch: true },
+    async (page) => {
+      const width = await page.evaluate(
+        () => document.getElementById("drawer").getBoundingClientRect().width,
+      );
+      ok("the panel fits the screen", width <= 320, "measured " + Math.round(width) + "px");
+      const spill = await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+      );
+      ok("and nothing pushes the page sideways", spill);
+
+      // The densest tab, with its fold open, which is where a tap target is
+      // most likely to have been squeezed.
+      await goTab(page, "Model");
+      await page.evaluate(() => {
+        for (const b of document.querySelectorAll("#drawer .arf-fold")) b.click();
+      });
+      await settle(page);
+      const small = await page.evaluate(() => {
+        const bad = [];
+        for (const el of document.querySelectorAll("#drawer button, #drawer input, #drawer select")) {
+          const r = el.getBoundingClientRect();
+          if (!r.width || !r.height) continue;
+          if (r.height < 22) bad.push((el.textContent || el.type || el.tagName) + " " + Math.round(r.height));
+        }
+        return bad;
+      });
+      ok("every control is big enough to tap", small.length === 0, small.join(", "));
+    },
+  );
+}
+
+console.log("\nthe prompt layout editor");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const names = () =>
+      page.evaluate(() =>
+        Array.from(
+          // A name box on a prompt of your own, plain text on a built-in one.
+          document.querySelectorAll('#drawer [data-arf-block] [data-arf-field^="blockname:"], #drawer [data-arf-block] [data-arf-blockname]'),
+        ).map((n) => (n.tagName === "INPUT" ? n.value : n.textContent.trim())),
+      );
+    const before = await names();
+    ok("every block in the prompt is listed", before.length >= 6, before.join(" | "));
+
+    const holds = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("#drawer [data-arf-block]")).some((b) =>
+        /holds the turn/.test(b.textContent),
+      ),
+    );
+    ok("the block carrying the turn is marked as such", holds);
+
+    // Move the second block up and see the order actually change.
+    await page.evaluate(() => {
+      const ups = Array.from(document.querySelectorAll('#drawer button[aria-label^="Move up"]'));
+      ups[1].click();
+    });
+    const after = await names();
+    ok("moving a block up reorders the list", after[0] === before[1], after.join(" | "));
+
+    const sent = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last && last.settings && last.settings.blocks ? last.settings.blocks : [];
+    });
+    ok(
+      "and the new order goes to the backend, with the text",
+      sent.length >= 6 && sent.some((b) => (b.text || "").indexOf("{{message}}") >= 0),
+      sent.map((b) => b.id).join(","),
+    );
+
+    // A new block lands above the turn: anything after the message reads as an
+    // instruction about it.
+    await page.evaluate(() => {
+      const add = Array.from(document.querySelectorAll("#drawer button")).find((b) =>
+        /^Add a block$/.test(b.textContent.trim()),
+      );
+      add.click();
+    });
+    const own = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      const at = last.settings.blocks.findIndex((b) => b.id.indexOf("own-") === 0);
+      const turnAt = last.settings.blocks.findIndex(
+        (b) => (b.text || "").indexOf("{{message}}") >= 0,
+      );
+      return { at: at, turnAt: turnAt };
+    });
+    ok("a new block lands above the turn", own.at >= 0 && own.at < own.turnAt, JSON.stringify(own));
+
+    await page.evaluate(() => {
+      const reset = Array.from(document.querySelectorAll("#drawer button")).find((b) =>
+        /^Back to the default$/.test(b.textContent.trim()),
+      );
+      reset.click();
+    });
+    const back = await names();
+    ok("and going back to the default restores it", back.join("|") === before.join("|"));
+
+    // The one mistake the editor makes possible, and it must be loud.
+    await page.evaluate(() => {
+      const boxes = Array.from(
+        document.querySelectorAll('#drawer [data-arf-field^="blocktext:"]'),
+      );
+      for (const ta of boxes) {
+        if (ta.value.indexOf("{{message}}") < 0) continue;
+        ta.value = "nothing here any more";
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+        ta.dispatchEvent(new Event("blur", { bubbles: true }));
+      }
+    });
+    await settle(page);
+    const shouted = await page.evaluate(
+      () =>
+        !!document.querySelector("#drawer .arf-bad") &&
+        /\{\{message\}\}/.test(document.querySelector("#drawer .arf-body").textContent),
+    );
+    ok("a prompt with no {{message}} says so in the danger color", shouted);
+  });
+  ok("no errors while editing the layout", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\nsampler settings");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Model");
+    await page.evaluate(() => {
+      const one = Array.from(document.querySelectorAll("#drawer .arf-fold")).find((h) =>
+        /Sampler values/.test(h.textContent),
+      );
+      one.click();
+    });
+    const blank = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#drawer [data-arf-field^="sampler:"]')).every(
+        (i) => i.value === "",
+      ),
+    );
+    ok("they start blank, so the connection decides", blank);
+
+    await page.evaluate(() => {
+      const t = document.querySelector('#drawer [data-arf-field="sampler:temperature"]');
+      t.value = "9";
+      t.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const held = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last.settings.samplers;
+    });
+    ok("a value past the end of its range is pulled back", held.temperature === 2, JSON.stringify(held));
+
+    await page.evaluate(() => {
+      const t = document.querySelector('#drawer [data-arf-field="sampler:temperature"]');
+      t.value = "";
+      t.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const cleared = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last.settings.samplers;
+    });
+    ok("and clearing one hands it back rather than sending zero", !("temperature" in cleared));
+  });
+}
+
+console.log("\nsettings that were saved before");
+{
+  await inTab(
+    browser,
+    { saved: { rules: "Cut filler.", contextMessages: 9, samplers: { temperature: 0.4 } } },
+    async (page) => {
+      const cfg = await page.evaluate(() => {
+        const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+        return last.settings;
+      });
+      ok("they are read back and sent on", cfg.rules === "Cut filler." && cfg.contextMessages === 9);
+      ok("including the samplers", cfg.samplers && cfg.samplers.temperature === 0.4);
+    },
+  );
+
+  // A stored layout that has lost the two locked blocks, which is what a
+  // hand-edited or half-written file looks like.
+  await inTab(
+    browser,
+    { saved: { blocks: [{ id: "rules", name: "Only rules", on: true, role: "system", text: "cut filler" }] } },
+    async (page) => {
+      await goTab(page, "Prompt");
+      const shown = await page.evaluate(() =>
+        Array.from(
+          // A name box on a prompt of your own, plain text on a built-in one.
+          document.querySelectorAll('#drawer [data-arf-block] [data-arf-field^="blockname:"], #drawer [data-arf-block] [data-arf-blockname]'),
+        ).map((n) => (n.tagName === "INPUT" ? n.value : n.textContent.trim())),
+      );
+      ok("a one-block prompt is shown as it is, not repaired", shown.length === 1, shown.join(" | "));
+      const warned = await page.evaluate(() => !!document.querySelector("#drawer .arf-bad"));
+      ok("and it says the prompt cannot work", warned);
+    },
+  );
+}
+
+// A tab label cut short to "Pro..." is hard to read, most of all for somebody
+// who reads slowly. Measured at the drawer's own width, a phone, and the
+// narrowest phone in use.
+console.log("\nevery tab label is whole");
+for (const viewport of [{ width: 1280, height: 900 }, { width: 360, height: 780 }, { width: 320, height: 640 }]) {
+  await inTab(browser, { viewport, touch: viewport.width < 560 }, async (page) => {
+    const cut = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("#drawer .arf-tab"))
+        .filter((t) => t.scrollWidth > t.clientWidth)
+        .map((t) => t.textContent.trim() + " " + t.scrollWidth + ">" + t.clientWidth),
+    );
+    ok("no tab label is cut short at " + viewport.width + "px", cut.length === 0, cut.join(", "));
+  });
+}
+
+console.log("\nthe tabs");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    const labels = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("#drawer .arf-tab")).map((b) => b.textContent.trim()),
+    );
+    ok("every tab is there", labels.length === 6, labels.join(" | "));
+
+    // The control card is above the strip on purpose: hunting for the master
+    // switch on whichever tab it happens to live on is what makes a tabbed
+    // panel worse than a list.
+    const above = await page.evaluate(() => {
+      const strip = document.querySelector("#drawer .arf-tabs");
+      const sw = document.querySelector('#drawer input[aria-label="Turn Auto Refine on"]');
+      const btn = Array.from(document.querySelectorAll("#drawer button")).find((b) =>
+        /Refine the latest reply/.test(b.textContent),
+      );
+      if (!strip || !sw || !btn) return false;
+      return (
+        strip.compareDocumentPosition(sw) === Node.DOCUMENT_POSITION_PRECEDING &&
+        strip.compareDocumentPosition(btn) === Node.DOCUMENT_POSITION_PRECEDING
+      );
+    });
+    ok("the switch and the refine button sit above the tabs", above);
+
+    // The strip scrolls sideways, and a sideways scroller is vertically
+    // scrollable too unless it is told otherwise. A pixel of that was enough:
+    // dragging up moved the titles and put the selected tab's underline on top
+    // of the strip's own line, which reads as the line thickening.
+    const strip = await page.evaluate(() => {
+      const el = document.querySelector("#drawer .arf-tabs");
+      if (!el) return { missing: true };
+      const tab = document.querySelector('#drawer .arf-tab[aria-selected="true"]');
+      const seen = getComputedStyle(el);
+      // Asked for, not assumed: a strip that cannot scroll sideways either is a
+      // strip with nothing to overflow, and this would pass on it for the wrong
+      // reason.
+      el.scrollTop = 50;
+      const other = Array.from(document.querySelectorAll("#drawer .arf-tab")).find(
+        (b) => b.getAttribute("aria-selected") !== "true",
+      );
+      const fill = (n) => (n ? getComputedStyle(n).backgroundColor : "");
+      return {
+        canScrollSideways: el.scrollWidth > el.clientWidth,
+        // Wrapped, so every tab sits inside the tray rather than off the end
+        // of a strip somebody has to find by dragging.
+        // How many rows the tabs landed on. Wrapping put the last one on a
+        // second line, which is the fault this counts.
+        rows: new Set(
+          Array.from(el.querySelectorAll("[role=tab]")).map((t) => Math.round(t.offsetTop)),
+        ).size,
+        clipped: Array.from(el.querySelectorAll("[role=tab]")).filter((t) => {
+          const box = t.getBoundingClientRect();
+          const tray = el.getBoundingClientRect();
+          return box.right > tray.right + 1 || box.left < tray.left - 1;
+        }).length,
+        overflowY: seen.overflowY,
+        over: el.scrollHeight - el.clientHeight,
+        movedTo: el.scrollTop,
+        // The tray around them, which is what the strip is now instead of a row
+        // of labels over a line.
+        tray: seen.backgroundColor,
+        trayEdge: seen.borderBottomWidth,
+        onFill: fill(tab),
+        offFill: fill(other),
+        onInk: tab ? getComputedStyle(tab).color : "",
+        offInk: other ? getComputedStyle(other).color : "",
+        // The weight is the same either way, or selecting a tab makes its label
+        // wider and shifts the row under the finger that tapped it.
+        onWeight: tab ? getComputedStyle(tab).fontWeight : "",
+        offWeight: other ? getComputedStyle(other).fontWeight : "",
+        pulled: tab ? getComputedStyle(tab).marginBottom : "",
+      };
+    });
+    const clear = (c) => /rgba\(0, 0, 0, 0\)|transparent/.test(c);
+    // It used to scroll. A strip that scrolls slides under a finger even when
+    // every tab already fits, so it wraps now and nothing moves sideways.
+    ok("the strip does not scroll sideways", !strip.canScrollSideways, JSON.stringify(strip));
+    ok("and no tab is pushed outside the tray", strip.clipped === 0, JSON.stringify(strip));
+    ok("and every tab is on the one row", strip.rows === 1, JSON.stringify(strip));
+    ok("there is nothing to scroll up and down", strip.over === 0, JSON.stringify(strip));
+    ok("and it will not scroll if asked", strip.movedTo === 0 && strip.overflowY === "hidden", JSON.stringify(strip));
+    ok("nothing is pulled down past the strip", strip.pulled === "0px", JSON.stringify(strip));
+    ok("the tabs sit in a tray of their own", !clear(strip.tray), JSON.stringify(strip));
+    ok("the tab you are on is filled in", !clear(strip.onFill), JSON.stringify(strip));
+    ok("and the ones you are not are not", clear(strip.offFill), JSON.stringify(strip));
+    ok("its label is brighter than theirs too", strip.onInk !== strip.offInk, JSON.stringify(strip));
+    ok("and no heavier, so the row cannot shift", strip.onWeight === strip.offWeight, JSON.stringify(strip));
+
+    // One tab's worth of cards on screen at a time, which is the whole point.
+    for (const label of ["Prompt", "Context", "Model", "Limits", "Log", "Setup"]) {
+      await goTab(page, label);
+      const cards = await page.evaluate(
+        () => document.querySelectorAll("#drawer .arf-body .arf-card").length,
+      );
+      // A sanity bound rather than a count anybody promised: what it catches is
+      // a tab rendering the whole panel, not a tab gaining a card. Setup holds
+      // the most at six.
+      ok(label + " shows its own cards", cards >= 1 && cards <= 7, "found " + cards);
+    }
+
+    await goTab(page, "Log");
+    const remembered = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last.settings.tab;
+    });
+    ok("the tab you are on is remembered", remembered === "log", String(remembered));
+  });
+  ok("no errors moving between tabs", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\nseeing what gets sent");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Context");
+    await page.evaluate(() => {
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => /Show me the request/.test(b.textContent))
+        .click();
+    });
+    const asked = await page.evaluate(() =>
+      window.__sent.filter((m) => m.type === "preview_prompt").length,
+    );
+    ok("it asks the backend to build the real request", asked === 1);
+
+    // The backend answers, and the panel renders what came back.
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "preview_prompt").pop().requestId;
+      window.__fromBackend({
+        type: "prompt_preview",
+        requestId: id,
+        ok: true,
+        real: true,
+        messages: [
+          { role: "system", content: "You are editing one message." },
+          { role: "user", content: "The line being rewritten." },
+        ],
+        parameters: { temperature: 0.4 },
+        connectionId: "",
+        reasoning: { source: "off" },
+      });
+    });
+    await settle(page);
+    const shown = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+    ok("each message is shown with its role", /system/.test(shown) && /user/.test(shown));
+    ok("and the text that would be sent", /The line being rewritten/.test(shown));
+    ok("along with the rest of the call", /temperature 0.4/.test(shown) && /Thinking: off/.test(shown));
+  });
+}
+
+console.log("\nhow much thinking");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Model");
+    ok(
+      "the effort row is not shown until it would do something",
+      !(await onScreen(page, "thinkingEffort")),
+    );
+
+    await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="thinkingMode"]');
+      sel.value = "custom";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    ok("and appears when you ask to set it", await onScreen(page, "thinkingEffort"));
+
+    await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="thinkingEffort"]');
+      sel.value = "high";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const sent = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last.settings;
+    });
+    ok("what you picked reaches the backend", sent.thinkingMode === "custom" && sent.thinkingEffort === "high");
+  });
+}
+
+console.log("\npresets");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    // Change a block, then save the prompt under a name.
+    await page.evaluate(() => {
+      const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+      ta.value = "<my_rule>Cut filler words.</my_rule>";
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.dispatchEvent(new Event("blur", { bubbles: true }));
+      const name = document.querySelector('#drawer [data-arf-field="presetName"]');
+      name.value = "Tight prose";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="new"]').click();
+    });
+    await settle(page);
+    const saved = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#drawer [data-arf-field="presetPick"] option')).map(
+        (o) => o.textContent,
+      ),
+    );
+    ok("a preset is saved under its name", saved.indexOf("Tight prose") >= 0, saved.join(" | "));
+
+    // Change it again, then load the preset back.
+    await page.evaluate(() => {
+      const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+      ta.value = "<my_rule>Something else entirely.</my_rule>";
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.dispatchEvent(new Event("blur", { bubbles: true }));
+    });
+    await settle(page);
+    await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      sel.value = "Tight prose";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle(page);
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-preset="load"]').click();
+    });
+    await settle(page);
+    const back = await page.evaluate(
+      () => document.querySelector('#drawer [data-arf-field^="blocktext:"]').value,
+    );
+    ok("loading it brings the prompt back", back === "<my_rule>Cut filler words.</my_rule>", back);
+
+    // A preset carries the rules, not the switches, and nothing off the Model
+    // tab. Which model runs a refine belongs to the account and the machine, so
+    // a preset that carried it would undo a model choice every time somebody
+    // tried a different way of reading.
+    const carried = await page.evaluate(() => JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1")));
+    const keys = Object.keys(carried[0].settings).sort();
+    ok("it saves what shapes a refine", keys.indexOf("blocks") >= 0 && keys.indexOf("contextMessages") >= 0, keys.join(","));
+    ok("and not the switches that are yours", keys.indexOf("enabled") < 0, keys.join(","));
+    const MODEL_KEYS = ["connectionId", "thinkingMode", "thinkingEffort", "timeoutSecs", "samplers"];
+    ok(
+      "and nothing from the Model tab",
+      MODEL_KEYS.every((k) => keys.indexOf(k) < 0),
+      keys.join(","),
+    );
+
+    // Twice. This harness gives the drawer no scroll box of its own, so the page
+    // carries the scroll and the question is asked in the panel rather than in
+    // the host's dialog: the first press arms the button and the second does it.
+    // What is being checked here is the storage, not which way it asks.
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-preset="delete"]').click();
+    });
+    await settle(page);
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-preset="delete"]').click();
+    });
+    await settle(page);
+    const gone = await page.evaluate(() => JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1")).length);
+    ok("and deleting one removes it", gone === 0);
+  });
+  ok("no errors working with presets", errors.length === 0, errors.join("\n         "));
+}
+
+// ---- a preset leaves the Model tab where it found it ----
+// A way of reading and the model that runs it are two separate choices, so
+// loading the first has to leave the second exactly where it was.
+console.log("\nloading a preset and the Model tab");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    const setModel = (mode, effort) =>
+      page.evaluate(
+        (v) => {
+          const pick = (key, value) => {
+            const n = document.querySelector('#drawer [data-arf-field="' + key + '"]');
+            if (!n) return false;
+            n.value = value;
+            n.dispatchEvent(new Event("change", { bubbles: true }));
+            return true;
+          };
+          return { mode: pick("thinkingMode", v.mode), effort: pick("thinkingEffort", v.effort) };
+        },
+        { mode, effort },
+      );
+    const modelNow = () =>
+      page.evaluate(() => {
+        const s = JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1") || "{}");
+        return { thinkingMode: s.thinkingMode, thinkingEffort: s.thinkingEffort };
+      });
+
+    await goTab(page, "Model");
+    const put = await setModel("custom", "high");
+    ok("the Model tab has a thinking setting to move", put.mode, JSON.stringify(put));
+    await settle(page);
+    const before = await modelNow();
+
+    // Save a preset while that is on.
+    await goTab(page, "Prompt");
+    await page.evaluate(() => {
+      const name = document.querySelector('#drawer [data-arf-field="presetName"]');
+      name.value = "Reading only";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="new"]').click();
+    });
+    await settle(page);
+
+    // Change the model, then load the preset back.
+    await goTab(page, "Model");
+    await setModel("inherit", "low");
+    await settle(page);
+    const changed = await modelNow();
+    ok(
+      "and the model really was changed, or this proves nothing",
+      changed.thinkingMode !== before.thinkingMode,
+      JSON.stringify({ before, changed }),
+    );
+
+    await goTab(page, "Prompt");
+    await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      sel.value = "Reading only";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle(page);
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-preset="load"]').click());
+    await settle(page);
+    const after = await modelNow();
+    ok(
+      "loading a preset leaves the thinking setting alone",
+      after.thinkingMode === changed.thinkingMode && after.thinkingEffort === changed.thinkingEffort,
+      JSON.stringify({ changed, after }),
+    );
+  });
+  ok("no errors loading a preset", errors.length === 0, errors.join("\n         "));
+}
+
+// ---- loading a preset changes only the list you are on ----
+// A preset of your own holds both prompts as they were when it was saved.
+// Picking it on For replies must leave the prompt for your own messages as it
+// is now, or an old one comes back every time the preset is picked.
+console.log("\na preset loads into the list you are on");
+{
+  const block = (id, text) => ({ id: id, on: true, role: "system", name: id, text: text });
+  const errors = await inTab(
+    browser,
+    {
+      saved: {
+        blocks: [block("r1", "Reply prompt now. {{message}}")],
+        userBlocks: [block("u1", "My own prompt, the new one. {{message}}")],
+      },
+      presets: [
+        {
+          name: "Mine",
+          at: 1,
+          settings: {
+            blocks: [block("r1", "Reply prompt from the preset. {{message}}")],
+            userBlocks: [block("u1", "My own prompt, the old one. {{message}}")],
+          },
+        },
+      ],
+    },
+    async (page) => {
+      await goTab(page, "Prompt");
+      const lists = () =>
+        page.evaluate(() => {
+          const s = JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1") || "{}");
+          const text = (l) => (Array.isArray(l) ? l.map((b) => b.text).join(" | ") : "");
+          return {
+            replies: text(s.blocks),
+            mine: text(s.userBlocks),
+            undo: !!document.querySelector('#drawer [data-arf-preset="undo"]'),
+            drift: !!document.querySelector("#drawer [data-arf-preset-drift]"),
+            pick: document.querySelector('#drawer [data-arf-field="presetPick"]').value,
+          };
+        });
+      const pickIt = (name) =>
+        page.evaluate((n) => {
+          const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+          sel.value = n;
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        }, name);
+      const onList = (w) => page.evaluate((w) => document.querySelector('#drawer [data-arf-editing="' + w + '"]').click(), w);
+
+      await onList("blocks");
+      await settle(page);
+      await pickIt("Mine");
+      await settle(page);
+      const fromReplies = await lists();
+      ok("picking a preset on For replies loads its reply prompt", /from the preset/.test(fromReplies.replies), JSON.stringify(fromReplies));
+      ok("and leaves the prompt for your own messages as it is now", /the new one/.test(fromReplies.mine) && !/the old one/.test(fromReplies.mine), JSON.stringify(fromReplies));
+      ok("Put it back is offered on the list the load changed", fromReplies.undo, JSON.stringify(fromReplies));
+      ok("and the prompt just loaded is not called changed", !fromReplies.drift, JSON.stringify(fromReplies));
+
+      await onList("userBlocks");
+      await settle(page);
+      const other = await lists();
+      ok("and not on the other list, where it would name the wrong prompt", !other.undo, JSON.stringify(other));
+      ok("and the other list's picker does not name a preset it never loaded", other.pick !== "Mine", JSON.stringify(other));
+
+      await onList("blocks");
+      await settle(page);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-preset="undo"]').click());
+      await settle(page);
+      const back = await lists();
+      ok("Put it back restores the reply prompt and still leaves your own alone",
+        /Reply prompt now/.test(back.replies) && /the new one/.test(back.mine), JSON.stringify(back));
+    },
+  );
+  ok("no errors loading a preset into one list", errors.length === 0, errors.join("\n         "));
+}
+
+// ---- renaming a preset ----
+// Two presets under one name cannot be told apart in the picker, and a rename
+// to the name it already has is not a rename. Both are refused out loud.
+// On a phone Lumiverse makes the drawer the screen's width divided by UI
+// Scale, so a higher scale gives the panel less room. A row of buttons that
+// wrapped where the room ran out left Delete alone on the last line. Each
+// Delete shares its line with another control at every scale, and nothing
+// runs off the side.
+console.log("\nDelete never sits on a line of its own");
+for (const scale of [0.9, 1, 1.25, 1.5]) {
+  const w = Math.round(390 / scale);
+  await inTab(
+    browser,
+    {
+      viewport: { width: 390, height: 900 },
+      touch: true,
+      css: "body{zoom:" + scale + "} #drawer{width:" + w + "px !important;max-width:none !important;box-sizing:border-box}",
+      presets: [{ name: "Mine", at: 1, settings: {} }],
+      setups: [{ name: "Fast", at: 1, settings: {} }],
+    },
+    async (page) => {
+      const look = () =>
+        page.evaluate(() => {
+          const out = [];
+          for (const d of document.querySelectorAll("#drawer button")) {
+            if ((d.textContent || "").trim() !== "Delete" || !d.getClientRects().length) continue;
+            const r = d.getBoundingClientRect();
+            const row = d.closest(".arf-row");
+            const same = [...row.querySelectorAll("button, select, .arf-blockrole")].filter((x) => {
+              if (x === d || !x.getClientRects().length) return false;
+              const q = x.getBoundingClientRect();
+              return q.bottom > r.top + 2 && q.top < r.bottom - 2;
+            }).length;
+            const box = row.getBoundingClientRect();
+            out.push({ what: d.getAttribute("aria-label") || d.getAttribute("data-arf-preset") || d.getAttribute("data-arf-setup") || "Delete", same, over: Math.round(r.right - box.right) });
+          }
+          return out;
+        });
+      await goTab(page, "Prompt");
+      await settle(page);
+      const prompt = await look();
+      await goTab(page, "Model");
+      await settle(page);
+      const model = await look();
+      const all = prompt.concat(model);
+      ok("UI Scale " + scale + ": every Delete shares its line", all.length >= 3 && all.every((x) => x.same >= 1), JSON.stringify(all));
+      ok("UI Scale " + scale + ": no Delete runs off the side", all.every((x) => x.over <= 1), JSON.stringify(all));
+    },
+  );
+}
+
+console.log("\nrenaming a preset");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const saveAs = (name) =>
+      page.evaluate((n) => {
+        const box = document.querySelector('#drawer [data-arf-field="presetName"]');
+        box.value = n;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-preset="new"]').click();
+      }, name);
+    const renameTo = (name) =>
+      page.evaluate((n) => {
+        const box = document.querySelector('#drawer [data-arf-field="presetName"]');
+        box.value = n;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-preset="rename"]').click();
+      }, name);
+    const names = () =>
+      page.evaluate(() =>
+        JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1") || "[]").map((p) => p.name),
+      );
+    const said = () => page.evaluate(() => document.getElementById("drawer").textContent || "");
+
+    await saveAs("First");
+    await settle(page);
+    await saveAs("Second");
+    await settle(page);
+    ok("two presets to rename between", (await names()).join() === "First,Second", await names());
+
+    await renameTo("First");
+    await settle(page);
+    ok("renaming onto another preset's name is refused", /already a preset called that/i.test(await said()));
+    ok("and both keep their names", (await names()).join() === "First,Second", await names());
+
+    await renameTo("Second");
+    await settle(page);
+    ok("renaming to its own name is refused", /already its name/i.test(await said()));
+
+    await renameTo("Third");
+    await settle(page);
+    ok("a new name goes through", (await names()).join() === "First,Third", await names());
+    ok("with nothing changed, it just says Renamed", /Renamed\./.test(await said()) && !/Only the name changed/.test(await said()));
+
+    // Update and Put it back that would change nothing say so, the same as a
+    // rename to its own name.
+    const press = (w) => page.evaluate((w) => document.querySelector('#drawer [data-arf-preset="' + w + '"]').click(), w);
+    const savedAt = () =>
+      page.evaluate(() => (JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1") || "[]").find((p) => p.name === "Third") || {}).at);
+    const at = await savedAt();
+    await press("update");
+    await settle(page);
+    ok("updating with nothing changed says it already holds these settings", /Third already holds these settings/i.test(await said()));
+    ok("and saves nothing", (await savedAt()) === at, [at, await savedAt()]);
+    await press("load");
+    await settle(page);
+    await press("undo");
+    await settle(page);
+    ok("putting back a load that changed nothing says so", /already what was here before/i.test(await said()));
+
+    // A rename keeps what the preset holds. Changes made since it was loaded
+    // are not in it, and the rename says so rather than leaving it to look
+    // saved.
+    await page.evaluate(() => {
+      const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+      ta.focus();
+      ta.value = "Changed by hand. " + ta.value;
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.blur();
+    });
+    await settle(page);
+    await renameTo("Fourth");
+    await settle(page);
+    ok("renamed with changes on the panel, it says they are not saved in it", /Only the name changed, so your changes are not saved in it yet/.test(await said()));
+    const kept = await page.evaluate(() => {
+      const p = JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1") || "[]").find((x) => x.name === "Fourth");
+      return p ? JSON.stringify(p.settings) : "";
+    });
+    ok("and the preset still holds what it held", kept && !/Changed by hand/.test(kept), kept.slice(0, 120));
+  });
+  ok("no errors renaming a preset", errors.length === 0, errors.join("\n         "));
+}
+
+// ---- a reply the automatic pass was never going to take ----
+// The backend answers every reply that lands, so the panel's spinner always
+// hears back. With the automatic pass off the panel never started one, so that
+// answer has nothing to explain: a Log line on every reply read as the
+// extension trying, and it turned off the spinner of a refine started by hand.
+console.log("\na reply the automatic pass was never going to take");
+{
+  const errors = await inTab(browser, { saved: { enabled: true, refineOn: false } }, async (page) => {
+    // A refine running, the way one started by hand reports itself.
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+    });
+    await settle(page);
+    await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "asking" }));
+    await goTab(page, "Log");
+    await settle(page);
+    const before = await page.evaluate(() => !!document.querySelector("#drawer [data-arf-stop]"));
+    ok("a refine is running to begin with", before);
+    await page.evaluate(() =>
+      window.__fromBackend({ type: "refine_stood_down", chatId: "c9", messageId: "m9", why: "the automatic pass is switched off" }),
+    );
+    await goTab(page, "Prompt");
+    await settle(page);
+    const still = await page.evaluate(() => !!document.querySelector("#drawer [data-arf-stop]"));
+    ok("another reply landing does not stop its spinner", still);
+    await goTab(page, "Log");
+    await settle(page);
+    const said = await page.evaluate(() => document.getElementById("drawer").textContent || "");
+    ok("and the Log does not say a reply was left alone", !/left a reply alone/.test(said));
+  });
+  ok("no errors", errors.length === 0, errors.join("\n         "));
+}
+
+// With the pass on, the same answer is the one the spinner is waiting for.
+{
+  const errors = await inTab(browser, { saved: { enabled: true, refineOn: true } }, async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+    });
+    await settle(page);
+    await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "asking" }));
+    await goTab(page, "Log");
+    await settle(page);
+    ok("a refine is running to begin with", await page.evaluate(() => !!document.querySelector("#drawer [data-arf-stop]")));
+    await page.evaluate(() =>
+      window.__fromBackend({ type: "refine_stood_down", chatId: "c9", messageId: "m9", why: "this reply is still holding the refine it was given" }),
+    );
+    await goTab(page, "Prompt");
+    await settle(page);
+    const off = await page.evaluate(() => !document.querySelector("#drawer [data-arf-stop]"));
+    ok("with the pass on, the answer stops the spinner", off);
+    await goTab(page, "Log");
+    await settle(page);
+    const said = await page.evaluate(() => document.getElementById("drawer").textContent || "");
+    ok("and says why", /left a reply alone: this reply is still holding/.test(said));
+  });
+  ok("no errors", errors.length === 0, errors.join("\n         "));
+}
+
+// ---- each list keeps its own lock ----
+// A built-in prompt is written for one list. With one pick for both, switching
+// lists took the name out of the menu, the pick was wiped, and the list you
+// came back to was open to typing over a built-in prompt.
+console.log("\neach list keeps its own lock");
+{
+  const own = (id, text) => ({ id: id, on: true, role: "system", name: id, text: text });
+  const errors = await inTab(browser, {
+    presets: [
+      {
+        name: "Lantern",
+        at: 1,
+        settings: {
+          blocks: [own("r1", "A reply prompt of my own. {{message}}")],
+          userBlocks: [own("u1", "A messages prompt of my own. {{message}}")],
+        },
+      },
+    ],
+  }, async (page) => {
+    await goTab(page, "Prompt");
+    const look = () =>
+      page.evaluate(() => {
+        const ta = document.querySelector("#drawer [data-arf-block] textarea");
+        return {
+          pick: document.querySelector('#drawer [data-arf-field="presetPick"]').value,
+          locked: !!ta && (ta.readOnly || ta.disabled),
+          note: !!document.querySelector("#drawer [data-arf-promptlocked]"),
+        };
+      });
+    const side = (w) =>
+      page.evaluate((w) => document.querySelector('#drawer [data-arf-editing="' + w + '"]').click(), w);
+    const load = (n) =>
+      page.evaluate((n) => {
+        const s = document.querySelector('#drawer [data-arf-field="presetPick"]');
+        s.value = n;
+        s.dispatchEvent(new Event("change", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-preset="load"]').click();
+      }, n);
+
+    await side("userBlocks");
+    await settle(page);
+    await load("A line judge");
+    await settle(page);
+    const mine = await look();
+    ok("a built-in prompt for your messages is locked", mine.locked && mine.note, JSON.stringify(mine));
+
+    await side("blocks");
+    await settle(page);
+    const replies = await look();
+    ok("the replies list is not locked by it", !replies.locked && !replies.note, JSON.stringify(replies));
+
+    await side("userBlocks");
+    await settle(page);
+    const back = await look();
+    ok("going back, it is still named and still locked",
+      back.pick === "A line judge" && back.locked && back.note, JSON.stringify(back));
+
+    await side("blocks");
+    await settle(page);
+    await load("A judge");
+    await settle(page);
+    await side("userBlocks");
+    await settle(page);
+    const both = await look();
+    ok("loading one for replies leaves the other list's lock alone",
+      both.pick === "A line judge" && both.locked, JSON.stringify(both));
+
+    // One of your own, picked for replies, is named on that list only. Named
+    // on both, the list for your messages stops naming the built-in prompt it
+    // still holds, and that prompt is open to typing over.
+    await side("blocks");
+    await settle(page);
+    await load("Lantern");
+    await settle(page);
+    await side("userBlocks");
+    await settle(page);
+    const yours = await look();
+    ok("loading one of your own for replies leaves the other list's lock alone too",
+      yours.pick === "A line judge" && yours.locked && yours.note, JSON.stringify(yours));
+  });
+  ok("no errors switching lists", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\nmore checks you can add");
+{
+  // A fold under What the second model checks holds more checks, each shown
+  // in full. Add them puts in the ones the box does not hold, once.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { judgeMode: "two" } }, async (page) => {
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(String(e)));
+      await goTab(page, "Model");
+      await settle(page);
+      await page.evaluate(() => {
+        const h = [...document.querySelectorAll("#drawer [aria-expanded]")].find((b) => /More checks you can add/.test(b.textContent));
+        h.click();
+      });
+      await settle(page);
+      await settle(page);
+      const before = await page.evaluate(() => ({
+        lines: [...document.querySelectorAll('#drawer [data-arf-morechecks="list"] > *')].map((n) => n.textContent),
+        box: (document.querySelector('#drawer [data-arf-field="judgeChecks"]') || {}).value || "",
+      }));
+      ok(label + ": the fold shows each check in full", before.lines.length === 8 && before.lines.every((l) => /^`reply` /.test(l)), JSON.stringify(before.lines));
+      ok(label + ": none of them is in the checks yet", before.lines.every((l) => before.box.indexOf(l) < 0), "");
+      const press = () => page.evaluate(() => document.querySelector('#drawer [data-arf-morechecks="add"]').click());
+      await press();
+      await settle(page);
+      const after = await page.evaluate(() => (document.querySelector('#drawer [data-arf-field="judgeChecks"]') || {}).value || "");
+      ok(label + ": Add them puts all of them at the end of the checks", before.lines.every((l) => after.indexOf(l) >= 0) && after.indexOf(before.box.trim()) === 0, after.slice(-200));
+      // The fold is drawn again with the panel, so it is opened again.
+      await page.evaluate(() => {
+        const h = [...document.querySelectorAll("#drawer [aria-expanded]")].find((b) => /More checks you can add/.test(b.textContent));
+        if (h.getAttribute("aria-expanded") === "false") h.click();
+      });
+      await settle(page);
+      await press();
+      await settle(page);
+      const again = await page.evaluate(() => ({
+        box: (document.querySelector('#drawer [data-arf-field="judgeChecks"]') || {}).value || "",
+        said: (document.querySelector('#drawer [data-arf-morechecks="said"]') || {}).textContent || "",
+      }));
+      ok(label + ": pressed again, nothing is added twice", again.box === after, "");
+      ok(label + ": and it says so", /already in the checks/.test(again.said), again.said);
+      const look = await page.evaluate((touch) => {
+        const out = { sideways: document.documentElement.scrollWidth > window.innerWidth + 1, small: null };
+        const b = document.querySelector('#drawer [data-arf-morechecks="add"]');
+        if (touch && b) out.small = b.offsetHeight < 32 ? b.offsetHeight : null;
+        return out;
+      }, touch);
+      ok(label + ": nothing runs off the side", !look.sideways, "");
+      if (touch) ok(label + ": the button is at least 32 pixels high", look.small === null, String(look.small));
+      ok(label + ": no errors", errors.length === 0, errors.join(" | "));
+    });
+  }
+}
+
+console.log("\nwhat it compares with the reply before it");
+{
+  // The comparison checks are a box of their own under the switch, shown only
+  // while the switch is on, with their own way back to the built-in list.
+  const vis = (page, sel) =>
+    page.evaluate((sel) => {
+      const n = document.querySelector(sel);
+      return !!n && !n.closest("[hidden]") && n.getClientRects().length > 0;
+    }, sel);
+  const BUILT = String(__testing.BEFORE_CHECKS);
+
+  await inTab(browser, { saved: { judgeMode: "two" } }, async (page) => {
+    await goTab(page, "Model");
+    await closed(page);
+    ok("with the switch off, the box is not shown", !(await vis(page, '#drawer [data-arf-row="judgeBeforeChecks"]')));
+    ok("and nor is its button", !(await vis(page, '#drawer [data-arf-jevbefore="builtin"]')));
+  });
+
+  await inTab(
+    browser,
+    { saved: { judgeMode: "two", judgeBefore: true, judgeBeforeChecks: "`reply` is made up to match `previous_reply`." } },
+    async (page) => {
+      await goTab(page, "Model");
+      await closed(page);
+      const box = () => page.evaluate(() => (document.querySelector('#drawer [data-arf-field="judgeBeforeChecks"]') || {}).value);
+      ok("with the switch on, the box shows what is saved", (await box()) === "`reply` is made up to match `previous_reply`.", await box());
+      ok("and its own button for the built-in checks", await vis(page, '#drawer [data-arf-jevbefore="builtin"]'));
+      const press = async () => {
+        await page.evaluate(() => document.querySelector('#drawer [data-arf-jevbefore="builtin"]').click());
+        await settle(page);
+        await settle(page);
+      };
+      // With no host dialog, the first press asks for a second one.
+      await press();
+      ok("the first press asks for a second, and changes nothing yet", (await box()) !== BUILT, await box());
+      await press();
+      ok("pressing it again puts the built-in comparison checks back", (await box()) === BUILT, await box());
+      await press();
+      const line = await page.evaluate(() => (document.querySelector('#drawer [data-arf-jevbefore="said"]') || {}).textContent || "");
+      ok("and pressed again, it says they are already the built-in ones", /already the built-in checks/.test(line), line);
+    },
+  );
+}
+
+console.log("\na note when it asks again");
+{
+  // A switch under Ask again when a check fails, shown once that is above 0.
+  // On, it shows who the notes come from and a fold with the three notes,
+  // each holding its built-in text and a way back to it.
+  const vis = (page, sel) =>
+    page.evaluate((sel) => {
+      const n = document.querySelector(sel);
+      return !!n && !n.closest("[hidden]") && n.getClientRects().length > 0;
+    }, sel);
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Limits");
+      ok(label + ": with Ask again at 0, the switch is not shown", !(await vis(page, '#drawer [data-arf-row="askNote"]')));
+    });
+
+    await inTab(browser, { viewport, touch, saved: { enabled: true, retryRefine: 1 } }, async (page) => {
+      const errors = [];
+      page.on("pageerror", (e) => errors.push(String(e)));
+      await goTab(page, "Limits");
+      ok(label + ": with Ask again above 0, the switch is shown, and off", await vis(page, '#drawer [data-arf-row="askNote"]') &&
+        !(await page.evaluate(() => document.querySelector('#drawer [data-arf-row="askNote"] input[type="checkbox"]').checked)));
+      ok(label + ": its rows are not shown while it is off", !(await vis(page, '#drawer [data-arf-row="askNoteRole"]')));
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-row="askNote"] input[type="checkbox"]').click());
+      await settle(page);
+      await settle(page);
+      ok(label + ": switched on, Who the notes come from is shown", await vis(page, '#drawer [data-arf-row="askNoteRole"]'));
+      const role = await page.evaluate(() => (document.querySelector('#drawer [data-arf-field="askNoteRole"]') || {}).value);
+      ok(label + ": and is User", role === "user", String(role));
+      await page.evaluate(() => {
+        const h = [...document.querySelectorAll("#drawer [aria-expanded]")].find((b) => /What the notes say/.test(b.textContent));
+        h.click();
+      });
+      await settle(page);
+      await settle(page);
+      const boxes = await page.evaluate(() =>
+        ["askNoteRefused", "askNoteSoftened", "askNoteEmpty", "askNoteBroken"].map((k) => {
+          const b = document.querySelector('#drawer [data-arf-field="' + k + '"]');
+          return b && !b.closest("[hidden]") ? b.value : null;
+        }));
+      ok(label + ": the fold holds the four notes with their built-in text",
+        /^Your last answer declined to rewrite/.test(boxes[0] || "") && /^Your last rewrite took out or toned down/.test(boxes[1] || "") && /^Your last answer was empty/.test(boxes[2] || "") && /^Your last rewrite came back broken/.test(boxes[3] || ""),
+        JSON.stringify(boxes));
+      ok(label + ": each has its own button for the built-in text",
+        (await vis(page, '#drawer [data-arf-asknoterefused="builtin"]')) && (await vis(page, '#drawer [data-arf-asknotesoftened="builtin"]')) && (await vis(page, '#drawer [data-arf-asknoteempty="builtin"]')) && (await vis(page, '#drawer [data-arf-asknotebroken="builtin"]')));
+
+      // Typed over, then put back.
+      await page.evaluate(() => {
+        const b = document.querySelector('#drawer [data-arf-field="askNoteEmpty"]');
+        b.value = "Write it again.";
+        b.dispatchEvent(new Event("input", { bubbles: true }));
+        b.dispatchEvent(new Event("change", { bubbles: true }));
+        b.blur();
+      });
+      await settle(page);
+      await new Promise((r) => setTimeout(r, 600));
+      const typed = await page.evaluate(() => {
+        const raw = localStorage.getItem("lv-auto-refine:settings:v1");
+        return raw ? JSON.parse(raw).askNoteEmpty : null;
+      });
+      ok(label + ": a note you type is saved", typed === "Write it again.", JSON.stringify(typed));
+      const press = async () => {
+        await page.evaluate(() => document.querySelector('#drawer [data-arf-asknoteempty="builtin"]').click());
+        await settle(page);
+        await settle(page);
+      };
+      await press();
+      await press();
+      const back = await page.evaluate(() => (document.querySelector('#drawer [data-arf-field="askNoteEmpty"]') || {}).value);
+      ok(label + ": Use the built-in text puts the note back", /^Your last answer was empty/.test(back || ""), String(back));
+
+      const look = await page.evaluate((touch) => {
+        const out = { sideways: document.documentElement.scrollWidth > window.innerWidth + 1, small: [] };
+        if (touch)
+          for (const n of document.querySelectorAll('#drawer [data-arf-row^="askNote"] input, #drawer [data-arf-row^="askNote"] select, #drawer [data-arf-row^="askNote"] button, #drawer [data-arf-asknoterefused="builtin"], #drawer [data-arf-asknotesoftened="builtin"], #drawer [data-arf-asknoteempty="builtin"], #drawer [data-arf-asknotebroken="builtin"]')) {
+            if (n.closest("[hidden]") || !n.getClientRects().length || n.type === "checkbox") continue;
+            if (n.offsetHeight < 32) out.small.push((n.getAttribute("data-arf-field") || n.textContent || n.tagName).slice(0, 30) + ":" + n.offsetHeight);
+          }
+        return out;
+      }, touch);
+      ok(label + ": nothing runs off the side", !look.sideways, "");
+      if (touch) ok(label + ": every control is at least 32 pixels high", look.small.length === 0, JSON.stringify(look.small));
+
+      // The Log says which note went with an ask.
+      await page.evaluate(() => {
+        window.__fromBackend({ type: "refine_progress", stage: "retrying", attempt: 2, of: 2, note: "After a refusal" });
+      });
+      await goTab(page, "Log");
+      await settle(page);
+      const said = await page.evaluate(() => [...document.querySelectorAll("#drawer [data-arf-logline]")].map((n) => n.textContent).join(" | "));
+      ok(label + ": the Log names the note that went", /asking again, with the note After a refusal/.test(said), said.slice(0, 200));
+      ok(label + ": no errors", errors.length === 0, errors.join(" | "));
+    });
+  }
+}
+
+console.log("\nevery fixed text is a box of its own");
+{
+  // Nothing sent to a model is hidden: the worn-phrase check, the lead-in to
+  // what the checks found, and the note about the stand-ins each have a box
+  // with the built-in text in it and a way back to it.
+  const vis = (page, sel) =>
+    page.evaluate((sel) => {
+      const n = document.querySelector(sel);
+      return !!n && !n.closest("[hidden]") && n.getClientRects().length > 0;
+    }, sel);
+  const val = (page, key) =>
+    page.evaluate((k) => (document.querySelector('#drawer [data-arf-field="' + k + '"]') || {}).value, key);
+
+  await inTab(browser, { saved: { judgeMode: "two", judgeWorn: true } }, async (page) => {
+    await goTab(page, "Model");
+    await closed(page);
+    ok("How it asks shows the built-in worn-phrase check", (await val(page, "judgeWornCheck")) === String(__testing.WORN_CHECK), await val(page, "judgeWornCheck"));
+    ok("with its own button", await vis(page, '#drawer [data-arf-jevworn="builtin"]'));
+    ok("the lead-in to what the checks found shows the built-in text", (await val(page, "judgeFoundLead")) === String(__testing.FOUND_LEAD), await val(page, "judgeFoundLead"));
+    ok("with its own button", await vis(page, '#drawer [data-arf-jevlead="builtin"]'));
+    // Typed over, then put back with the button: a first press asks for a
+    // second, with no host dialog on this page.
+    await page.evaluate(() => {
+      const ta = document.querySelector('#drawer [data-arf-field="judgeFoundLead"]');
+      ta.value = "Made-up lead-in.";
+      ta.dispatchEvent(new Event("input", { bubbles: true }));
+      ta.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle(page);
+    for (let i = 0; i < 2; i++) {
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-jevlead="builtin"]').click());
+      await settle(page);
+      await settle(page);
+    }
+    ok("and the button puts the built-in lead-in back", (await val(page, "judgeFoundLead")) === String(__testing.FOUND_LEAD), await val(page, "judgeFoundLead"));
+  });
+
+  await inTab(browser, { saved: { judgeMode: "two", judgeWorn: false } }, async (page) => {
+    await goTab(page, "Model");
+    await closed(page);
+    ok("with worn phrases off, How it asks is not shown", !(await vis(page, '#drawer [data-arf-row="judgeWornCheck"]')));
+  });
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Limits");
+    await closed(page);
+    ok("the note about the stand-ins shows the built-in text", (await val(page, "protectNote")) === String(__testing.PROTECT_NOTE), await val(page, "protectNote"));
+    ok("with its own button", await vis(page, '#drawer [data-arf-protectnote="builtin"]'));
+  });
+}
+
+console.log("\none model or two");
+{
+  // Two Decision connections as the backend lists them. Made up.
+  const LIST = [
+    { id: "dc-1", name: "Quick checks", provider: "openrouter", model: "~typesafe/jev-latest", isDefault: true, hasKey: true },
+    { id: "dc-2", name: "Slow checks", provider: "typesafe", model: "jev-1.14.0", isDefault: false, hasKey: false },
+  ];
+  const answer = (page, msg) =>
+    page.evaluate(async (msg) => {
+      window.__fromBackend({ type: "decision_connections", requestId: "x", ...msg });
+      await new Promise((r) => setTimeout(r, 60));
+    }, msg);
+  const shown = (page) =>
+    page.evaluate(() => {
+      const vis = (sel) => {
+        const n = document.querySelector(sel);
+        return !!n && !n.closest("[hidden]") && n.getClientRects().length > 0;
+      };
+      const sel = document.querySelector('#drawer [data-arf-field="judgeConnection"]');
+      const problem = document.querySelector('#drawer [data-arf-decision="problem"]');
+      const test = document.querySelector('#drawer [data-arf-jev="test"]');
+      return {
+        mode: vis('#drawer [data-arf-row="judgeMode"]'),
+        connection: vis('#drawer [data-arf-row="judgeConnection"]'),
+        checks: vis('#drawer [data-arf-row="judgeChecks"]'),
+        line: vis('#drawer [data-arf-row="judgeOver"]'),
+        builtIn: vis("#drawer [data-arf-jevchecks]"),
+        byHand: vis('#drawer [data-arf-row="judgeByHand"]'),
+        after: vis('#drawer [data-arf-row="judgeAfter"]'),
+        before: vis('#drawer [data-arf-row="judgeBefore"]'),
+        found: vis("#drawer [data-arf-jevfound]"),
+        test: vis('#drawer [data-arf-jev="test"]'),
+        testOff: !!test && test.disabled,
+        options: sel ? [...sel.options].map((o) => o.textContent) : [],
+        problem: problem && vis('#drawer [data-arf-decision="problem"]') ? problem.textContent : "",
+        // Nothing left in the card for a key, a host or an address.
+        oldParts: !!document.querySelector('#drawer [data-arf-jevkey], #drawer [data-arf-row="judgeHost"], #drawer [data-arf-row="judgeUrl"]'),
+      };
+    });
+  const pick = (page, key, value) =>
+    page.evaluate(
+      ({ key, value }) => {
+        const sel = document.querySelector('#drawer [data-arf-field="' + key + '"]');
+        sel.value = value;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+      { key, value },
+    );
+
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    const errors = await inTab(browser, { viewport, touch }, async (page) => {
+      await goTab(page, "Model");
+      await settle(page);
+      const asked = await page.evaluate(() => window.__sent.filter((m) => m.type === "list_decision_connections").length);
+      ok(label + ": the panel asks for the Decision connections on load", asked >= 1, String(asked));
+      const one = await shown(page);
+      ok(label + ": the mode is on the Model tab", one.mode, JSON.stringify(one));
+      ok(label + ": with one model nothing else about the second model shows",
+        !one.connection && !one.checks && !one.line && !one.builtIn && !one.byHand && !one.after && !one.before && !one.found && !one.test, JSON.stringify(one));
+
+      await pick(page, "judgeMode", "two");
+      await closed(page);
+      await answer(page, { list: LIST, state: "ok" });
+      await settle(page);
+      const two = await shown(page);
+      ok(label + ": with two, the connection, the checks and the line show", two.connection && two.checks && two.line, JSON.stringify(two));
+      ok(label + ": and no key box, host or address", !two.oldParts, JSON.stringify(two));
+      ok(label + ": the picker offers the default, then each connection with its model",
+        two.options.join("|") === "Your default Decision connection (Quick checks)|Quick checks (~typesafe/jev-latest) - default|Slow checks (jev-1.14.0)", JSON.stringify(two.options));
+      ok(label + ": with a default that has a key, nothing is wrong and Test can be pressed", !two.problem && two.test && !two.testOff, JSON.stringify(two));
+      ok(label + ": and the switches for the rest show", two.byHand && two.after && two.before, JSON.stringify(two));
+
+      // A connection with no key saved.
+      await pick(page, "judgeConnection", "dc-2");
+      await settle(page);
+      const noKey = await shown(page);
+      ok(label + ": a connection with no key says so, and Test waits", /has no key saved/.test(noKey.problem) && noKey.testOff, JSON.stringify(noKey));
+
+      // One connection, the default: the default choice alone, unless that
+      // connection is the one picked.
+      await pick(page, "judgeConnection", "");
+      await answer(page, { list: LIST.slice(0, 1), state: "ok" });
+      await settle(page);
+      const single = await shown(page);
+      ok(label + ": with one connection, the default, only the default choice is listed",
+        single.options.join("|") === "Your default Decision connection (Quick checks)", JSON.stringify(single.options));
+      await answer(page, { list: LIST, state: "ok" });
+      await settle(page);
+      await pick(page, "judgeConnection", "dc-2");
+      await settle(page);
+
+      // A connection that is gone is kept in the list and named.
+      await answer(page, { list: LIST.slice(0, 1), state: "ok" });
+      await settle(page);
+      const gone = await shown(page);
+      ok(label + ": a picked connection that is gone is named in the list", gone.options.indexOf("A Decision connection that is gone") >= 0, JSON.stringify(gone.options));
+      ok(label + ": and the card says to pick another", /picked is gone/.test(gone.problem), JSON.stringify(gone));
+      await pick(page, "judgeConnection", "");
+      await settle(page);
+
+      // No connections at all, and the other ways the list can come back.
+      await answer(page, { list: [], state: "ok" });
+      await settle(page);
+      ok(label + ": with none, it says where to add one", /under Decision models in Lumiverse's Connections panel/.test((await shown(page)).problem));
+      await answer(page, { list: [], state: "old" });
+      await settle(page);
+      ok(label + ": an older Lumiverse says to update it", /Update Lumiverse/.test((await shown(page)).problem));
+      await answer(page, { list: [], state: "refused" });
+      await settle(page);
+      ok(label + ": a refused permission says so", /permission is refused/.test((await shown(page)).problem));
+
+      // Test asks the backend, through the connection in use.
+      await answer(page, { list: LIST, state: "ok" });
+      await settle(page);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-jev="test"]').click());
+      await settle(page);
+      const test = await page.evaluate(() => window.__sent.filter((m) => m.type === "jev_test").length);
+      ok(label + ": Test asks the backend", test === 1, String(test));
+      const said = await page.evaluate(async () => {
+        const last = window.__sent.filter((m) => m.type === "jev_test").pop();
+        window.__fromBackend({ type: "jev_tested", requestId: last.requestId, ok: true, pct: 97, over: 30, model: "typesafe/jev-1.14", check: "The cat in `reply` knocks things off the table.", cost: 0 });
+        await new Promise((r) => setTimeout(r, 60));
+        return document.querySelector("#drawer [data-arf-jevsaid]").textContent;
+      });
+      ok(label + ": and says the connection works", /The Decision connection works/.test(said), said);
+
+      // Nothing runs off the side.
+      const fit = await page.evaluate(() => {
+        const d = document.getElementById("drawer");
+        const r = d.getBoundingClientRect();
+        let over = 0;
+        for (const n of d.querySelectorAll("*")) {
+          const b = n.getBoundingClientRect();
+          if (b.width && b.right > r.right + 1) over++;
+        }
+        return { over, sideways: document.documentElement.scrollWidth > innerWidth };
+      });
+      ok(label + ": nothing runs off the side", fit.over === 0 && !fit.sideways, JSON.stringify(fit));
+      if (touch) {
+        const tall = await page.evaluate(() => document.querySelector('#drawer [data-arf-jev="test"]').getBoundingClientRect().height);
+        ok(label + ": Test is a 32px tap target", tall >= 32, String(tall));
+      }
+
+      // A mistake in the checks is put right with one button, which asks first
+      // and touches nothing else on the card.
+      const checksNow = () => page.evaluate(() => document.querySelector('#drawer [data-arf-field="judgeChecks"]').value);
+      const pressBuiltIn = async () => {
+        await page.evaluate(() => document.querySelector('#drawer [data-arf-jevchecks="builtin"]').click());
+        await settle(page);
+        await settle(page);
+      };
+      await page.evaluate(() => {
+        window.__confirms = [];
+        window.__toasts = [];
+      });
+      await pressBuiltIn();
+      const same = await page.evaluate(() => ({
+        asked: window.__confirms.length,
+        told: window.__toasts.slice(),
+        line: (document.querySelector('#drawer [data-arf-jevchecks="said"]') || {}).textContent || "",
+      }));
+      ok(label + ": pressed on the built-in checks, it asks nothing", same.asked === 0, JSON.stringify(same));
+      ok(label + ": and says beside the button they are already the built-in ones", /already the built-in checks\. Nothing changed\./.test(same.line), JSON.stringify(same));
+      ok(label + ": without a pop-up", same.told.length === 0, JSON.stringify(same));
+      await page.evaluate(() => {
+        const ta = document.querySelector('#drawer [data-arf-field="judgeChecks"]');
+        ta.value = "`reply` is made-up.";
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+        ta.dispatchEvent(new Event("blur"));
+      });
+      await pick(page, "judgeConnection", "dc-1");
+      await settle(page);
+      await page.evaluate(() => {
+        window.__confirmSay = false;
+      });
+      await pressBuiltIn();
+      ok(label + ": saying no leaves your checks", (await checksNow()) === "`reply` is made-up.", await checksNow());
+      await page.evaluate(() => {
+        window.__confirmSay = true;
+      });
+      await pressBuiltIn();
+      ok(label + ": saying yes puts the built-in checks back", (await checksNow()) === STOCK_DEFAULTS.judgeChecks, await checksNow());
+      const kept = await page.evaluate(() => {
+        const last = window.__sent.filter((m) => m.type === "set_settings").pop().settings;
+        return { mode: last.judgeMode, connection: last.judgeConnection, checks: last.judgeChecks };
+      });
+      ok(label + ": and saves them, with the mode and the connection left as they were",
+        kept.checks === STOCK_DEFAULTS.judgeChecks && kept.mode === "two" && kept.connection === "dc-1", JSON.stringify(kept));
+
+      // Back to one model: the connection row goes with the rest.
+      await pick(page, "judgeMode", "one");
+      await closed(page);
+      const back = await shown(page);
+      ok(label + ": with one model again, the connection and the checks go", !back.connection && !back.checks && !back.test, JSON.stringify(back));
+    });
+    ok(label + ": no errors on the card", errors.length === 0, errors.join("\n         "));
+  }
+
+  // Settings from before: the line of the model that was picked becomes the
+  // one line.
+  await inTab(browser, { saved: { judgeMode: "two", judgeWho: "span", spanOver: 42, judgeOver: 30 } }, async (page) => {
+    await goTab(page, "Model");
+    await settle(page);
+    const v = await page.evaluate(() => (document.querySelector('#drawer [data-arf-field="judgeOver"]') || {}).value);
+    ok("an older setup's line for the model it picked is kept", v === "42", String(v));
+  });
+}
+
+console.log("\nthe notification for a finished refine is a switch, off by default");
+{
+  // The card already shows a finished refine, so the Lumiverse notification is
+  // off unless somebody turns it on. Phone and laptop.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const on of [false, true]) {
+      await inTab(browser, { viewport, touch, saved: on ? { enabled: true, toast: true } : { enabled: true } }, async (page) => {
+        await goTab(page, "Setup");
+        await settle(page);
+        const out = await page.evaluate(async () => {
+          window.__toasts = [];
+          window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", before: "The lamp was lit.", after: "The lamp burned." });
+          await new Promise((r) => setTimeout(r, 300));
+          const row = document.querySelector('#drawer [data-arf-row="toast"]');
+          const box = row ? row.querySelector('input[type="checkbox"]') : null;
+          return {
+            toasts: window.__toasts.slice(),
+            label: row ? row.textContent : "",
+            checked: box ? box.checked : null,
+          };
+        });
+        // A refine asked for by hand ends with a second answer, to the button.
+        // That answer sends one only when the switch is on.
+        const byHand = await page.evaluate(async () => {
+          window.__toasts = [];
+          window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m3", before: "The gate was shut.", after: "The gate stayed shut." });
+          window.__fromBackend({ type: "refine_result", chatId: "c1", messageId: "m3", ok: true });
+          await new Promise((r) => setTimeout(r, 300));
+          return window.__toasts.filter((t) => /^Reply refined\./.test(t)).length;
+        });
+        ok(label + (on ? ": switched on, a refine asked for by hand sends one" : ": switched off, a refine asked for by hand sends none"),
+          byHand === (on ? 1 : 0), String(byHand));
+        if (!on) {
+          ok(label + ": by default, a finished refine sends no notification", out.toasts.length === 0, JSON.stringify(out.toasts));
+          ok(label + ": the switch says what it is and starts off",
+            /Lumiverse notification when a refine finishes/.test(out.label) && out.checked === false, JSON.stringify(out));
+        } else {
+          ok(label + ": switched on, a finished refine sends one", out.toasts.length === 1 && /^Reply refined\./.test(out.toasts[0]), JSON.stringify(out.toasts));
+        }
+      });
+    }
+  }
+}
+
+console.log("\na refine you start is logged once");
+{
+  // A refine asked for by hand is answered twice: once as the save, once as the
+  // answer to the button. The Log says it once.
+  await inTab(browser, { saved: { enabled: true } }, async (page) => {
+    await goTab(page, "Log");
+    // Read by wording rather than counted: the Log tab shows each line twice,
+    // once in the Log and once in the report below it.
+    const text = () => page.evaluate(() => document.querySelector("#drawer").textContent);
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", before: "The old line.", after: "The new line." });
+      window.__fromBackend({ type: "refine_result", chatId: "c1", messageId: "m2", ok: true });
+    });
+    await closed(page);
+    const once = await text();
+    ok("a saved refine asked for by hand is said once, as the save",
+      /refined a reply in/.test(once) && !/refined a reply on request/.test(once));
+    // An answer with no save heard before it still says so.
+    await page.evaluate(() => window.__fromBackend({ type: "refine_result", chatId: "c1", messageId: "m9", ok: true }));
+    await closed(page);
+    ok("an answer with no save before it is still logged", /refined a reply on request/.test(await text()));
+  });
+}
+
+console.log("\nwhat the second model found has somewhere to go");
+{
+  // The line about Checks Found is for somebody whose prompt has nowhere to
+  // put it. Once a block takes {{checks_found}}, it has nothing to say.
+  const errors = await inTab(
+    browser,
+    {
+      saved: {
+        judgeMode: "two",
+        blocks: [
+          { id: "t", name: "Passage", on: true, role: "user", text: "<passage>{{message}}</passage>" },
+          { id: "j", name: "Found", on: true, role: "system", text: "<found>{{checks_found}}</found>" },
+        ],
+      },
+    },
+    async (page) => {
+      await goTab(page, "Model");
+      await settle(page);
+      const note = await page.evaluate(() => { const n = document.querySelector("#drawer [data-arf-jevfound]"); return !!n && n.getClientRects().length > 0; });
+      ok("with a block taking {{checks_found}}, the line is not shown", !note);
+    },
+  );
+  ok("no errors with a block taking what it found", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\nwhat the second model decided");
+{
+  const card = (page) =>
+    page.evaluate(() => {
+      const c = document.querySelector("#drawer [data-arf-jevcard]");
+      if (!c) return null;
+      return {
+        text: c.textContent,
+        over: c.querySelectorAll('[data-arf-jevcheck="over"]').length,
+        under: c.querySelectorAll('[data-arf-jevcheck="under"]').length,
+        widths: Array.from(c.querySelectorAll(".arf-jevfill")).map((f) => f.style.width),
+      };
+    });
+  const one = await inTab(browser, { saved: { enabled: true, judgeMode: "one" } }, async (page) => {
+    await goTab(page, "Log");
+    ok("with one model there is no card for the second model", (await card(page)) === null);
+    // With one model, no model name such as Jev shows anywhere.
+    const seen = [];
+    for (const t of ["Prompt", "Context", "Model", "Limits", "Log", "Setup"]) {
+      await goTab(page, t);
+      await closed(page);
+      seen.push(
+        ...(await page.evaluate(() => {
+          const out = [];
+          const walk = document.createTreeWalker(document.getElementById("drawer"), NodeFilter.SHOW_TEXT);
+          let n;
+          while ((n = walk.nextNode())) {
+            const el = n.parentElement;
+            if (!el || !el.getClientRects().length || el.closest("[hidden]")) continue;
+            if (el.closest('[data-arf-card="One model or two"]')) continue;
+            if (/jev/i.test(n.textContent)) out.push(n.textContent.trim().slice(0, 80));
+          }
+          return out;
+        })),
+      );
+    }
+    ok("with one model no tab names a second model", seen.length === 0, seen.join(" | "));
+  });
+  const errors = await inTab(browser, { saved: { enabled: true, judgeMode: "two" } }, async (page) => {
+    await goTab(page, "Log");
+    const empty = await card(page);
+    ok("with two models the card is there before it has read anything", !!empty && /Nothing yet/.test(empty.text), JSON.stringify(empty));
+    await page.evaluate(() =>
+      window.__fromBackend({
+        type: "judge_said",
+        chatId: "c1",
+        messageId: "m2",
+        refine: true,
+        failed: false,
+        why: "",
+        scores: [
+          { id: "check_1", check: "`reply` repeats itself.", pct: 72 },
+          { id: "check_2", check: "`reply` uses stock phrases.", pct: 18 },
+        ],
+        cost: 0.00002,
+        model: "jev-1.13.0",
+        over: 50,
+      }),
+    );
+    // A Log line landing just after another is painted a moment later, not in
+    // the same frame, so this waits the repaint out rather than two frames.
+    await closed(page);
+    const got = await card(page);
+    ok("after a decision it shows each check", !!got && /reply repeats itself/.test(got.text) && /reply uses stock phrases/.test(got.text), JSON.stringify(got));
+    ok("the one that reached the line is marked, the other is not", !!got && got.over === 1 && got.under === 1, JSON.stringify(got));
+    ok("each bar is as long as its score", !!got && got.widths.join() === "72%,18%", JSON.stringify(got));
+    ok("it names the model that answered and says the reply was refined", !!got && /jev-1\.13\.0/.test(got.text) && /refined/.test(got.text), JSON.stringify(got));
+    const wrongOnRefined = await page.evaluate(() => !!document.querySelector("#drawer [data-arf-jevwrong]"));
+    ok("a refined reply does not say the second model can be wrong", !wrongOnRefined);
+    // A reply left alone says the second model can be wrong, and how to
+    // refine it anyway, since that is when somebody wonders why.
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "judge_said", chatId: "c1", messageId: "m5", refine: false, failed: false, why: "", scores: [{ id: "check_1", check: "x", pct: 12 }], cost: 0, model: "jev-1.13.0", over: 40 });
+    });
+    await closed(page);
+    const wrong = await page.evaluate(() => (document.querySelector("#drawer [data-arf-jevwrong]") || {}).textContent || "");
+    ok("a reply left alone says the second model can be wrong, and how to refine it anyway",
+      /can be wrong/.test(wrong) && /press the refine button on the message/.test(wrong), wrong);
+    // A second reply left alone, and a third it could not decide on.
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "judge_said", chatId: "c1", messageId: "m3", refine: false, failed: false, why: "", scores: [{ id: "check_1", check: "x", pct: 10 }], cost: 0.00002, model: "jev-1.13.0", over: 50 });
+      window.__fromBackend({ type: "judge_said", chatId: "c1", messageId: "m4", refine: true, failed: true, why: "the provider turned the call down", scores: [], cost: 0, model: "", over: 50 });
+    });
+    // Log lines landing together are painted once, a moment after the first.
+    await closed(page);
+    const tally = await page.evaluate(() => (document.querySelector("#drawer [data-arf-jevtally]") || {}).textContent || "");
+    ok("it counts the replies it read, left alone and could not decide on", /read 4 replies/.test(tally) && /left 2 alone/.test(tally) && /could not decide on 1/.test(tally), tally);
+    // The second model reading a rewrite, with a check still over the line. It is not a
+    // reply read, so the count of replies stays where it was.
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "judge_said", chatId: "c1", messageId: "m2", after: true, refine: true, failed: false, why: "", scores: [{ id: "check_1", check: "`reply` repeats itself.", pct: 81 }], cost: 0.00002, model: "jev-1.13.0", over: 50 });
+    });
+    await closed(page);
+    const again = await card(page);
+    const tally2 = await page.evaluate(() => (document.querySelector("#drawer [data-arf-jevtally]") || {}).textContent || "");
+    ok("a read of the rewrite says so, and that the reply was refined once more",
+      !!again && /read a rewrite/.test(again.text) && /refined once more/.test(again.text) && /refined again/.test(again.text), JSON.stringify(again));
+    ok("and is counted apart from the replies", /read 4 replies/.test(tally2) && /read 1 rewrite and sent 1 back/.test(tally2), tally2);
+    const logged = await page.evaluate(() => document.querySelector("#drawer").textContent);
+    ok("the Log says it read the rewrite", /read the rewrite and a check still reached the line/.test(logged));
+    // A real request is not shown anywhere, so the Log says when what it found
+    // went into it.
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "jev_found_sent", chatId: "c1", messageId: "m2", count: 2 });
+      window.__fromBackend({ type: "jev_found_sent", chatId: "c1", messageId: "m2", after: true, count: 1 });
+    });
+    await closed(page);
+    const sentLog = await page.evaluate(() => document.querySelector("#drawer").textContent);
+    ok("the Log says what it found went to the refine model, and how many checks",
+      /what the second model found went to the refine model: 2 checks/.test(sentLog));
+    ok("and says so for the second refine too", /went to the second refine: 1 check/.test(sentLog));
+    await page.evaluate(() => {
+      const b = Array.from(document.querySelectorAll("#drawer [data-arf-jevcard] button")).find((x) => x.textContent === "Clear");
+      b.click();
+    });
+    await settle(page);
+    const cleared = await card(page);
+    ok("Clear empties the card and the count", !!cleared && /Nothing yet/.test(cleared.text), JSON.stringify(cleared));
+
+    // The Test button's answer lands in the same card, marked as a test, with
+    // the Decision connection it went through. It is not a reply, so the
+    // count does not show it.
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "decision_connections",
+        list: [{ id: "dc-1", name: "Quick checks", provider: "openrouter", model: "~typesafe/jev-latest", isDefault: true, hasKey: true }],
+        state: "ok",
+      });
+      window.__fromBackend({
+        type: "jev_tested",
+        ok: true,
+        why: "",
+        model: "jev-1.13.0",
+        check: "The cat in `reply` knocks things off the table.",
+        pct: 98,
+        over: 50,
+        cost: 0,
+      });
+    });
+    await closed(page);
+    const test = await page.evaluate(() => {
+      const c = document.querySelector("#drawer [data-arf-jevcard]");
+      return c
+        ? {
+            text: c.textContent,
+            mark: c.getAttribute("data-arf-jevtest"),
+            sent: (c.querySelector("[data-arf-jevsent]") || {}).textContent || "",
+            tally: !!c.querySelector("[data-arf-jevtally]"),
+            widths: Array.from(c.querySelectorAll(".arf-jevfill")).map((f) => f.style.width),
+          }
+        : null;
+    });
+    ok("a test shows in the card, marked as a test", !!test && test.mark === "ok" && /made-up question/.test(test.text) && /The cat in reply knocks things off the table/.test(test.text) && test.widths.join() === "98%", JSON.stringify(test));
+    ok("it says which Decision connection the test went through", !!test && /Asked through the Decision connection Quick checks\./.test(test.sent), JSON.stringify(test));
+    ok("it says when the provider reported no cost", !!test && /reported no cost/.test(test.text), JSON.stringify(test));
+    ok("a test is not counted as a reply", !!test && !test.tally, JSON.stringify(test));
+    const lastNote = () =>
+      page.evaluate(() => {
+        const n = window.__sent.filter((m) => m && m.type === "notify").pop();
+        return n ? { kind: n.kind, text: n.text } : null;
+      });
+    const okNote = await lastNote();
+    ok("a test that worked says so in a green notification, with the model",
+      !!okNote && okNote.kind === "success" && /answered/.test(okNote.text) && /jev-1\.13\.0/.test(okNote.text) && /The Decision connection works/.test(okNote.text), JSON.stringify(okNote));
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "jev_tested", ok: false, why: "the provider said the key is not valid", model: "", check: "", pct: null, over: 50, cost: 0 });
+    });
+    await closed(page);
+    const failed = await page.evaluate(() => {
+      const c = document.querySelector("#drawer [data-arf-jevcard]");
+      return { mark: c.getAttribute("data-arf-jevtest"), text: c.textContent, bars: c.querySelectorAll(".arf-jevbar").length };
+    });
+    ok("a failed test says why", failed.mark === "failed" && /key is not valid/.test(failed.text) && failed.bars === 0, JSON.stringify(failed));
+    const badNote = await lastNote();
+    ok("and says why in a red notification", !!badNote && badNote.kind === "error" && /did not answer: the provider said the key is not valid/.test(badNote.text), JSON.stringify(badNote));
+  });
+  ok("no errors on the card", one.length === 0 && errors.length === 0, one.concat(errors).join("\n         "));
+}
+
+// ---- folding the blocks ----
+// The bar over the list is one press for all of them, and the folds belong to
+// the preset the picker names. Presets saved from one another share block ids,
+// so folds keyed by id alone followed you from one preset into the next.
+console.log("\nfolding the blocks");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    await settle(page);
+    const bar = () =>
+      page.evaluate(() => {
+        const b = document.querySelector("#drawer [data-arf-foldall]");
+        const r = b.getBoundingClientRect();
+        const line = parseFloat(getComputedStyle(b).lineHeight) || 16;
+        return {
+          says: b.textContent,
+          count: document.querySelector("#drawer [data-arf-foldcount]").textContent,
+          oneLine: r.height < line * 2 + 12,
+          shut: document.querySelectorAll('#drawer .arf-blockfold[aria-expanded="false"]').length,
+          all: document.querySelectorAll("#drawer .arf-blockfold").length,
+        };
+      });
+    const press = (sel) => page.evaluate((s) => document.querySelector(s).click(), sel);
+    const saveAs = (name) =>
+      page.evaluate((n) => {
+        const box = document.querySelector('#drawer [data-arf-field="presetName"]');
+        box.value = n;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-preset="new"]').click();
+      }, name);
+    const pick = (name) =>
+      page.evaluate((n) => {
+        const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+        sel.value = n;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      }, name);
+
+    const first = await bar();
+    ok("the bar offers to fold them all", /Fold all/.test(first.says), first.says);
+    ok("on one line", first.oneLine, JSON.stringify(first));
+    ok("and counts the blocks", /^\d+ blocks?$/.test(first.count), first.count);
+
+    // One caret by hand, and the count follows without the list being rebuilt.
+    await press("#drawer .arf-blockfold");
+    await settle(page);
+    ok("folding one by its caret is counted", /, 1 folded$/.test((await bar()).count), (await bar()).count);
+
+    await press("#drawer [data-arf-foldall]");
+    await settle(page);
+    const shut = await bar();
+    ok("pressing it folds every block", shut.shut === shut.all && shut.all > 0, JSON.stringify(shut));
+    ok("and it then offers to open them", /Open all/.test(shut.says), shut.says);
+
+    // A copy keeps the folds you were looking at.
+    await saveAs("Folded copy");
+    await settle(page);
+    const copy = await bar();
+    ok("saving a copy keeps its folds", copy.shut === copy.all, JSON.stringify(copy));
+
+    // Opened in a second copy, and the preset it was saved from stays folded.
+    await saveAs("Open copy");
+    await settle(page);
+    await press("#drawer [data-arf-foldall]");
+    await settle(page);
+    await pick("Folded copy");
+    await settle(page);
+    const back = await bar();
+    ok("each preset keeps its own folds", back.shut === back.all && back.all > 0, JSON.stringify(back));
+    await pick("Open copy");
+    await settle(page);
+    const other = await bar();
+    ok("and the other keeps its own", other.shut === 0, JSON.stringify(other));
+
+    // Folding a block closes its text over a moment, and opening it opens it
+    // the same way. Each ends with the block's own height back.
+    const fold = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const block = document.querySelectorAll("#drawer .arf-block")[1];
+      const btn = block.querySelector(".arf-blockfold");
+      const body = Array.from(block.children).find((c) => !c.classList.contains("arf-between"));
+      if (btn.getAttribute("aria-expanded") !== "true") {
+        btn.click();
+        await wait(700);
+      }
+      const look = () => ({ hidden: body.hidden, height: body.style.height, moving: /[1-9]/.test(getComputedStyle(body).transitionDuration) });
+      btn.click();
+      const shutting = look();
+      await wait(700);
+      const shut = look();
+      btn.click();
+      const opening = look();
+      await wait(700);
+      const open = look();
+      return { shutting, shut, opening, open };
+    });
+    ok("a block folds over a moment", !fold.shutting.hidden && fold.shutting.moving, JSON.stringify(fold.shutting));
+    ok("and is then folded, with its own height back", fold.shut.hidden && !fold.shut.height, JSON.stringify(fold.shut));
+    ok("it opens over a moment too", !fold.opening.hidden && fold.opening.moving, JSON.stringify(fold.opening));
+    ok("and is then open, with its own height back", !fold.open.hidden && !fold.open.height && !fold.open.moving, JSON.stringify(fold.open));
+  });
+  ok("no errors folding blocks", errors.length === 0, errors.join("\n         "));
+}
+
+// ---- a preset can bring a model setup with it ----
+// The other half of keeping them apart: they can still be used together, by
+// naming the setup rather than by copying its values into the preset.
+console.log("\na preset that names a model setup");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    const thinking = () =>
+      page.evaluate(
+        () => JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1") || "{}").thinkingMode,
+      );
+    const setThinking = (v) =>
+      page.evaluate((val) => {
+        const n = document.querySelector('#drawer [data-arf-field="thinkingMode"]');
+        n.value = val;
+        n.dispatchEvent(new Event("change", { bubbles: true }));
+      }, v);
+
+    // A setup saved with thinking on.
+    await goTab(page, "Model");
+    await setThinking("custom");
+    await settle(page);
+    await page.evaluate(() => {
+      const name = document.querySelector('#drawer [data-arf-field="setupName"]');
+      name.value = "Careful model";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-setup="new"]').click();
+    });
+    await settle(page);
+
+    // A preset that asks for it.
+    await goTab(page, "Prompt");
+    const offered = await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="presetSetup"]');
+      return sel ? [...sel.options].map((o) => o.value) : null;
+    });
+    ok("the preset card offers the saved setups", !!offered && offered.indexOf("Careful model") >= 0, JSON.stringify(offered));
+
+    // A built-in prompt cannot hold the setup: Update selected is grayed out on
+    // one, and switching the picker puts the box back to what the next preset
+    // carries. So picking a setup with one selected has to say where the pick is
+    // going, or it looks like it took and then goes without a word.
+    const builtInNote = () =>
+      page.evaluate(() => {
+        const n = document.querySelector('#drawer [data-arf-builtin-setup]');
+        return n ? !n.hidden : null;
+      });
+    const pickPreset = (value) =>
+      page.evaluate((val) => {
+        const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+        sel.value = val;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      }, value);
+
+    await pickPreset("A judge");
+    await settle(page);
+    ok("nothing is said about a built-in prompt before a setup is picked", (await builtInNote()) === false);
+    await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="presetSetup"]');
+      sel.value = "Careful model";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    ok("picking a setup on a built-in prompt says the copy is what keeps it", (await builtInNote()) === true);
+    const cannotUpdate = await page.evaluate(
+      () => document.querySelector('#drawer [data-arf-preset="update"]').disabled,
+    );
+    ok("and Update selected is grayed out on it, which is why", cannotUpdate === true);
+
+    // The pick survives into Save as new, which is the whole point of the line
+    // above: the copy is what carries it.
+    await page.evaluate(() => {
+      const name = document.querySelector('#drawer [data-arf-field="presetName"]');
+      name.value = "Close read";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="new"]').click();
+    });
+    await settle(page);
+    const written = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1") || "[]").map((p) => [p.name, p.setup]),
+    );
+    ok("the preset is saved with the setup it asks for", JSON.stringify(written).indexOf("Careful model") >= 0, JSON.stringify(written));
+    ok("and on a preset of your own there is nothing to say", (await builtInNote()) === false);
+
+    // Turn thinking off, then load the preset. The setup should put it back.
+    await goTab(page, "Model");
+    await setThinking("off");
+    await settle(page);
+    ok("thinking is back off before the preset is loaded", (await thinking()) === "off", await thinking());
+
+    await goTab(page, "Prompt");
+    await pickPreset("Close read");
+    await settle(page);
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-preset="load"]').click());
+    await settle(page);
+    ok("loading the preset puts its model setup on too", (await thinking()) === "custom", await thinking());
+    // The card carries its own description and a picker holding that name, so
+    // the status line is read on its own rather than the whole card.
+    const said = await page.evaluate(() => {
+      const box = document.querySelector('#drawer [data-arf-said="preset"]');
+      return box ? box.textContent : "";
+    });
+    ok("and says the setup went on with it", /went on with it/.test(said), said.slice(0, 160));
+  });
+  ok("no errors loading a preset with a setup", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\nstarting again");
+{
+  await inTab(
+    browser,
+    { saved: { contextMessages: 9, timeoutSecs: 45 }, noConfirm: true },
+    async (page) => {
+    await goTab(page, "Setup");
+    // A host with no confirm dialog, which is the path that asks in the panel
+    // instead. One press arms it, the second does it.
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-reset]').click();
+    });
+    await settle(page);
+    const still = await page.evaluate(
+      () => JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")).contextMessages,
+    );
+    ok("one press does not throw anything away", still === 9, String(still));
+    const asks = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+    ok("it asks first", /Press it again/.test(asks));
+
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-reset]').click();
+    });
+    await settle(page);
+    const after = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")),
+    );
+    // Read from CONFIG rather than written out here, so a default that moves in
+    // a release does not leave this checking a number nothing uses any more.
+    ok(
+      "the second press puts the defaults back",
+      after.contextMessages === STOCK_DEFAULTS.contextMessages &&
+        after.timeoutSecs === STOCK_DEFAULTS.timeoutSecs,
+      JSON.stringify({ after: after, want: STOCK_DEFAULTS }),
+    );
+    },
+  );
+}
+
+console.log("\nanother extension's input box is never written into");
+{
+  // Another extension can draw its own chat with its own input box, such as
+  // an agent's chat in a drawer tab. The built-in list ends with any
+  // textarea, so with the chat's own box not on the page, that one was the
+  // only match.
+  await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+    const out = await page.evaluate(async () => {
+      const other = document.createElement("div");
+      other.setAttribute("data-spindle-extension-root", "another_one");
+      other.innerHTML = '<textarea style="width:200px;height:40px"></textarea>';
+      document.body.appendChild(other);
+      const theirs = other.querySelector("textarea");
+      theirs.value = "a message for the other extension";
+      window.__sent.length = 0;
+      window.__inputClick();
+      await new Promise((r) => setTimeout(r, 60));
+      const alone = window.__sent.filter((m) => m.type === "try_refine").length;
+      // With the chat's own box there too, that one is read.
+      window.__makeComposer("i walk through it, suddenly");
+      window.__sent.length = 0;
+      window.__inputClick();
+      await new Promise((r) => setTimeout(r, 60));
+      const asked = window.__sent.filter((m) => m.type === "try_refine").pop();
+      return { alone, text: asked ? asked.text : null, theirs: theirs.value };
+    });
+    ok("with only the other extension's box on the page, nothing is sent", out.alone === 0, JSON.stringify(out));
+    ok("with the chat's box there too, the chat's box is read", /i walk through it/.test(out.text || ""), JSON.stringify(out));
+    ok("and the other extension's box is left as it was", out.theirs === "a message for the other extension", JSON.stringify(out));
+  });
+}
+
+console.log("\nthe extras, which are off until asked for");
+{
+  await inTab(browser, {}, async (page) => {
+    const quiet = await page.evaluate(() => ({
+      widget: !!window.__widget,
+      row: !!window.__inputAction,
+    }));
+    ok("no floating button and no input bar row on a fresh install", !quiet.widget && !quiet.row);
+  });
+
+  // No floating button, so the Extras row is the only way to reach this and it
+  // registers.
+  await inTab(
+    browser,
+    { saved: { inputRefine: true } },
+    async (page) => {
+    const up = await page.evaluate(() => ({
+      widget: !!window.__widget,
+      row: !!window.__inputAction,
+    }));
+    ok("the Extras row appears when there is no button to hold it", !up.widget && up.row);
+
+    // Refining the draft reads the input box, sends it, and writes the answer
+    // back through the setter the framework is listening to.
+    await page.evaluate(() => {
+      const box = window.__makeComposer("i walk through it, suddenly");
+      window.__saw = [];
+      box.addEventListener("input", () => window.__saw.push(box.value));
+      window.__inputClick();
+    });
+    const askedDraft = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "try_refine").pop();
+      return last && { text: last.text, id: last.requestId };
+    });
+    ok("it sends what you typed", !!askedDraft, JSON.stringify(askedDraft));
+    ok("with the text from the box", askedDraft && /i walk through it/.test(askedDraft.text));
+
+    await page.evaluate((id) => {
+      window.__fromBackend({ type: "try_result", requestId: id, ok: true, after: "I walk through it." });
+    }, askedDraft.id);
+    await settle(page);
+    const wrote = await page.evaluate(() => ({
+      value: document.querySelector('[data-component="InputArea"] textarea[name="chat-message"]').value,
+      events: window.__saw.length,
+    }));
+    ok("the answer goes back in the box", wrote.value === "I walk through it.", wrote.value);
+    ok("and an input event is raised, so the app sees it too", wrote.events > 0);
+
+    // The same card a reply's refine gets. Yours is not in the undo list with
+    // the replies, so it is drawn from a record of its own.
+    const card = () =>
+      page.evaluate(() => {
+        const c = document.querySelector('#drawer [data-arf-draft-undo="1"]');
+        return c ? (c.textContent || "").trim() : "";
+      });
+    ok("your draft's refine lands in the tab too", (await card()).length > 0, await card());
+    // The same word-level diff a reply's undo row shows, so both what went and
+    // what came stand on the card.
+    ok(
+      "with what changed on it, the way a reply's card has it",
+      /suddenly/.test(await card()) && /I walk through it/.test(await card()),
+      await card(),
+    );
+    const buttons = await page.evaluate(() =>
+      [...document.querySelectorAll('#drawer [data-arf-draft-undo="1"] button')].map((b) =>
+        b.textContent.trim(),
+      ),
+    );
+    ok(
+      "and a way back and a way to dismiss it",
+      buttons.includes("Put it back") && buttons.includes("Dismiss"),
+      buttons.join(", "),
+    );
+
+    await page.evaluate(() => {
+      [...document.querySelectorAll('#drawer [data-arf-draft-undo="1"] button')]
+        .find((b) => b.textContent.trim() === "Put it back")
+        .click();
+    });
+    await settle(page);
+    const back = await page.evaluate(() => ({
+      value: document.querySelector('[data-component="InputArea"] textarea[name="chat-message"]').value,
+      card: !!document.querySelector('#drawer [data-arf-draft-undo="1"]'),
+    }));
+    ok("putting it back writes the draft you wrote", back.value === "i walk through it, suddenly", back.value);
+    ok("and the card goes with it", !back.card);
+    },
+  );
+
+  // The draft is refined with the prompt for your messages. With no
+  // {{message}} in that prompt there is nowhere to put the draft, so it is left
+  // alone rather than sent to a model to be rewritten by nothing. The prompt
+  // for replies is not the one that decides it.
+  for (const [which, saved, sends] of [
+    ["the prompt for your messages", { userBlocks: [{ id: "a", name: "No turn", on: true, role: "system", text: "cut filler" }] }, false],
+    ["only the prompt for replies", { blocks: [{ id: "a", name: "No turn", on: true, role: "system", text: "cut filler" }] }, true],
+  ]) {
+    await inTab(browser, { saved: { inputRefine: true, ...saved } }, async (page) => {
+      await page.evaluate(() => {
+        window.__makeComposer("i walk through it");
+        window.__inputClick();
+      });
+      const asked = await page.evaluate(
+        () => window.__sent.filter((m) => m.type === "try_refine").length,
+      );
+      ok(
+        "with no {{message}} in " + which + ", " + (sends ? "the draft is still sent" : "nothing is sent and the draft is untouched"),
+        sends ? asked === 1 : asked === 0,
+        String(asked),
+      );
+    });
+  }
+}
+
+console.log("\nin one place at a time");
+{
+  // With a button on screen and a menu to draw, the button's menu takes over
+  // what would otherwise be a row in the chat input's Extras menu.
+  await inTab(browser, { saved: { widgetOn: true, inputRefine: true } }, async (page) => {
+    const up = await page.evaluate(() => ({
+      widget: !!window.__widget,
+      row: !!window.__inputAction,
+    }));
+    ok("the button takes the Extras row over", up.widget && !up.row);
+
+    await page.evaluate(() => {
+      window.__menuPick = null;
+      document.querySelector("#float .arf-float").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle(page);
+    const menu = await page.evaluate(() => window.__menu);
+    const keys = ((menu && menu.items) || []).map((i) => i.key);
+    ok("holding it opens Lumiverse's own menu", !!menu, JSON.stringify(menu));
+    ok("with the draft entry in it, which is where it went", keys.indexOf("draft") >= 0, keys.join(","));
+    ok("and the tab and the off switch", keys.indexOf("open") >= 0 && keys.indexOf("off") >= 0, keys.join(","));
+    // Only what the button cannot already do. A tap refines, so an entry for
+    // refining is a second button; the automatic pass and the per chat switch
+    // are settings and belong on the tab with their explanations.
+    ok(
+      "and nothing the button or the tab already covers",
+      keys.indexOf("refine") < 0 && keys.indexOf("auto") < 0 && keys.indexOf("chat") < 0,
+      keys.join(","),
+    );
+    ok("anchored to the button rather than the corner", !!(menu && menu.position && menu.position.y > 0), JSON.stringify(menu && menu.position));
+  });
+
+  // A Lumiverse too old to draw a menu. The button then has nowhere to hold the
+  // row, so the row stays in Extras rather than vanishing.
+  await inTab(
+    browser,
+    { saved: { widgetOn: true, inputRefine: true }, noMenu: true },
+    async (page) => {
+      const up = await page.evaluate(() => ({
+        widget: !!window.__widget,
+        row: !!window.__inputAction,
+      }));
+      ok("with no menu to hold it, the row stays in Extras", up.widget && up.row);
+    },
+  );
+}
+
+console.log("\nsettings that follow the account");
+{
+  // What comes down from the account is checked key by key against the
+  // defaults, so a setting with a row on the panel but no default is dropped on
+  // the way in and is the one setting that does not follow the account. Nothing
+  // about that shows on the panel: the row draws, it takes a value, it saves in
+  // this browser, and it is the one setting a second machine does not have.
+  //
+  // Every row that draws is asked for, which is why this is here and not in
+  // `bun test`: which rows exist depends on which switches are on, and the
+  // second pass turns every switch on to reach the ones that fold away.
+  // Rows that are not settings, with the reason. presetSetup is the dropdown on
+  // the preset editor naming a model setup to load alongside it: it is written
+  // into the preset being saved, not into the settings, so it has no default
+  // and wants none. Anything else turning up here is the real thing.
+  const NOT_A_SETTING = ["presetSetup"];
+  const everySwitchOn = {};
+  for (const [k, v] of Object.entries(CONFIG)) if (typeof v === "boolean") everySwitchOn[k] = true;
+  for (const [what, saved] of [
+    ["as it opens", null],
+    ["with every switch on", everySwitchOn],
+  ]) {
+    await inTab(browser, saved ? { saved: saved } : {}, async (page) => {
+      const orphans = [];
+      for (const t of ["Prompt", "Context", "Model", "Limits", "Log", "Setup"]) {
+        await goTab(page, t);
+        const keys = await page.evaluate(() =>
+          [...document.querySelectorAll("#drawer [data-arf-row]")]
+            .map((r) => r.getAttribute("data-arf-row"))
+            .filter((k) => k && k.indexOf(":") < 0),
+        );
+        for (const k of keys)
+          if (!(k in CONFIG) && NOT_A_SETTING.indexOf(k) < 0 && orphans.indexOf(k) < 0)
+            orphans.push(k);
+      }
+      ok("every row " + what + " is for a setting with a default", orphans.length === 0, orphans);
+    });
+  }
+
+  await inTab(browser, {}, async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "load_settings").pop().requestId;
+      window.__fromBackend({
+        type: "loaded_settings",
+        requestId: id,
+        settings: { protectOn: false, protectInline: true, protectThinking: false },
+      });
+    });
+    await settle(page);
+    const kept = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")),
+    );
+    ok(
+      "every switch the panel offers has a default to be read back into",
+      kept.protectInline === true && kept.protectOn === false && kept.protectThinking === false,
+      JSON.stringify({
+        protectOn: kept.protectOn,
+        protectInline: kept.protectInline,
+        protectThinking: kept.protectThinking,
+      }),
+    );
+  });
+
+  await inTab(browser, {}, async (page) => {
+    const asked = await page.evaluate(() => ({
+      settings: window.__sent.filter((m) => m.type === "load_settings").length,
+      presets: window.__sent.filter((m) => m.type === "load_presets").length,
+    }));
+    ok("it asks the account for both on load", asked.settings === 1 && asked.presets === 1);
+
+    // The account's copy wins over whatever this browser had.
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "load_settings").pop().requestId;
+      window.__fromBackend({
+        type: "loaded_settings",
+        requestId: id,
+        settings: { contextMessages: 9, timeoutSecs: 45 },
+      });
+    });
+    await settle(page);
+    const now = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")),
+    );
+    ok("what comes back wins and is cached here", now.contextMessages === 9 && now.timeoutSecs === 45);
+
+    // A value of the wrong shape falls back rather than leaving the panel
+    // holding something it cannot draw.
+    await page.evaluate(() => {
+      window.__sent.length = 0;
+      window.__fromBackend({ type: "loaded_settings", requestId: "not-the-one", settings: { timeoutSecs: 1 } });
+    });
+    await settle(page);
+    const ignored = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")).timeoutSecs,
+    );
+    ok("an answer to a question nobody asked is ignored", ignored === 45, String(ignored));
+  });
+
+  // The chats switched off follow the account too. This browser holds another
+  // list, as one shared by two accounts can. Nothing goes up before the
+  // account answers, and the account's list then replaces this browser's and
+  // is told to the backend, which runs the automatic pass.
+  await inTab(browser, { storage: { "lv-auto-refine:chats-off:v1": JSON.stringify(["chat-other-account"]) } }, async (page) => {
+    const early = await page.evaluate(() => window.__sent.filter((m) => m.type === "save_state").length);
+    ok("nothing about the chats switched off goes up before the account answers", early === 0, String(early));
+    const asked = await page.evaluate(() => {
+      const ask = window.__sent.filter((m) => m.type === "load_state").pop();
+      if (!ask) return false;
+      window.__sent.length = 0;
+      window.__fromBackend({ type: "loaded_state", requestId: ask.requestId, state: { chatsOff: ["chat-quiet"] } });
+      return true;
+    });
+    ok("it asks the account for the chats switched off on load", asked);
+    await settle(page);
+    const got = await page.evaluate(() => ({
+      local: JSON.parse(localStorage.getItem("lv-auto-refine:chats-off:v1") || "[]"),
+      told: (window.__sent.filter((m) => m.type === "set_chats_off").pop() || {}).chats || [],
+      up: window.__sent.filter((m) => m.type === "save_state").length,
+    }));
+    ok("the account's chats switched off replace this browser's", got.local.join() === "chat-quiet", JSON.stringify(got));
+    ok("and the backend is told to leave them alone", got.told.join() === "chat-quiet", JSON.stringify(got));
+    ok("and this browser's list is never sent up over them", got.up === 0, JSON.stringify(got));
+  });
+
+  // An account with no list yet takes this browser's, so updating loses nothing.
+  await inTab(browser, { storage: { "lv-auto-refine:chats-off:v1": JSON.stringify(["chat-test"]) } }, async (page) => {
+    await page.evaluate(() => {
+      const ask = window.__sent.filter((m) => m.type === "load_state").pop();
+      window.__sent.length = 0;
+      if (ask) window.__fromBackend({ type: "loaded_state", requestId: ask.requestId, state: null });
+    });
+    await settle(page);
+    const up = await page.evaluate(() => window.__sent.filter((m) => m.type === "save_state").pop());
+    ok("an account with no list takes this browser's", !!up && up.state.chatsOff.join() === "chat-test", JSON.stringify(up));
+  });
+
+  // Nothing in the account, something in this browser: this browser's copy goes
+  // up rather than staying where only this browser can see it.
+  await inTab(browser, { saved: { contextMessages: 7 } }, async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "load_settings").pop().requestId;
+      window.__sent.length = 0;
+      window.__fromBackend({ type: "loaded_settings", requestId: id, settings: null });
+    });
+    await settle(page);
+    const up = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last && last.settings.contextMessages;
+    });
+    ok("an empty account is filled from this browser", up === 7, String(up));
+    const kept = await page.evaluate(() => window.__sent.filter((m) => m.type === "set_settings").pop().keep);
+    ok("and that copy is written, not only held", kept !== true, String(kept));
+  });
+
+  // This browser's copy can be older than the account's. Handed over at
+  // start-up it is only held, or a phone opened after the prompt was changed
+  // on a computer writes its old prompt over the new one on every device.
+  await inTab(browser, { saved: { contextMessages: 3 } }, async (page) => {
+    const early = await page.evaluate(() => window.__sent.filter((m) => m.type === "set_settings").map((m) => m.keep === true));
+    ok("on load, this browser's copy is held rather than written", early.length > 0 && early.every(Boolean), JSON.stringify(early));
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "load_settings").pop().requestId;
+      window.__sent.length = 0;
+      window.__fromBackend({ type: "loaded_settings", requestId: id, settings: { contextMessages: 9 } });
+    });
+    await settle(page);
+    const back = await page.evaluate(() => window.__sent.filter((m) => m.type === "set_settings").map((m) => m.keep === true));
+    ok("the account's own copy is handed back to be held, not written again", back.length > 0 && back.every(Boolean), JSON.stringify(back));
+    // A backend coming back up is told again, and that is held too.
+    await page.evaluate(() => {
+      window.__sent.length = 0;
+      window.__fromBackend({ type: "backend_ready" });
+    });
+    const again = await page.evaluate(() => window.__sent.filter((m) => m.type === "set_settings").map((m) => m.keep === true));
+    ok("and so is the copy a restarted backend is given", again.length > 0 && again.every(Boolean), JSON.stringify(again));
+    const reasked = await page.evaluate(() => window.__sent.filter((m) => m.type === "load_settings").length);
+    ok("an answered ask is not sent again when the backend comes back up", reasked === 0, String(reasked));
+    // A change somebody makes is written.
+    await goTab(page, "Context");
+    await page.evaluate(() => {
+      window.__sent.length = 0;
+      const box = document.querySelector('#drawer [data-arf-field="contextMessages"]');
+      box.value = "5";
+      box.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await page.waitForTimeout(500);
+    const change = await page.evaluate(() => window.__sent.filter((m) => m.type === "set_settings").map((m) => m.keep === true));
+    ok("a change you make is written to the account", change.length > 0 && change.every((k) => !k), JSON.stringify(change));
+
+    // A tab left in the background is asked to catch up with the account when
+    // it comes back after a while, before anything in it can be changed.
+    const flip = (state, ahead) =>
+      page.evaluate(({ state, ahead }) => {
+        Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+        if (ahead) {
+          const real = Date.now.bind(Date);
+          Date.now = () => real() + ahead;
+        }
+        document.dispatchEvent(new Event("visibilitychange"));
+      }, { state, ahead });
+    const asks = () => page.evaluate(() => window.__sent.filter((m) => m.type === "load_settings").length);
+    await page.evaluate(() => { window.__sent.length = 0; });
+    await flip("hidden", 0);
+    await flip("visible", 0);
+    ok("a tab hidden for a moment does not ask again", (await asks()) === 0, String(await asks()));
+    await flip("hidden", 0);
+    await flip("visible", 31000);
+    const later = await page.evaluate(() => ({
+      settings: window.__sent.filter((m) => m.type === "load_settings").length,
+      presets: window.__sent.filter((m) => m.type === "load_presets").length,
+    }));
+    ok("a tab back after a while asks the account for its settings and presets again", later.settings === 1 && later.presets === 1, JSON.stringify(later));
+  });
+
+  // An ask sent before the backend was listening gets no answer. The backend
+  // announcing itself is the cue to ask again, or the panel runs on this
+  // browser's copy for the whole visit.
+  await inTab(browser, { saved: { contextMessages: 3 } }, async (page) => {
+    const first = await page.evaluate(() => window.__sent.filter((m) => m.type === "load_settings").pop().requestId);
+    await page.evaluate(() => {
+      window.__sent.length = 0;
+      window.__fromBackend({ type: "backend_ready" });
+    });
+    const asked = await page.evaluate(() => ({
+      settings: window.__sent.filter((m) => m.type === "load_settings").map((m) => m.requestId),
+      presets: window.__sent.filter((m) => m.type === "load_presets").length,
+      setups: window.__sent.filter((m) => m.type === "load_setups").length,
+    }));
+    ok("an unanswered ask is sent again when the backend comes up",
+      asked.settings.length === 1 && asked.settings[0] !== first && asked.presets === 1 && asked.setups === 1, JSON.stringify(asked));
+    await page.evaluate((id) => {
+      window.__fromBackend({ type: "loaded_settings", requestId: id, settings: { contextMessages: 9 } });
+    }, asked.settings[0]);
+    await settle(page);
+    const took = await page.evaluate(() => JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1") || "{}").contextMessages);
+    ok("and the answer to it is taken", took === 9, String(took));
+  });
+
+  // Saving a preset sends it up as well as writing it here.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    await page.evaluate(() => {
+      const name = document.querySelector('#drawer [data-arf-field="presetName"]');
+      name.value = "On the road";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="new"]').click();
+    });
+    await settle(page);
+    const sent = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "save_presets").pop();
+      return last && last.presets.map((p) => p.name);
+    });
+    ok("a saved preset goes up to the account too", !!sent && sent.indexOf("On the road") >= 0, JSON.stringify(sent));
+  });
+
+  // A write that failed is said out loud. Settings that look saved and are not
+  // is the worst shape this can take.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "account_save_failed", what: "settings" });
+    });
+    await settle(page);
+    const said = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+    ok("a failed account save is not swallowed", /could not be saved to your account/.test(said));
+  });
+}
+
+console.log("\nloading a preset from where you were reading");
+{
+  // The drawer scrolls, not the panel, so the container is an ancestor of the
+  // root Lumiverse hands us. That is the thing whose position has to survive a
+  // repaint.
+  const SCROLLER =
+    "#scroller{height:400px;overflow-y:auto}" +
+    "#drawer{background:rgb(35,30,48);width:380px;max-width:100%;padding:12px;box-sizing:border-box}";
+
+  await inTab(browser, { css: SCROLLER }, async (page) => {
+    // Put the drawer inside something that scrolls, the way the host does.
+    await page.evaluate(() => {
+      const d = document.getElementById("drawer");
+      const s = document.createElement("div");
+      s.id = "scroller";
+      d.parentNode.insertBefore(s, d);
+      s.appendChild(d);
+    });
+    await goTab(page, "Prompt");
+    await settle(page);
+
+    const scrolled = await page.evaluate(async () => {
+      const s = document.getElementById("scroller");
+      s.scrollTop = s.scrollHeight;
+      await new Promise((r) => requestAnimationFrame(r));
+      return s.scrollTop;
+    });
+    ok("there is somewhere to scroll to", scrolled > 0, String(scrolled));
+
+    // Load the longest preset there is, which is the one that moves the
+    // content height the most.
+    //
+    // Where you were reading is a thing on the screen, not a pixel count. The
+    // prompt above grows by thousands of pixels when this loads, so holding the
+    // number would leave the card you were looking at far below the fold. What
+    // has to hold still is the card.
+    const after = await page.evaluate(async () => {
+      const s = document.getElementById("scroller");
+      const seen = () =>
+        document.querySelector('#drawer [data-arf-card="Presets"]').getBoundingClientRect().top;
+      const pick = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      const load = (re) => {
+        const o = Array.from(pick.options).find((x) => re.test(x.textContent.trim()));
+        pick.value = o.value;
+        pick.dispatchEvent(new Event("change", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-preset="load"]').click();
+        return o;
+      };
+      // Start on the smaller of the pair, since a fresh install already holds
+      // the bigger one and loading it again would grow nothing to follow.
+      load(/^A judge that thinks$/);
+      await new Promise((r) => setTimeout(r, 120));
+      const was = { scroll: s.scrollTop, card: seen() };
+      // The biggest one, which is the one that grows the panel most when it
+      // loads and so the one most likely to throw the scroll.
+      const detailed = Array.from(pick.options).find((o) => /^A judge$/.test(o.textContent.trim()));
+      pick.value = detailed.value;
+      pick.dispatchEvent(new Event("change", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="load"]').click();
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      await new Promise((r) => setTimeout(r, 60));
+      return { was: was, now: { scroll: s.scrollTop, card: seen() }, name: detailed.textContent };
+    });
+    ok(
+      "loading a preset leaves the card you were reading where it was",
+      Math.abs(after.now.card - after.was.card) < 8,
+      JSON.stringify(after),
+    );
+    ok(
+      "which means following the prompt down as it grows",
+      after.now.scroll > after.was.scroll,
+      JSON.stringify(after),
+    );
+  });
+}
+
+console.log("\naccepting or turning one down");
+{
+  // The panel holds the decision itself, so it exists whether or not the host
+  // can draw a modal. Without that, a Lumiverse with no showModal dropped the
+  // whole refine and said nothing.
+  const waiting = async (page) => {
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "confirm_refine",
+        chatId: "c1",
+        messageId: "m2",
+        before: "She stepped through and, suddenly, the cold just hit her.",
+        after: "She stepped through and the cold hit her.",
+      });
+    });
+    await settle(page);
+  };
+
+  await inTab(browser, {}, async (page) => {
+    await waiting(page);
+    const shown = await page.evaluate(() => {
+      const body = document.querySelector("#drawer").textContent;
+      return {
+        card: /Waiting for you/.test(body),
+        // Marked, as every before and after is: what was cut and what
+        // stayed, in one reading.
+        before: [...document.querySelectorAll("#drawer .arf-cut")].some((c) => /suddenly/.test(c.textContent)),
+        after: /She stepped through/.test(body) && /the cold/.test(body),
+        accept: !!document.querySelector('#drawer [data-arf-pending="accept"]'),
+        decline: !!document.querySelector('#drawer [data-arf-pending="decline"]'),
+        badge: window.__badge,
+      };
+    });
+    ok("a finished refine waits in the panel", shown.card);
+    ok("with both versions to read", shown.before && shown.after);
+    ok("and a way to take it or leave it", shown.accept && shown.decline);
+    ok("the tab says something is waiting", shown.badge === "1", String(shown.badge));
+
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-pending="accept"]').click();
+    });
+    await settle(page);
+    const took = await page.evaluate(() => ({
+      sent: window.__sent.filter((m) => m.type === "apply_refine").pop(),
+      gone: !/Waiting for you/.test(document.querySelector("#drawer").textContent),
+      badge: window.__badge,
+    }));
+    ok("accepting sends it to be saved", !!took.sent && took.sent.messageId === "m2");
+    ok("with the rewrite you were shown", took.sent.after === "She stepped through and the cold hit her.");
+    ok("and the card goes", took.gone);
+    ok("and the badge with it", took.badge === null, String(took.badge));
+  });
+
+  await inTab(browser, {}, async (page) => {
+    await waiting(page);
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-pending="decline"]').click();
+    });
+    await settle(page);
+    const left = await page.evaluate(() => ({
+      saved: window.__sent.filter((m) => m.type === "apply_refine").length,
+      gone: !/Waiting for you/.test(document.querySelector("#drawer").textContent),
+    }));
+    ok("turning it down saves nothing at all", left.saved === 0);
+    ok("and clears the question", left.gone);
+  });
+
+  // The question also comes up on the card a finished refine uses, marked the
+  // same way, while the tab is not on screen. With the tab open, the Waiting
+  // for you card is already asking, so nothing comes up over it. Lumiverse's
+  // own window is not used. Answering either one settles the other. The
+  // question comes up with Show the before and after on screen off as well,
+  // since it is a question.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { popup: false } }, async (page) => {
+      const shutDrawer = (shut) => page.evaluate((shut) => { document.getElementById("drawer").style.display = shut ? "none" : ""; }, shut);
+      const look = () => page.evaluate(() => {
+        const pop = document.querySelector(".arf-pop:not(.arf-leaving)");
+        return {
+          pop: !!pop,
+          title: pop ? pop.querySelector(".arf-h").textContent : "",
+          marked: !!pop && !!pop.querySelector(".arf-cut") && !!pop.querySelector(".arf-add"),
+          raw: !!pop && /<font/.test(pop.textContent),
+          accept: !!pop && !!pop.querySelector("[data-arf-ask-accept]") && pop.querySelector("[data-arf-ask-accept]").textContent === "Accept it",
+          decline: !!pop && !!pop.querySelector("[data-arf-ask-decline]") && pop.querySelector("[data-arf-ask-decline]").textContent === "Turn it down",
+          hostWindow: !!document.getElementById("hostmodal"),
+          sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+        };
+      });
+      const ask = (id) => page.evaluate((id) => window.__fromBackend({
+        type: "confirm_refine", chatId: "c1", messageId: id,
+        before: "The lantern <font color=\"#88ccff\">\"Hold it higher,\"</font> she said, and it swung, slowly, in the wind.",
+        after: "The lantern <font color=\"#88ccff\">\"Hold it higher,\"</font> she said. It swung in the wind.",
+      }), id);
+
+      await shutDrawer(true);
+      await ask("m5");
+      await settle(page);
+      const away = await look();
+      ok(label + ": with the tab not on screen, the question comes up on the refine card", away.pop && away.title === "Save this refine?", JSON.stringify(away));
+      ok(label + ": marked the same way, with the reply's markup kept out of sight", away.marked && !away.raw, JSON.stringify(away));
+      ok(label + ": with Accept it and Turn it down, the same as the tab", away.accept && away.decline, JSON.stringify(away));
+      ok(label + ": and not in Lumiverse's own window", !away.hostWindow, JSON.stringify(away));
+      ok(label + ": nothing runs off the side", !away.sideways, "");
+      await page.evaluate(() => document.querySelector(".arf-pop [data-arf-ask-accept]").click());
+      await closed(page);
+      const took = await page.evaluate(() => ({
+        sent: (window.__sent.filter((m) => m.type === "apply_refine").pop() || {}).messageId,
+        pop: !!document.querySelector(".arf-pop"),
+      }));
+      ok(label + ": Accept it on the card saves it and closes the card", took.sent === "m5" && !took.pop, JSON.stringify(took));
+      await shutDrawer(false);
+      await settle(page);
+      ok(label + ": and the tab is no longer waiting", !(await page.evaluate(() => /Waiting for you/.test(document.querySelector("#drawer").textContent))), "");
+
+      // Answered in the tab, the card closes too.
+      await shutDrawer(true);
+      await ask("m6");
+      await settle(page);
+      await shutDrawer(false);
+      await settle(page);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-pending="decline"]').click());
+      await closed(page);
+      ok(label + ": Turn it down in the tab closes the card as well", !(await page.evaluate(() => !!document.querySelector(".arf-pop"))), "");
+
+      // With the tab open, the card at the top of the tab asks, marked, and
+      // nothing comes up over it.
+      await goTab(page, "Log");
+      await ask("m7");
+      await settle(page);
+      const here = await look();
+      const card = await page.evaluate(() => {
+        const box = [...document.querySelectorAll("#drawer .arf-card")].find((c) => /Waiting for you/.test(c.textContent));
+        return { there: !!box, marked: !!box && !!box.querySelector(".arf-cut") && !!box.querySelector(".arf-add") };
+      });
+      ok(label + ": with the tab open, nothing comes up over it", !here.pop && !here.hostWindow, JSON.stringify(here));
+      ok(label + ": and the Waiting for you card shows what changed, marked", card.there && card.marked, JSON.stringify(card));
+
+      // Only the markup changed: the words read the same, and the card says
+      // the markup changed rather than showing nothing. A "<" in a sentence
+      // is not a tag and stays.
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-pending="decline"]').click());
+      await settle(page);
+      await page.evaluate(() => window.__fromBackend({
+        type: "confirm_refine", chatId: "c1", messageId: "m8",
+        before: "He counted: 3 < 5. <b>Then he left.</b>",
+        after: "He counted: 3 < 5. <i>Then he left.</i>",
+      }));
+      await settle(page);
+      const tags = await page.evaluate(() => {
+        const box = [...document.querySelectorAll("#drawer .arf-card")].find((c) => /Waiting for you/.test(c.textContent));
+        return box ? box.textContent : "";
+      });
+      ok(label + ": a change to the markup alone is said, not shown as no change", /Only the markup around them changed/.test(tags), tags.slice(0, 200));
+      ok(label + ": and a < in a sentence stays", /3 < 5/.test(tags) && !/<b>|<i>/.test(tags), tags.slice(0, 200));
+
+      // Color markup another extension draws as color reads as the chat shows
+      // it: the words, with no [color] or escaped font tag around them.
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-pending="decline"]').click());
+      await settle(page);
+      await page.evaluate(() => window.__fromBackend({
+        type: "confirm_refine", chatId: "c1", messageId: "m9",
+        before: '[color=#5a8fd0]"Lock the door,"[/color] Pell said. &lt;font color="#c08040"&gt;"Now."&lt;/font&gt;',
+        after: '[color=#5a8fd0]"Bolt the door,"[/color] Pell said. &lt;font color="#c08040"&gt;"Now."&lt;/font&gt;',
+      }));
+      await settle(page);
+      const colored = await page.evaluate(() => {
+        const box = [...document.querySelectorAll("#drawer .arf-card")].find((c) => /Waiting for you/.test(c.textContent));
+        const well = box && box.querySelector("[data-arf-diff]");
+        return well ? well.textContent : "";
+      });
+      ok(label + ": color markup another extension draws is not shown in what changed",
+        /Pell said/.test(colored) && !/\[color|\[\/color|&lt;|font color/.test(colored), colored.slice(0, 200));
+    });
+  }
+
+  // The floating button offers the same decision, and a stray tap cannot make
+  // it: accepting a rewrite of somebody's writing by accident is the one thing
+  // the button must not do.
+  await inTab(browser, { saved: { widgetOn: true } }, async (page) => {
+    await waiting(page);
+    await page.evaluate(() => {
+      window.__menuPick = null;
+      document.querySelector("#float .arf-float").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle(page);
+    const keys = await page.evaluate(() => ((window.__menu || {}).items || []).map((i) => i.key));
+    ok("the button's menu can answer it", keys.indexOf("accept") >= 0 && keys.indexOf("decline") >= 0, keys.join(","));
+
+    await page.evaluate(() => {
+      document.querySelector("#float .arf-float").click();
+    });
+    await settle(page);
+    const tapped = await page.evaluate(() => window.__sent.filter((m) => m.type === "apply_refine").length);
+    ok("but a tap alone accepts nothing", tapped === 0);
+  });
+}
+
+console.log("\nevery eye shows the same state, with Keep the eye still on");
+{
+  // While a refine runs, every eye is open, the drawer tab's included. A phone
+  // keeps a button hovered after a tap, and a mouse can rest on one, so the
+  // tab's eye is read after a tap and under a pointer as well as at rest.
+  // The tab strip is drawn the way Lumiverse draws it: a button per tab, with
+  // the extension's icon written in as HTML.
+  const strip = (page) =>
+    page.evaluate(() => {
+      const bar = document.createElement("div");
+      bar.style.cssText = "display:flex;gap:8px;padding:8px";
+      for (const id of ["chars", "lore", "arf"]) {
+        const b = document.createElement("button");
+        b.id = "tab-" + id;
+        b.style.cssText = "width:48px;height:48px";
+        b.innerHTML = id === "arf" ? "<span>" + window.__tabSpec.iconSvg + "</span>" : id;
+        bar.appendChild(b);
+      }
+      document.body.prepend(bar);
+      for (const f of window.__handlers.GENERATION_ENDED || []) f({ chatId: "c1", messageId: "m2" });
+    });
+  const open = (page) =>
+    page.evaluate(() => {
+      const ball = document.querySelector("#tab-arf .arf-eye-ball");
+      const eye = document.querySelector("#tab-arf .arf-eye");
+      return {
+        reading: /arf-eye-read/.test(eye.getAttribute("class") || ""),
+        opacity: getComputedStyle(ball).opacity,
+      };
+    });
+  await inTab(browser, { viewport: { width: 390, height: 900 }, touch: true, saved: { eyeStill: true, enabled: true, refineOn: true } }, async (page) => {
+    await strip(page);
+    await page.waitForTimeout(200);
+    const atRest = await open(page);
+    await page.tap("#tab-lore");
+    await page.waitForTimeout(200);
+    const other = await open(page);
+    await page.tap("#tab-arf");
+    await page.waitForTimeout(500);
+    const tapped = await open(page);
+    ok("phone: the tab's eye is open while a refine runs", atRest.reading && atRest.opacity === "1", JSON.stringify(atRest));
+    ok("phone: and after tapping another tab", other.reading && other.opacity === "1", JSON.stringify(other));
+    ok("phone: and after tapping its own tab", tapped.reading && tapped.opacity === "1", JSON.stringify(tapped));
+  });
+  await inTab(browser, { viewport: { width: 1280, height: 900 }, saved: { eyeStill: true, enabled: true, refineOn: true } }, async (page) => {
+    await strip(page);
+    await page.waitForTimeout(200);
+    await page.hover("#tab-arf");
+    await page.waitForTimeout(200);
+    const hovered = await open(page);
+    ok("laptop: the tab's eye stays open with the pointer on it", hovered.reading && hovered.opacity === "1", JSON.stringify(hovered));
+  });
+  // At rest it is shut, under a pointer too, since the eye is kept still.
+  await inTab(browser, { viewport: { width: 1280, height: 900 }, saved: { eyeStill: true, enabled: true, refineOn: false } }, async (page) => {
+    await page.evaluate(() => {
+      const b = document.createElement("button");
+      b.id = "tab-arf";
+      b.innerHTML = "<span>" + window.__tabSpec.iconSvg + "</span>";
+      document.body.prepend(b);
+    });
+    await page.hover("#tab-arf");
+    await page.waitForTimeout(200);
+    const rest = await open(page);
+    ok("and at rest it stays shut under the pointer", !rest.reading && rest.opacity === "0", JSON.stringify(rest));
+  });
+}
+
+console.log("\na refine that finishes while you pick");
+{
+  // A card that comes up while Pick it for me waits would put its dim over the
+  // page, and the press meant for the box would close the card instead. It
+  // waits, and comes up once the picker is done. Checked at a phone width and
+  // a laptop width.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 800 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { popup: true } }, async (page, errors) => {
+      await goTab(page, "Setup");
+      const got = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        window.__makeComposer("");
+        document.querySelector("#drawer [data-arf-pickinput]").click();
+        await wait(300);
+        const picking = document.documentElement.classList.contains("arf-picking");
+        window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", canUndo: true, before: "The old line stood here.", after: "The new line stands here." });
+        await wait(400);
+        const during = { card: !!document.querySelector("[data-arf-pop]"), shade: !!document.querySelector("[data-arf-shade]"), stillPicking: document.documentElement.classList.contains("arf-picking") };
+        document.querySelector(".arf-pickbar [data-arf-pickbar-cancel]").click();
+        await wait(500);
+        const after = { card: !!document.querySelector("[data-arf-pop]"), picking: document.documentElement.classList.contains("arf-picking") };
+        return { picking, during, after };
+      });
+      ok(label + ": the picker was up, or this proves nothing", got.picking, JSON.stringify(got));
+      ok(label + ": while picking, no card and no dim come up", !got.during.card && !got.during.shade && got.during.stillPicking, JSON.stringify(got.during));
+      ok(label + ": once the picker is done, the card comes up", got.after.card && !got.after.picking, JSON.stringify(got.after));
+      ok(label + ": no console errors", errors.length === 0, errors.join("\n"));
+    });
+  }
+}
+
+console.log("\nthe card a refine raises comes before the panel catches up");
+{
+  // With the drawer open on this tab, painting the panel takes long enough to
+  // see. The card is put up first and the panel is painted a frame later, so
+  // the card is never held back by the panel. Checked at a phone width.
+  await inTab(browser, { viewport: { width: 390, height: 900 }, touch: true, saved: { popup: true } }, async (page) => {
+    await goTab(page, "Log");
+    await settle(page);
+    const order = await page.evaluate(async () => {
+      const logText = () => document.querySelector("#drawer").textContent;
+      window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", canUndo: true, before: "The old line stood here.", after: "The new line stands here." });
+      const atOnce = { card: !!document.querySelector("[data-arf-pop]"), logged: /refined a reply/.test(logText()) };
+      await new Promise((r) => setTimeout(r, 300));
+      return { atOnce, later: { card: !!document.querySelector("[data-arf-pop]"), logged: /refined a reply/.test(logText()) } };
+    });
+    ok("the card is up straight away", order.atOnce.card, JSON.stringify(order));
+    ok("before the panel is painted again", !order.atOnce.logged, JSON.stringify(order));
+    ok("and the panel catches up a frame later", order.later.card && order.later.logged, JSON.stringify(order));
+  });
+}
+
+console.log("\nwhy rewrites were dropped, in full");
+{
+  // A host's error is often long, and the end of it is the part that says what
+  // to do. The whole reason shows, wrapped, and the same failure with a
+  // different detail is counted once. Checked at a phone width.
+  await inTab(browser, { viewport: { width: 360, height: 800 }, touch: true }, async (page) => {
+    await goTab(page, "Log");
+    await settle(page);
+    const tail = "check the model accepts these samplers and try again: https://example.test/docs/samplers#unsupported-parameter-reference";
+    const why = "Made-up host generate failed (400): the provider refused this request because " + tail;
+    await page.evaluate((why) => {
+      window.__fromBackend({ type: "refine_skipped", chatId: "c1", messageId: "m2", why: why });
+      window.__fromBackend({ type: "refine_skipped", chatId: "c1", messageId: "m3", why: why.replace("these samplers", "those samplers") });
+    }, why);
+    await new Promise((r) => setTimeout(r, 300));
+    await settle(page);
+    // Only the rows under the heading, since the Log list holds the reasons too.
+    const got = await page.evaluate(() => {
+      const head = [...document.querySelectorAll("#drawer .arf-note")].find((n) => n.textContent === "Why rewrites were dropped");
+      const rows = [];
+      for (let n = head && head.nextElementSibling; n; n = n.nextElementSibling) rows.push(n.textContent);
+      return {
+        rows,
+        sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+      };
+    });
+    ok("the whole reason shows, end included", got.rows.some((t) => t.indexOf("#unsupported-parameter-reference") >= 0), JSON.stringify(got.rows));
+    ok("the same failure is counted once, as two", got.rows.length === 1 && /2$/.test(got.rows[0]), JSON.stringify(got.rows));
+    ok("and nothing runs off the side", !got.sideways, "");
+  });
+}
+
+console.log("\nthe floating button after an update made while the page stays open");
+{
+  // An update made while the page stays open can take the stylesheet away, or
+  // leave an old button on the page after its copy of the extension was shut
+  // down. The button puts the stylesheet back, and a left-over button takes
+  // itself away instead of starting anything. Checked at a phone width.
+  await inTab(browser, { viewport: { width: 390, height: 900 }, touch: true, saved: { widgetOn: true, enabled: true } }, async (page) => {
+    const out = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      history.pushState({}, "", "/chat/c1");
+      for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+      await wait(200);
+      const sheet = () => !!document.querySelector("style[data-arf-style]");
+      document.querySelector("style[data-arf-style]").remove();
+      const goneFirst = !sheet();
+      const b = document.querySelector("#float .arf-float");
+      b.click();
+      await wait(120);
+      const back = sheet();
+      window.__fromBackend({ type: "refine_result", ok: false, why: "test" });
+      await wait(60);
+      const old = document.querySelector("#float .arf-float");
+      window.__teardown();
+      document.body.appendChild(old);
+      window.__sent.length = 0;
+      // A press held on it starts no ring and opens no menu, by hold or by the
+      // menu event a phone raises on a long press.
+      window.__menu = null;
+      old.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 10, clientY: 10 }));
+      await wait(100);
+      const ring = old.hasAttribute("data-arf-holding");
+      await wait(600);
+      old.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      await wait(60);
+      const held = { ring, menu: !!window.__menu };
+      old.click();
+      await wait(60);
+      return { goneFirst, back, held, leftOver: { stillThere: old.isConnected, sent: window.__sent.map((m) => m.type) } };
+    });
+    ok("a press held on a left-over button starts no ring and opens no menu", !out.held.menu && !out.held.ring, JSON.stringify(out.held));
+    ok("the stylesheet was gone before the tap", out.goneFirst, JSON.stringify(out));
+    ok("the button puts the stylesheet back", out.back, JSON.stringify(out));
+    ok("a button left after shutdown takes itself away when tapped", out.leftOver.stillThere === false, JSON.stringify(out.leftOver));
+    ok("and starts nothing", out.leftOver.sent.length === 0, JSON.stringify(out.leftOver));
+  });
+}
+
+console.log("\nasking for a refine from the button's menu");
+{
+  // A tap on the button refines the latest reply, so this menu carries what a
+  // tap cannot: the whole chat, the way back, and the switches. The row on a
+  // message holds only the way back.
+  await inTab(browser, { saved: { widgetOn: true, enabled: true } }, async (page) => {
+    const open = async () => {
+      await page.evaluate(() => {
+        window.__menuPick = null;
+        document.querySelector("#float .arf-float").dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+      });
+      await settle(page);
+      return page.evaluate(() => ((window.__menu || {}).items || []).map((i) => i.key));
+    };
+    const keys = await open();
+    ok("it offers every reply in the chat", keys.indexOf("all") >= 0, keys.join(","));
+    ok("and not the latest reply, which is what a tap does",
+      keys.indexOf("now") < 0, keys.join(","));
+
+    // Grouped, with a line drawn between. A menu of eight things in one column
+    // is eight things to read.
+    const shape = await page.evaluate(() =>
+      ((window.__menu || {}).items || []).map((i) => (i.type === "divider" ? "|" : i.key)),
+    );
+    ok("the entries are grouped, not one long column", shape.indexOf("|") > 0, shape.join(" "));
+    ok(
+      "a line never opens or closes the menu",
+      shape[0] !== "|" && shape[shape.length - 1] !== "|",
+      shape.join(" "),
+    );
+    ok("and two lines never sit together", !/\|\s\|/.test(shape.join(" ")), shape.join(" "));
+    ok(
+      "the way in comes before the things to do",
+      shape.indexOf("open") < shape.indexOf("all"),
+      shape.join(" "),
+    );
+    ok(
+      "and taking it off the screen is last, behind a line of its own",
+      shape[shape.length - 1] === "off" && shape[shape.length - 3] === "|",
+      shape.join(" "),
+    );
+    ok("every line carries a key of its own", await page.evaluate(() => {
+      const seen = ((window.__menu || {}).items || []).map((i) => i.key);
+      return new Set(seen).size === seen.length;
+    }));
+
+    await page.evaluate(() => {
+      // A chat to go through. Without one, the menu now says so instead.
+      for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+      window.__menuPick = "all";
+      document.querySelector("#float .arf-float").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle(page);
+    ok(
+      "picking every reply asks first, the same as the panel's button",
+      await page.evaluate(() => !!document.querySelector("[data-arf-sweep-yes]") && !window.__sent.some((m) => m.type === "refine_all")),
+    );
+    await page.evaluate(() => document.querySelector("[data-arf-sweep-yes]").click());
+    await settle(page);
+    ok(
+      "and once you say yes, asks the backend for exactly that",
+      await page.evaluate(() => window.__sent.some((m) => m.type === "refine_all" && !m.mine)),
+    );
+    // The same two for your own messages, offered beside it.
+    const mineKeys = await page.evaluate(() => ((window.__menu || {}).items || []).map((i) => i.key));
+    ok("the menu offers your latest message and all of yours", mineKeys.indexOf("mine") >= 0 && mineKeys.indexOf("allmine") >= 0, mineKeys.join(","));
+    await page.evaluate(() => window.__fromBackend({ type: "refine_all_done", saved: 0, skipped: 0 }));
+    await settle(page);
+    await page.evaluate(() => {
+      window.__menuPick = "mine";
+      document.querySelector("#float .arf-float").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle(page);
+    ok(
+      "picking your latest message asks for your message, not a reply",
+      await page.evaluate(() => window.__sent.some((m) => m.type === "refine_now" && m.mine === true)),
+    );
+    await page.evaluate(() => window.__fromBackend({ type: "refine_result", ok: false, why: "test" }));
+    await settle(page);
+
+    // While one is running, stopping it is what the menu is opened for, and
+    // starting another is not offered.
+    const mid = await page.evaluate(async () => {
+      window.__fromBackend({ type: "refine_progress", stage: "writing", chars: 5 });
+      window.__menuPick = null;
+      document.querySelector("#float .arf-float").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      return ((window.__menu || {}).items || []).map((i) => i.key);
+    });
+    ok("mid-refine it offers stopping instead", mid.indexOf("stop") >= 0, mid.join(","));
+    ok("and does not offer starting another", mid.indexOf("now") < 0 && mid.indexOf("all") < 0, mid.join(","));
+  });
+
+  // With the button on screen, the Extras rows stand down: one place at a time.
+  await inTab(browser, { saved: { widgetOn: true, enabled: true, inputRefine: true } }, async (page) => {
+    const rows = await page.evaluate(() => Object.keys(window.__inputActions || {}));
+    ok("the button's menu takes the Extras rows over", rows.length === 0, JSON.stringify(rows));
+  });
+}
+
+console.log("\nswitches, not tick boxes");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Limits");
+    const look = await page.evaluate(async () => {
+      // Long enough for the slide and the color change to have finished. A
+      // computed style read mid-transition is the value it is passing through,
+      // not the one it is going to, so reading straight away compares two
+      // points on the same animation.
+      const frame = () => new Promise((r) => setTimeout(r, 260));
+      // Re-queried after every click and read straight away. This one has rows
+      // hanging off it, so switching it rebuilds the panel and the element read
+      // a moment ago is no longer in the document.
+      const find = () => document.querySelector('#drawer [data-arf-field="protectThinking"]');
+      const snap = () => {
+        const b = find();
+        const cs = getComputedStyle(b);
+        const knob = getComputedStyle(b, "::after");
+        return {
+          w: Math.round(parseFloat(cs.width)),
+          h: Math.round(parseFloat(cs.height)),
+          radius: cs.borderRadius,
+          knob: knob.left,
+          bg: cs.backgroundColor,
+          tag: b.tagName + ":" + b.type,
+        };
+      };
+      const box = find();
+      if (!box) return null;
+      if (box.checked) { box.click(); await frame(); }
+      const a = snap();
+      find().click();
+      await frame();
+      const b2 = snap();
+      const shut = a;
+      const open = b2;
+      const knobShut = { left: a.knob };
+      const knobOpen = { left: b2.knob };
+      return {
+        // A pill rather than a square: wider than it is tall, fully rounded.
+        w: shut.w,
+        h: shut.h,
+        radius: shut.radius,
+        // The knob slides, and the track changes color.
+        knobShut: knobShut.left,
+        knobOpen: knobOpen.left,
+        bgShut: shut.bg,
+        bgOpen: open.bg,
+        // Still a real checkbox underneath, which is what the keyboard and a
+        // screen reader are using.
+        tag: shut.tag,
+      };
+    });
+    ok("it is a pill, wider than it is tall", !!look && look.w > look.h, JSON.stringify(look));
+    ok("fully rounded", !!look && parseFloat(look.radius) >= look.h / 2, look && look.radius);
+    ok("the knob moves when it is switched", !!look && look.knobShut !== look.knobOpen, look);
+    ok("and the track changes with it", !!look && look.bgShut !== look.bgOpen, look);
+    ok("and it is still a real checkbox underneath", !!look && look.tag === "INPUT:checkbox", look && look.tag);
+  });
+}
+
+console.log("\nthe mark on a focused box");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Context");
+    const ring = await page.evaluate(async () => {
+      const box = document.querySelector('#drawer input.arf-field[type="number"]');
+      if (!box) return null;
+      box.focus();
+      // The ring fades up rather than switching on, so reading it in the same
+      // breath as the focus reads it partway there.
+      await new Promise((r) => setTimeout(r, 220));
+      const cs = getComputedStyle(box);
+      return { shadow: cs.boxShadow, outline: cs.outlineStyle };
+    });
+    // Auto Retry's ring: a 2px band plus a short halo behind it.
+    ok("a focused box takes the glow", !!ring && /rgba?\([^)]*\)/.test(ring.shadow), JSON.stringify(ring));
+    // And it fades up as the box is reached rather than switching on, which is
+    // what Auto Retry's fields already did.
+    const fade = await page.evaluate(() => {
+      const box = document.querySelector('#drawer input.arf-field[type="number"]');
+      box.blur();
+      const cs = getComputedStyle(box);
+      return {
+        says: cs.transitionProperty,
+        secs: cs.transitionDuration,
+      };
+    });
+    ok(
+      "and it fades up rather than switching on",
+      /box-shadow/.test(fade.says) && /border-color/.test(fade.says) && !/^0s/.test(fade.secs),
+      JSON.stringify(fade),
+    );
+    ok(
+      "with two layers, the band and the halo",
+      !!ring && (ring.shadow.match(/rgba?\(/g) || []).length === 2 && / 8px /.test(ring.shadow),
+      ring && ring.shadow,
+    );
+    ok("and no browser outline over it", !!ring && ring.outline === "none");
+
+    // The two that are left bare on purpose stay bare.
+    const bare = await page.evaluate(() => {
+      const s = document.querySelector('#drawer [data-arf-field="hunt"]');
+      s.focus();
+      return getComputedStyle(s).boxShadow;
+    });
+    ok("the search box keeps none, as asked", bare === "none", bare);
+  });
+}
+
+console.log("\nthe checks are yours to switch off");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Limits");
+    const on = await page.evaluate(() =>
+      ["guardRefusal", "guardPreamble", "guardSoften", "retryRefine"].map(
+        (k) => !!document.querySelector('#drawer [data-arf-field="' + k + '"]'),
+      ),
+    );
+    ok("each check has a switch of its own", on.every(Boolean), JSON.stringify(on));
+
+    // The two that belong to the softening check are behind a fold, so the tab
+    // is a list of switches rather than a wall. Opening it brings them out.
+    const before = await onScreen(page, "softenPct");
+    const folded = await page.evaluate(() => {
+      const head = Array.from(document.querySelectorAll("#drawer .arf-fold")).find((h) =>
+        /What counts as sanitizing/.test(h.textContent),
+      );
+      if (head) head.click();
+      return { hasFold: !!head };
+    });
+    await settle(page);
+    const under = {
+      pct: await onScreen(page, "softenPct"),
+      words: await onScreen(page, "softenWords"),
+    };
+    ok("its tuning is folded away rather than in the way", folded.hasFold && !before);
+    ok("and opening it brings its own settings out", under.pct && under.words);
+
+    await page.evaluate(() => {
+      const sw = document.querySelector('#drawer [data-arf-field="guardSoften"]');
+      sw.checked = false;
+      sw.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle(page);
+    await closed(page);
+    const gone = {
+      pct: await onScreen(page, "softenPct"),
+      sent: await page.evaluate(
+        () => (window.__sent.filter((m) => m.type === "set_settings").pop() || {}).settings,
+      ),
+    };
+    ok("and go with it when it is off", !gone.pct);
+    ok("what you switched off reaches the backend", gone.sent.guardSoften === false);
+  });
+
+  // Turning all three off is a real decision, so it is said out loud.
+  await inTab(
+    browser,
+    { saved: { guardRefusal: false, guardPreamble: false, guardSoften: false } },
+    async (page) => {
+      await goTab(page, "Limits");
+      const said = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+      ok("switching every one off warns you", /can now be saved over your reply/.test(said));
+    },
+  );
+}
+
+console.log("\nwhen the backend is not there at all");
+{
+  // A chat has to be open, or the refine is refused before anything is sent and
+  // the watch never arms.
+  const inAChat = async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat",
+        requestId: id,
+        chatId: "c1",
+        character: "Wren",
+        hasCharacter: true,
+        resolved: true,
+      });
+    });
+    await settle(page);
+  };
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await inAChat(page);
+    // A refine is asked for and nothing answers, which is what a Lumiverse
+    // with the frontend loaded and the backend missing looks like from here.
+    await page.evaluate(() => {
+      window.__slept = [];
+      const real = window.setTimeout;
+      // Only the acknowledgement wait is shortened. The deadman is armed on the
+      // same call and is twenty times longer, so shortening both equally would
+      // race them and prove nothing about which one is meant to speak first.
+      window.setTimeout = (fn, ms) => {
+        window.__slept.push(ms);
+        return real(fn, ms >= 2000 && ms <= 10000 ? 5 : ms);
+      };
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => /Refine the latest reply/.test(b.textContent))
+        .click();
+    });
+    await new Promise((r) => setTimeout(r, 260));
+    await settle(page);
+    const said = await page.evaluate(() => ({
+      body: document.querySelector("#drawer .arf-body").textContent,
+      toasts: (window.__toasts || []).join(" | "),
+      // The panel must not still think something is running.
+      spinning: /Refining/.test(document.querySelector("#drawer").textContent),
+    }));
+    ok("it says the backend did not answer", /backend did not answer/.test(said.body), said.body.slice(0, 200));
+    ok("out loud, not only in the log", /backend is not answering/.test(said.toasts), said.toasts);
+    ok("and stops spinning", !said.spinning, said.spinning);
+  });
+
+  // And when the backend is there, the acknowledgement puts that watch away and
+  // leaves the timeout to do its job.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await inAChat(page);
+    await page.evaluate(() => {
+      const real = window.setTimeout;
+      window.setTimeout = (fn, ms) => real(fn, ms >= 2000 && ms <= 10000 ? 5 : ms);
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => /Refine the latest reply/.test(b.textContent))
+        .click();
+      const id = window.__sent.filter((m) => m.type === "refine_now").pop().requestId;
+      window.__fromBackend({ type: "refine_ack", requestId: id });
+    });
+    await new Promise((r) => setTimeout(r, 260));
+    await settle(page);
+    const said = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+    ok("an acknowledged refine is left alone to take its time", !/backend did not answer/.test(said));
+  });
+}
+
+console.log("\nwhen the tab sleeps past the time to give up");
+{
+  // A phone pauses the timers of a tab in the background. Here the long timers
+  // never fire at all, which is the worst case, and the clock is moved past the
+  // limit. The status line's own tick has to end the run.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+    });
+    await settle(page);
+    const started = await page.evaluate(() => {
+      const real = window.setTimeout;
+      window.setTimeout = (fn, ms) => (ms >= 20000 ? 0 : real(fn, ms));
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => /Refine the latest reply/.test(b.textContent))
+        .click();
+      const id = window.__sent.filter((m) => m.type === "refine_now").pop().requestId;
+      window.__fromBackend({ type: "refine_ack", requestId: id });
+      window.__fromBackend({ type: "refine_progress", stage: "thinking" });
+      return /Thinking|Refining/.test(document.querySelector("#drawer").textContent);
+    });
+    ok("a refine is running", started);
+    await page.evaluate(() => {
+      Object.defineProperty(document, "visibilityState", { get: () => "hidden", configurable: true });
+      document.dispatchEvent(new Event("visibilitychange"));
+      const realNow = Date.now;
+      Date.now = () => realNow() + 2000 * 1000;
+    });
+    await new Promise((r) => setTimeout(r, 1000));
+    const said = await page.evaluate(() => ({
+      spinning: /Thinking|Refining/.test(document.querySelector("#drawer").textContent),
+      toasts: (window.__toasts || []).join(" | "),
+      body: document.querySelector("#drawer .arf-body").textContent,
+    }));
+    ok("it stops once the clock is past the limit", !said.spinning, said.body.slice(0, 200));
+    ok("and says the tab was in the background", /in the background/.test(said.toasts), said.toasts);
+    ok("without claiming nothing changed", !/Nothing was changed/.test(said.toasts), said.toasts);
+  });
+}
+
+console.log("\nrows that hang off a switch open and close smoothly");
+{
+  // Switching the floating button on brings out its own rows. Their space
+  // opens over several frames, so the row under them moves down in small
+  // steps rather than in one jump, and they fade in and slide down 4px.
+  // Switched off, the words fade before the space closes. With Reduce motion
+  // on, both happen at once.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    // Lumiverse applies its UI Scale as a zoom on the page, which is where a
+    // row opened to the wrong height and jumped at the end. So the motion is
+    // measured with no zoom, and zoomed in and out.
+    for (const [reduceMotion, zoom] of [[false, 1], [false, 1.25], [false, 0.85], [true, 1]]) {
+      await inTab(browser, { viewport, touch, css: zoom === 1 ? "" : "html{zoom:" + zoom + "}", saved: { enabled: true, reduceMotion } }, async (page) => {
+        await goTab(page, "Setup");
+        await settle(page);
+        const watch = (on) =>
+          page.evaluate(async (on) => {
+            // Looked up again on every frame. A switch can build its card
+            // again, and a row held from before is no longer on the page.
+            const q = (k) => document.querySelector('#drawer [data-arf-row="' + k + '"]');
+            const box = q("widgetOn") && q("widgetOn").querySelector('input[type="checkbox"]');
+            if (!box || !q("inputRefine") || !q("widgetSize")) return null;
+            // Measured from the switch's own row, so a scroll of the panel
+            // is not counted as the row moving.
+            const gapNow = () => q("inputRefine").getBoundingClientRect().top - q("widgetOn").getBoundingClientRect().bottom;
+            const start = gapNow();
+            const times = [];
+            const tops = [];
+            const looks = [];
+            box.click();
+            const t0 = performance.now();
+            while (performance.now() - t0 < 520) {
+              await new Promise((r) => requestAnimationFrame(r));
+              tops.push(gapNow() - start);
+            times.push(performance.now());
+              const child = q("widgetSize");
+              const cs = getComputedStyle(child);
+              looks.push({ o: parseFloat(cs.opacity), h: child.getBoundingClientRect().height, t: cs.transform });
+            }
+            const end = tops[tops.length - 1];
+            let biggest = 0;
+            let prev = 0;
+            for (const t of tops) {
+              biggest = Math.max(biggest, Math.abs(t - prev));
+              prev = t;
+            }
+            // Each step as the distance one frame at 60 a second would cover. A slow
+            // frame on the test machine covers more ground in one go, and that is not
+            // the row skipping.
+            const paced = () => tops.map((t, i) => {
+              const was = i ? tops[i - 1] : 0;
+              const dt = times[i] - (i ? times[i - 1] : t0);
+              return (Math.abs(t - was) * 16.7) / Math.max(16.7, dt);
+            });
+            return { travel: Math.round(end), biggest: Math.round(biggest), steps: paced(), frames: tops.length, looks, tops, hidden: q("widgetSize").hidden };
+          }, on);
+        const opened = await watch(true);
+        const shut = await watch(false);
+        const say = label + (zoom === 1 ? "" : ", zoom " + zoom) + (reduceMotion ? ", Reduce motion on" : "") + ": ";
+        ok(say + "the rows open and push the next row down", !!opened && opened.travel > 40 && !opened.hidden, JSON.stringify(opened && { travel: opened.travel }));
+        if (!reduceMotion) {
+          ok(say + "opening, the row below moves in small steps, never more than a third in one frame",
+            !!opened && Math.max(...opened.steps) < opened.travel / 3, JSON.stringify(opened && { travel: opened.travel, biggest: opened.biggest, frames: opened.frames }));
+          ok(say + "opening, the rows start faded and slide down into place",
+            !!opened && opened.looks[0].o < 0.5 && /matrix\(1, 0, 0, 1, 0, -/.test(opened.looks[0].t), JSON.stringify(opened && opened.looks.slice(0, 2)));
+          // The row slows down as it lands. A step well past the two before it
+          // is the row skipping, and at the end that reads as an abrupt stop.
+          const skips = (w) => {
+            let worst = 0;
+            // Counted once it has started moving. A slow first frame is the test
+            // machine, not a skip.
+            const from = Math.max(2, w.steps.findIndex((x) => x > 0.5) + 2);
+            for (let i = from; i < w.tops.length; i++) {
+              const step = w.steps[i];
+              const before = Math.max(w.steps[i - 1], w.steps[i - 2]);
+              worst = Math.max(worst, step - before);
+            }
+            return worst;
+          };
+          ok(say + "opening, it lands softly with no skip at the end", !!opened && skips(opened) <= 6,
+            JSON.stringify(opened && opened.tops.map(Math.round)));
+          ok(say + "closing, it lands softly with no skip at the end", !!shut && skips(shut) <= 6,
+            JSON.stringify(shut && shut.tops.map(Math.round)));
+          ok(say + "closing, the row below moves up in small steps",
+            !!shut && Math.max(...shut.steps) < Math.abs(shut.travel) / 3, JSON.stringify(shut && { travel: shut.travel, biggest: shut.biggest }));
+          const faded = shut ? shut.looks.findIndex((l) => l.o < 0.05) : -1;
+          const flat = shut ? shut.looks.findIndex((l) => l.h < 1) : -1;
+          ok(say + "closing, the words are gone before the space is", !!shut && faded >= 0 && (flat === -1 || faded < flat), JSON.stringify({ faded, flat }));
+        } else {
+          ok(say + "the rows open in one step", !!opened && Math.abs(opened.biggest - opened.travel) <= 2, JSON.stringify(opened && { travel: opened.travel, biggest: opened.biggest }));
+          ok(say + "and close in one step", !!shut && Math.abs(shut.biggest - Math.abs(shut.travel)) <= 2, JSON.stringify(shut && { travel: shut.travel, biggest: shut.biggest }));
+        }
+        ok(say + "and once closed they are hidden", !!shut && shut.hidden, JSON.stringify(shut && shut.hidden));
+      });
+    }
+  }
+}
+
+console.log("\nthe notice under the buttons comes and goes with the main switch");
+{
+  // With no chat known yet, the card at the top says why its buttons are
+  // grayed out. The main switch takes that notice with it: switched off, its
+  // words fade and its space closes over several frames, and switched on it
+  // opens the same way. The rebuild that follows the switch finds it already
+  // in place, so nothing jumps after the movement ends.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const [reduceMotion, zoom] of [[false, 1], [false, 1.25], [false, 0.85], [true, 1]]) {
+      await inTab(browser, { viewport, touch, css: zoom === 1 ? "" : "html{zoom:" + zoom + "}", saved: { enabled: true, reduceMotion } }, async (page) => {
+        await settle(page);
+        const watch = () =>
+          page.evaluate(async () => {
+            // Looked up again on every frame, since the card is built again
+            // once the switch has moved.
+            const head = () => document.querySelector("#drawer [data-arf-header]");
+            const box = head() && head().querySelector('input[aria-label="Turn Auto Refine on"]');
+            if (!box) return null;
+            const tall = () => head().getBoundingClientRect().height;
+            const start = tall();
+            const tops = [];
+            const times = [];
+            const looks = [];
+            box.click();
+            const t0 = performance.now();
+            while (performance.now() - t0 < 700) {
+              await new Promise((r) => requestAnimationFrame(r));
+              tops.push(tall() - start);
+              times.push(performance.now());
+              const n = head().querySelector(".arf-warn");
+              const cs = n ? getComputedStyle(n) : null;
+              looks.push(n ? { o: n.hidden ? 0 : parseFloat(cs.opacity), h: n.getBoundingClientRect().height, t: cs.transform } : null);
+            }
+            const paced = tops.map((t, i) => {
+              const was = i ? tops[i - 1] : 0;
+              const dt = times[i] - (i ? times[i - 1] : t0);
+              return (Math.abs(t - was) * 16.7) / Math.max(16.7, dt);
+            });
+            let biggest = 0;
+            let prev = 0;
+            for (const t of tops) {
+              biggest = Math.max(biggest, Math.abs(t - prev));
+              prev = t;
+            }
+            const last = head().querySelector(".arf-warn");
+            return { travel: Math.round(tops[tops.length - 1]), biggest: Math.round(biggest), steps: paced, tops, looks, hidden: !last || last.hidden };
+          });
+        const shut = await watch();
+        const opened = await watch();
+        const say = label + (zoom === 1 ? "" : ", zoom " + zoom) + (reduceMotion ? ", Reduce motion on" : "") + ": ";
+        ok(say + "switched off, the notice closes and the card gets shorter", !!shut && shut.travel < -20 && shut.hidden, JSON.stringify(shut && { travel: shut.travel, hidden: shut.hidden }));
+        ok(say + "switched on, the notice opens again", !!opened && opened.travel > 20 && !opened.hidden, JSON.stringify(opened && { travel: opened.travel, hidden: opened.hidden }));
+        if (!reduceMotion) {
+          for (const [name, w] of [["closing", shut], ["opening", opened]]) {
+            ok(say + name + ", the card moves in small steps, never more than a third in one frame",
+              !!w && Math.max(...w.steps) < Math.abs(w.travel) / 3, JSON.stringify(w && { travel: w.travel, biggest: w.biggest }));
+            ok(say + name + ", it lands with no skip, and nothing jumps when the card is built again",
+              !!w && lateJump(w.tops) <= 2, JSON.stringify(w && w.tops.map(Math.round)));
+          }
+          const faded = shut ? shut.looks.findIndex((l) => !l || l.o < 0.05) : -1;
+          const flat = shut ? shut.looks.findIndex((l) => !l || l.h < 1) : -1;
+          ok(say + "closing, the words are gone before the space is", !!shut && faded >= 0 && (flat === -1 || faded < flat), JSON.stringify({ faded, flat }));
+          ok(say + "opening, the words start faded and slide down into place",
+            !!opened && !!opened.looks[0] && opened.looks[0].o < 0.5 && /matrix\(1, 0, 0, 1, 0, -/.test(opened.looks[0].t), JSON.stringify(opened && opened.looks.slice(0, 2)));
+        } else {
+          ok(say + "it closes in one step", !!shut && Math.abs(shut.biggest - Math.abs(shut.travel)) <= 2, JSON.stringify(shut && { travel: shut.travel, biggest: shut.biggest }));
+          ok(say + "and opens in one step", !!opened && Math.abs(opened.biggest - opened.travel) <= 2, JSON.stringify(opened && { travel: opened.travel, biggest: opened.biggest }));
+        }
+      });
+    }
+  }
+}
+
+console.log("\nwhat a switch brings out moves with it, and nothing in a fold is squeezed");
+{
+  // Three things that came and went in one step. A warning that a switch
+  // turns on, which used to wait for the rebuild after the switch. The
+  // button for your draft, which a button's minimum height held at full size
+  // while its fold ran. And a text box in a prompt block, squashed while the
+  // block closed and stretched while it opened.
+  //
+  // Each step is read as the distance one frame at 60 a second would cover,
+  // so a slow frame on the test machine is not counted as a skip.
+  const run = (page, sel, box, ms) =>
+    page.evaluate(async ([sel, box, ms]) => {
+      const drawer = document.getElementById("drawer");
+      const b = document.querySelector(box);
+      if (!b) return null;
+      b.scrollIntoView({ block: "center" });
+      const start = drawer.getBoundingClientRect().height;
+      const tops = [], times = [], looks = [];
+      b.click();
+      const t0 = performance.now();
+      while (performance.now() - t0 < ms) {
+        await new Promise((r) => requestAnimationFrame(r));
+        tops.push(drawer.getBoundingClientRect().height - start);
+        times.push(performance.now());
+        const n = sel ? document.querySelector(sel) : null;
+        looks.push(n && !n.hidden ? { o: parseFloat(getComputedStyle(n).opacity), h: n.getBoundingClientRect().height } : null);
+      }
+      const steps = tops.map((t, i) => (Math.abs(t - (i ? tops[i - 1] : 0)) * 16.7) / Math.max(16.7, times[i] - (i ? times[i - 1] : t0)));
+      return { travel: Math.round(tops[tops.length - 1]), tops, steps, looks };
+    }, [sel, box, ms]);
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const zoom of [1, 1.25, 0.85]) {
+      const say = label + (zoom === 1 ? "" : ", zoom " + zoom) + ": ";
+      await inTab(browser, { viewport, touch, css: zoom === 1 ? "" : "html{zoom:" + zoom + "}", saved: { enabled: true } }, async (page) => {
+        // The warning under Hide markup from the model.
+        await goTab(page, "Limits");
+        const warnSel = '#drawer [data-arf-hangs="protection off warning"]';
+        const off = await run(page, warnSel, '#drawer [data-arf-row="protectOn"] input[type="checkbox"]', 800);
+        const firstShown = off ? off.looks.findIndex((l) => l && l.h > 1) : -1;
+        ok(say + "switching protection off opens its warning at once, not after the rebuild",
+          firstShown >= 0 && firstShown <= 3 && off.looks[firstShown].o < 0.9, JSON.stringify(off && off.looks.slice(0, 5)));
+        ok(say + "and nothing jumps when the card is built again", !!off && lateJump(off.tops) <= 2, JSON.stringify(off && off.tops.map(Math.round)));
+        await settle(page);
+        const on = await run(page, warnSel, '#drawer [data-arf-row="protectOn"] input[type="checkbox"]', 800);
+        ok(say + "switching it on again closes the warning with no jump at the end", !!on && lateJump(on.tops) <= 2, JSON.stringify(on && on.tops.map(Math.round)));
+        ok(say + "and the warning is gone", !!on && on.looks[on.looks.length - 1] === null, JSON.stringify(on && on.looks.slice(-2)));
+
+        // The button for your draft, under Setup.
+        await goTab(page, "Setup");
+        const draftSel = "#drawer [data-arf-draft]";
+        const opened = await run(page, draftSel, '#drawer [data-arf-row="inputRefine"] input[type="checkbox"]', 800);
+        ok(say + "the draft button opens its space over several frames, never more than a third in one",
+          !!opened && opened.travel > 20 && Math.max(...opened.steps) < opened.travel / 3, JSON.stringify(opened && { travel: opened.travel, tops: opened.tops.map(Math.round) }));
+        ok(say + "and it starts smaller than its full height", !!opened && !!opened.looks[0] && opened.looks[0].h < 20, JSON.stringify(opened && opened.looks.slice(0, 3)));
+        await settle(page);
+        const shut = await run(page, draftSel, '#drawer [data-arf-row="inputRefine"] input[type="checkbox"]', 800);
+        ok(say + "switched off, it closes over several frames, never more than a third in one",
+          !!shut && shut.travel < -20 && Math.max(...shut.steps) < Math.abs(shut.travel) / 3, JSON.stringify(shut && shut.tops.map(Math.round)));
+        ok(say + "and with no jump at the end", !!shut && lateJump(shut.tops) <= 2, JSON.stringify(shut && shut.tops.map(Math.round)));
+      });
+      await inTab(browser, { viewport, touch, css: zoom === 1 ? "" : "html{zoom:" + zoom + "}", saved: { enabled: true } }, async (page) => {
+        // A prompt block's text box keeps its height while the block folds.
+        await goTab(page, "Prompt");
+        const watch = (label) =>
+          page.evaluate(async (label) => {
+            const btn = [...document.querySelectorAll("#drawer button")].find((b) => b.getAttribute("aria-label") === label);
+            if (!btn) return null;
+            const block = btn.closest(".arf-block");
+            btn.scrollIntoView({ block: "center" });
+            const ta = () => block.querySelector("textarea");
+            const full = ta() && !ta().closest("[hidden]") ? ta().getBoundingClientRect().height : 0;
+            const seen = [];
+            btn.click();
+            const t0 = performance.now();
+            while (performance.now() - t0 < 450) {
+              await new Promise((r) => requestAnimationFrame(r));
+              const t = ta();
+              if (t && !t.closest("[hidden]") && t.getBoundingClientRect().height > 0) seen.push(Math.round(t.getBoundingClientRect().height));
+            }
+            return { full: Math.round(full), seen };
+          }, label);
+        const shut = await watch("Close Passage");
+        await settle(page);
+        const open = await watch("Open Passage");
+        ok(say + "closing a block, its text box keeps its height until the block is shut",
+          !!shut && shut.full > 0 && shut.seen.every((h) => Math.abs(h - shut.full) <= 1), JSON.stringify(shut));
+        ok(say + "opening it, the text box is at its own height from the first frame",
+          !!open && open.seen.length > 0 && open.seen.every((h) => Math.abs(h - open.seen[open.seen.length - 1]) <= 1), JSON.stringify(open));
+      });
+    }
+  }
+}
+
+console.log("\nthe color editor in use");
+{
+  // Used the way a person uses it. A theme change while it is open shows the
+  // new theme color, another setting changed while it is open leaves it open,
+  // a real drag moves the color, and typing a code key by key never shows the
+  // color of a code that is only half typed.
+  const THEMED = ":root{--lumiverse-danger:rgb(200,30,40);--lumiverse-success:rgb(20,160,60)}";
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { css: THEMED, viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      const row = '#drawer [data-arf-row="cutColor"]';
+      const state = () => page.evaluate((row) => {
+        const r = document.querySelector(row);
+        const ed = r.querySelector(".arf-coloredit");
+        return {
+          open: !!ed && !ed.hidden && ed.getClientRects().length > 0,
+          code: r.querySelector('[data-arf-field="cutColor"]').value,
+          swatch: getComputedStyle(r.querySelector("[data-arf-colorswatch]")).backgroundColor,
+          sliders: Array.from(r.querySelectorAll("[data-arf-colorpart]")).map((x) => x.value).join(),
+        };
+      }, row);
+      await page.click(row + " [data-arf-colorswatch]");
+      await page.waitForTimeout(500);
+
+      await page.addStyleTag({ content: ":root{--lumiverse-danger:rgb(10,90,200)}" });
+      await page.waitForTimeout(1500);
+      const themed = await state();
+      ok(label + ": a theme change while it is open shows the new theme color",
+        themed.open && themed.code === "#0a5ac8" && themed.swatch === "rgb(10, 90, 200)" && themed.sliders === "215,90,41", JSON.stringify(themed));
+
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-row="reduceMotion"] input[type=checkbox]').click());
+      await page.waitForTimeout(600);
+      ok(label + ": changing another setting leaves it open", (await state()).open, JSON.stringify(await state()));
+
+      // A real drag on the Hue knob, by mouse or by finger.
+      const hue = page.locator(row + ' [data-arf-colorpart="h"]');
+      await hue.scrollIntoViewIfNeeded();
+      const box = await hue.boundingBox();
+      const x0 = box.x + box.width * (215 / 360), y0 = box.y + box.height / 2;
+      if (touch) {
+        const cdp = await page.context().newCDPSession(page);
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: x0, y: y0 }] });
+        for (let i = 1; i <= 5; i++) await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ x: x0 - i * 20, y: y0 }] });
+        await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      } else {
+        await page.mouse.move(x0, y0);
+        await page.mouse.down();
+        for (let i = 1; i <= 5; i++) await page.mouse.move(x0 - i * 20, y0);
+        await page.mouse.up();
+      }
+      await page.waitForTimeout(400);
+      const dragged = await state();
+      const savedHue = await page.evaluate(() => JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1") || "{}").cutColor);
+      ok(label + ": dragging the Hue knob changes the color and saves it",
+        Number(dragged.sliders.split(",")[0]) < 200 && /^#[0-9a-f]{6}$/.test(String(savedHue)) && savedHue === dragged.code, JSON.stringify({ dragged, savedHue }));
+
+      // Typing #ff0040 one key at a time. Halfway, #ff0 is a short code for
+      // yellow, which must never be shown.
+      const before = (await state()).swatch;
+      const seen = [];
+      const code = page.locator(row + ' [data-arf-field="cutColor"]');
+      await code.click();
+      await code.fill("");
+      for (const ch of "#ff0040") {
+        await page.keyboard.type(ch);
+        await page.waitForTimeout(30);
+        seen.push((await state()).swatch);
+      }
+      ok(label + ": a half-typed code never changes the color",
+        seen.slice(0, -1).every((c) => c === before) && seen[seen.length - 1] === "rgb(255, 0, 64)", JSON.stringify({ before, seen }));
+      await code.fill("#0f8");
+      await page.keyboard.press("Enter");
+      await code.blur();
+      await page.waitForTimeout(300);
+      ok(label + ": a short code is still used when typing ends", (await state()).swatch === "rgb(0, 255, 136)", JSON.stringify(await state()));
+    });
+  }
+}
+
+console.log("\ncolors saved under the old setting names");
+{
+  // The two word colors were saved as cutColour and addColour before the panel
+  // moved to American spelling. A color saved that way is still the one used,
+  // and it is saved again under the new name.
+  const old = { enabled: true, popup: true, ["cut" + "Colour"]: "#4c1d95", ["add" + "Colour"]: "#5b0a4a" };
+  await inTab(browser, { saved: old }, async (page) => {
+    await goTab(page, "Setup");
+    await settle(page);
+    const out = await page.evaluate(async () => {
+      const swatch = document.querySelector('#drawer [data-arf-colorswatch="cutColor"]');
+      // Read now. The change below redraws the panel and takes this one away.
+      const shown = swatch ? getComputedStyle(swatch).backgroundColor : null;
+      // A change saves the settings, so what is stored can be read back.
+      const box = document.querySelector('#drawer input[type="checkbox"]');
+      box.click();
+      box.click();
+      await new Promise((r) => setTimeout(r, 900));
+      const kept = JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1") || "{}");
+      return {
+        swatch: shown,
+        cut: kept.cutColor,
+        add: kept.addColor,
+        oldLeft: Object.keys(kept).filter((k) => /Colour$/.test(k)),
+      };
+    });
+    ok("a color saved under the old name is the one shown", out.swatch === "rgb(76, 29, 149)", JSON.stringify(out));
+    ok("and it is saved again under the new names", out.cut === "#4c1d95" && out.add === "#5b0a4a", JSON.stringify(out));
+    ok("with the old names gone", out.oldLeft.length === 0, JSON.stringify(out));
+  });
+}
+
+console.log("\ncut and added words keep their color when the view is switched");
+{
+  // A color the reader picked is shown exactly as picked, even where it is
+  // hard to read on the card, and switching between the two views keeps it.
+  // With no color picked, the theme's color is used, and one too faint for
+  // the card is made readable, before and after a switch alike. #4c1d95 is a
+  // dark violet that is hard to read on this purple card.
+  const PURPLE = ":root{--lumiverse-bg:rgb(26,10,40);--lumiverse-bg-elevated:rgba(70,20,100,.9);--lumiverse-card-bg-solid:rgb(40,12,60);--lumiverse-primary:rgb(233,200,255)}";
+  const FAINT = PURPLE.replace("}", ";--lumiverse-danger:rgb(76,29,149);--lumiverse-success:rgb(91,10,74)}");
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const own of [true, false]) {
+      const saved = own ? { enabled: true, popup: true, cutColor: "#4c1d95", addColor: "#5b0a4a" } : { enabled: true, popup: true };
+      await inTab(browser, { css: own ? PURPLE : FAINT, viewport, touch, saved }, async (page) => {
+        await goTab(page, "Setup");
+        await settle(page);
+        await page.evaluate(() => document.querySelector("[data-arf-popdemo]").click());
+        await page.waitForTimeout(400);
+        const look = () => page.evaluate(() => {
+          const pop = document.querySelector(".arf-pop:not(.arf-leaving)");
+          if (!pop) return null;
+          const of = (cls) => Array.from(pop.querySelectorAll(cls)).map((s) => getComputedStyle(s).color);
+          return { cut: of(".arf-cut"), add: of(".arf-add") };
+        });
+        const switchView = () => page.evaluate(() => document.querySelector(".arf-pop:not(.arf-leaving) [data-arf-diff-switch]").click());
+        const say = label + (own ? ", your own colors" : ", the theme's colors") + ": ";
+        const first = await look();
+        if (own)
+          ok(say + "they are shown exactly as picked", !!first && first.cut.length > 0 && first.cut.every((c) => c === "rgb(76, 29, 149)") && first.add.every((c) => c === "rgb(91, 10, 74)"), JSON.stringify(first));
+        else
+          ok(say + "a theme color too faint for the card is made readable", !!first && first.cut.length > 0 && first.cut.every((c) => c !== "rgb(76, 29, 149)") && first.add.every((c) => c !== "rgb(91, 10, 74)"), JSON.stringify(first));
+        ok(say + "every cut word has the same color", !!first && new Set(first.cut).size === 1, JSON.stringify(first && first.cut));
+        await switchView();
+        await page.waitForTimeout(100);
+        const other = await look();
+        ok(say + "switching the view keeps the cut words' color",
+          !!other && other.cut.length > 0 && other.cut.every((c) => c === first.cut[0]), JSON.stringify(other && other.cut) + " was " + first.cut[0]);
+        ok(say + "and the added words' color", !!other && other.add.length > 0 && other.add.every((c) => c === first.add[0]), JSON.stringify(other && other.add) + " was " + first.add[0]);
+        await switchView();
+        await page.waitForTimeout(100);
+        const back = await look();
+        ok(say + "and switching back keeps it too", !!back && back.cut.every((c) => c === first.cut[0]) && back.add.every((c) => c === first.add[0]), JSON.stringify(back));
+      });
+    }
+  }
+}
+
+console.log("\nfolds and the color editor open and close smoothly");
+{
+  // A fold, such as Sampler values or Older refines, and the color editor
+  // open and close over several frames, so what is under them moves with
+  // them. Pressed again while moving, they turn round from where they are.
+  // Measured by the height of the box holding each one, which a scroll does
+  // not change, at each zoom, since UI Scale is a zoom.
+  const watchBox = (page, press, box) =>
+    page.evaluate(async ({ press, box }) => {
+      const q = (sel) => document.querySelector(sel);
+      const findPress = () => (press.startsWith("text:") ? [...document.querySelectorAll("#drawer button.arf-fold")].find((b) => b.textContent.includes(press.slice(5))) : q(press));
+      const holder = () => (box === "parent" ? findPress().parentElement : q(box));
+      const h = () => holder().getBoundingClientRect().height;
+      const run = async (turn) => {
+        const start = h();
+        const tops = [];
+        const times = [];
+        findPress().click();
+        const t0 = performance.now();
+        let turned = false;
+        while (performance.now() - t0 < 620) {
+          await new Promise((r) => requestAnimationFrame(r));
+          if (turn && !turned && performance.now() - t0 > 90) {
+            turned = true;
+            findPress().click();
+          }
+          tops.push(h() - start);
+          times.push(performance.now());
+        }
+        const steps = tops.map((t, i) => (Math.abs(t - (i ? tops[i - 1] : 0)) * 16.7) / Math.max(16.7, times[i] - (i ? times[i - 1] : t0)));
+        return { travel: Math.round(tops[tops.length - 1]), tops: tops.map(Math.round), steps };
+      };
+      const opened = await run(false);
+      const shut = await run(false);
+      const turned = await run(true);
+      return { opened, shut, turned };
+    }, { press, box });
+  const skips = (w) => {
+    let worst = 0;
+    // Counted once it has started moving. A slow first frame is the test
+    // machine, not a skip.
+    const from = Math.max(2, w.steps.findIndex((x) => x > 0.5) + 2);
+    for (let i = from; i < w.steps.length; i++) worst = Math.max(worst, w.steps[i] - Math.max(w.steps[i - 1], w.steps[i - 2]));
+    return worst;
+  };
+  const CASES = [
+    ["Sampler values", "Model", "text:Sampler values", "parent", {}],
+    ["the color editor", "Setup", '#drawer [data-arf-colorswatch="cutColor"]', '#drawer [data-arf-row="cutColor"]', {}],
+  ];
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const zoom of [1, 0.9, 1.25]) {
+      for (const [name, tabName, press, box, extra] of CASES) {
+        await inTab(browser, { viewport, touch, css: zoom === 1 ? "" : "html{zoom:" + zoom + "}", saved: { enabled: true, ...extra } }, async (page) => {
+          await goTab(page, tabName);
+          await settle(page);
+          const out = await watchBox(page, press, box);
+          const say = label + (zoom === 1 ? "" : ", zoom " + zoom) + ", " + name + ": ";
+          ok(say + "it opens", out.opened.travel > 20, JSON.stringify(out.opened.tops));
+          ok(say + "opening, it moves in small steps and lands with no skip",
+            Math.max(...out.opened.steps) < out.opened.travel / 3 && skips(out.opened) <= 6, JSON.stringify(out.opened.tops));
+          ok(say + "it closes all the way", Math.abs(out.shut.travel + out.opened.travel) <= 2, JSON.stringify(out.shut.tops));
+          ok(say + "closing, it moves in small steps and lands with no skip",
+            Math.max(...out.shut.steps) < Math.abs(out.shut.travel) / 3 && skips(out.shut) <= 6, JSON.stringify(out.shut.tops));
+          // Judged from the turn on. A close starts at its fastest, so the
+          // first step back is bigger than the last step up, and that is not a
+          // skip.
+          const peak = out.turned.tops.indexOf(Math.max(...out.turned.tops));
+          const back = { steps: out.turned.steps.slice(peak + 1) };
+          ok(say + "pressed again while opening, it turns round with no jump and ends shut",
+            skips(back) <= 6 && Math.max(...out.turned.steps) < out.opened.travel / 3 && Math.abs(out.turned.travel) <= 2, JSON.stringify(out.turned.tops));
+        });
+      }
+    }
+  }
+}
+
+console.log("\nthe status dot stays beside a long status line");
+{
+  // A long line of status wraps under itself. The dot stays at the start of
+  // its first line rather than sitting alone above it.
+  for (const [label, viewport, touch, zoom] of [["phone", { width: 360, height: 900 }, true], ["phone at 412", { width: 412, height: 900 }, true], ["phone at 412, zoom 0.9", { width: 412, height: 900 }, true, 0.9], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, css: zoom ? "html{zoom:" + zoom + "}" : "", saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Log");
+      await page.evaluate(() => {
+        const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+        window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+      });
+      await settle(page);
+      const got = await page.evaluate(async () => {
+        Array.from(document.querySelectorAll("#drawer button"))
+          .find((b) => /Refine the latest reply/.test(b.textContent))
+          .click();
+        const id = window.__sent.filter((m) => m.type === "refine_now").pop().requestId;
+        window.__fromBackend({ type: "refine_ack", requestId: id });
+        window.__fromBackend({ type: "refine_progress", stage: "waiting", waitMs: 29000, attempt: 2, of: 2 });
+        await new Promise((r) => setTimeout(r, 100));
+        const dot = document.querySelector("#drawer .arf-dot");
+        const words = dot && dot.nextElementSibling;
+        if (!dot || !words) return null;
+        const d = dot.getBoundingClientRect();
+        const w = words.getBoundingClientRect();
+        const lines = words.getClientRects().length && Math.round(w.height / parseFloat(getComputedStyle(words).lineHeight));
+        return {
+          text: words.textContent,
+          lines,
+          beside: d.right <= w.left + 1,
+          firstLine: d.top >= w.top - 1 && d.bottom <= w.top + parseFloat(getComputedStyle(words).lineHeight) + 1,
+          sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+        };
+      });
+      ok(label + ": the status line is there", !!got && /would not take the call/.test(got.text), JSON.stringify(got));
+      if (label === "phone") ok("phone: the line is long enough to wrap, or this proves nothing", !!got && got.lines >= 2, JSON.stringify(got));
+      ok(label + ": the dot sits beside the words, on their first line", !!got && got.beside && got.firstLine, JSON.stringify(got));
+      // The countdown comes first, so a line that wraps keeps it on the first
+      // line, with the words that go with it.
+      const together = await page.evaluate(() => {
+        const words = document.querySelector("#drawer .arf-dot").nextElementSibling;
+        const text = words.firstChild;
+        const at = (needle) => {
+          const i = text.textContent.indexOf(needle);
+          if (i < 0) return null;
+          const r = document.createRange();
+          r.setStart(text, i);
+          r.setEnd(text, i + needle.length);
+          return Math.round(r.getClientRects()[0].top);
+        };
+        return { trying: at("Trying"), number: at("29s"), first: Math.round(words.getClientRects()[0].top) };
+      });
+      ok(label + ": the countdown is on the first line, with the words before it", together.trying != null && together.trying === together.number && Math.abs(together.number - together.first) <= 2, JSON.stringify(together));
+      ok(label + ": nothing runs off the side", !!got && !got.sideways, "");
+    });
+  }
+}
+
+console.log("\nleaving things out of the run-up, and the lorebook names");
+{
+  // The Context tab has a box for patterns to cut from {{history}}, and a
+  // switch for the names in front of lorebook entries. A pattern that cannot
+  // be read is named under the box, and the note goes once it is fixed.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch }, async (page) => {
+      await goTab(page, "Context");
+      await settle(page);
+      const rows = await page.evaluate(() => {
+        const seen = (k) => {
+          const n = document.querySelector('#drawer [data-arf-field="' + k + '"]');
+          return !!n && !n.closest("[hidden]") && n.getClientRects().length > 0;
+        };
+        const lore = document.querySelector('#drawer [data-arf-field="loreNames"]');
+        return { cut: seen("historyCut"), names: seen("loreNames"), on: !!lore && lore.checked };
+      });
+      ok(label + ": Leave out of the run-up is on the Context tab", rows.cut, JSON.stringify(rows));
+      ok(label + ": Name each lorebook entry is there, and on", rows.names && rows.on, JSON.stringify(rows));
+      const note = () => page.evaluate(() => /These patterns could not be read and are doing nothing: \(\[unclosed/.test(document.querySelector("#drawer").textContent));
+      await page.evaluate(() => window.__fromBackend({ type: "history_bad", patterns: ["([unclosed (missing )"] }));
+      await settle(page);
+      ok(label + ": a pattern that cannot be read is named", await note(), "");
+      await page.evaluate(() => window.__fromBackend({ type: "history_bad", patterns: [] }));
+      await settle(page);
+      ok(label + ": and the note goes once it is fixed", !(await note()), "");
+      // The note arriving while somebody is still typing in the box redraws
+      // the panel. The cursor stays in the box, where it was.
+      await page.click('#drawer [data-arf-field="historyCut"]');
+      await page.keyboard.type("^\\[(HP");
+      await page.evaluate(() => window.__fromBackend({ type: "history_bad", patterns: ["^\\[(HP (missing )"] }));
+      await settle(page);
+      await page.keyboard.type(")\\]$");
+      const typing = await page.evaluate(() => {
+        const box = document.querySelector('#drawer [data-arf-field="historyCut"]');
+        return { value: box.value, focused: document.activeElement === box, caret: box.selectionStart };
+      });
+      ok(label + ": typing goes on in the box when the note comes up", typing.focused && typing.value === "^\\[(HP)\\]$" && typing.caret === typing.value.length, JSON.stringify(typing));
+      await page.evaluate(() => window.__fromBackend({ type: "history_bad", patterns: [] }));
+      await settle(page);
+      const look = await page.evaluate((touch) => {
+        const out = { sideways: document.documentElement.scrollWidth > window.innerWidth + 1, small: [] };
+        if (touch)
+          for (const k of ["historyCut", "loreNames"]) {
+            const row = document.querySelector('#drawer [data-arf-row="' + k + '"]');
+            const n = row && row.querySelector("textarea, input:not([type=checkbox]), .arf-box, label");
+            if (n && n.getBoundingClientRect().height < 32) out.small.push(k + ":" + Math.round(n.getBoundingClientRect().height));
+          }
+        return out;
+      }, touch);
+      ok(label + ": nothing runs off the side", !look.sideways, "");
+      if (touch) ok(label + ": both rows are at least 32 pixels high to tap", look.small.length === 0, JSON.stringify(look.small));
+    });
+  }
+}
+
+console.log("\nthe Stop button stays put while the status line changes");
+{
+  // A refine moves through asking, a countdown after a call the provider
+  // would not take, and asking again. The status line changes length each
+  // time, and the countdown loses a digit as it runs down. None of it moves
+  // the Stop button under it. Checked at phone and laptop widths, at three
+  // UI Scale steps.
+  for (const [label, viewport, touch, drawerW] of [["phone at 360", { width: 360, height: 900 }, true], ["phone at 412", { width: 412, height: 900 }, true], ["phone, a drawer 250 wide", { width: 360, height: 900 }, true, 250], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const zoom of [1, 1.25, 0.85]) {
+      const say = label + ", zoom " + zoom + ": ";
+      await inTab(browser, { viewport, touch, css: "html{zoom:" + zoom + "}" + (drawerW ? "#drawer{width:" + drawerW + "px}" : ""), saved: { enabled: true, timeoutSecs: 100 } }, async (page) => {
+        await goTab(page, "Log");
+        await page.evaluate(() => {
+          const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+          window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+        });
+        await settle(page);
+        const ahead = (secs) =>
+          page.evaluate((secs) => {
+            window.__ahead = (window.__ahead || 0) + secs * 1000;
+            if (!window.__realNow) {
+              window.__realNow = Date.now.bind(Date);
+              Date.now = () => window.__realNow() + window.__ahead;
+            }
+          }, secs);
+        const where = async () => {
+          await page.waitForTimeout(320);
+          return page.evaluate(() => {
+            const stop = document.querySelector("#drawer [data-arf-stop]");
+            const words = document.querySelector("#drawer .arf-dot");
+            return {
+              top: stop ? Math.round(stop.getBoundingClientRect().top * 10) / 10 : null,
+              text: words && words.nextElementSibling ? words.nextElementSibling.textContent : "",
+            };
+          });
+        };
+        await page.evaluate(() => {
+          Array.from(document.querySelectorAll("#drawer button"))
+            .find((b) => /Refine the latest reply/.test(b.textContent))
+            .click();
+          const id = window.__sent.filter((m) => m.type === "refine_now").pop().requestId;
+          window.__fromBackend({ type: "refine_ack", requestId: id });
+          window.__fromBackend({ type: "refine_progress", stage: "asking" });
+        });
+        const seen = [await where()];
+        await ahead(12);
+        seen.push(await where());
+        await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "waiting", waitMs: 4000, attempt: 1, of: 3 }));
+        seen.push(await where());
+        await ahead(3);
+        seen.push(await where());
+        await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "asking" }));
+        seen.push(await where());
+        await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "waiting", waitMs: 33000, attempt: 2, of: 3 }));
+        seen.push(await where());
+        await ahead(20);
+        seen.push(await where());
+        await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "writing" }));
+        seen.push(await where());
+        ok(say + "the line went through every step", seen.some((w) => /Trying\sagain\sin\s4s\s\(1\sof\s3\)/.test(w.text)) && seen.some((w) => /Trying\sagain\sin\s33s\s\(2\sof\s3\)/.test(w.text)) && seen.some((w) => /^Writing/.test(w.text)), JSON.stringify(seen.map((w) => w.text)));
+        const tops = seen.map((w) => w.top);
+        ok(say + "the Stop button never moves", tops.every((t) => t != null && Math.abs(t - tops[0]) <= 1), JSON.stringify(tops));
+        ok(say + "the countdown and the reason are on lines of their own", seen.filter((w) => /Trying again/.test(w.text)).every((w) => /\)\.\nThe provider would not take the call\.$/.test(w.text)), JSON.stringify(seen.map((w) => w.text)));
+        const sideways = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+        ok(say + "nothing runs off the side", !sideways, "");
+      });
+    }
+  }
+}
+
+console.log("\nthe Stop button stays put through a run through the chat");
+{
+  // The line above Stop is written again for each reply, and its counts gain
+  // digits as the run goes on. Stop stays where it is. The drawer's width is
+  // stepped through, since where the words wrap depends on the exact width,
+  // on a phone and on a laptop.
+  const widths = [];
+  for (let w = 240; w <= 420; w += 6) widths.push(w);
+  for (const zoom of [1, 1.25, 0.85]) {
+    for (const [label, viewport, touch] of [["phone", { width: 420, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+      const say = label + ", zoom " + zoom + ": ";
+      await inTab(browser, { viewport, touch, css: "html{zoom:" + zoom + "}", saved: { enabled: true } }, async (page) => {
+        await page.evaluate(() => {
+          const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+          window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+        });
+        await settle(page);
+        const moved = [];
+        const said = [];
+        for (const w of widths) {
+          await page.evaluate((w) => { document.getElementById("drawer").style.width = w + "px"; }, w);
+          await page.evaluate(() => document.querySelector("#drawer [data-arf-sweep]").click());
+          await settle(page);
+          await page.evaluate(() => document.querySelector("[data-arf-sweep-yes]").click());
+          await settle(page);
+          const tops = [];
+          for (const [at, saved, skipped] of [[1, 0, 0], [9, 7, 1], [10, 8, 1], [11, 9, 1], [99, 90, 8], [112, 100, 11]]) {
+            await page.evaluate(([at, saved, skipped]) => {
+              const m = window.__sent.filter((x) => x.type === "refine_all").pop();
+              window.__fromBackend({ type: "refine_all_progress", requestId: m ? m.requestId : "x", chatId: "c1", at, of: 120, saved, skipped });
+              window.__fromBackend({ type: "refine_progress", stage: "writing" });
+            }, [at, saved, skipped]);
+            await page.waitForTimeout(200);
+            const got = await page.evaluate(() => {
+              const stop = document.querySelector("#drawer [data-arf-sweep-stop]");
+              return { top: stop ? Math.round(stop.getBoundingClientRect().top * 10) / 10 : null, text: (document.querySelector("#drawer").textContent.match(/Going through the chat[^.]*\./) || [""])[0] };
+            });
+            tops.push(got.top);
+            said.push(got.text);
+          }
+          if (!tops.every((t) => t != null && Math.abs(t - tops[0]) <= 1)) moved.push(w + ": " + JSON.stringify(tops));
+          await page.evaluate(() => {
+            const m = window.__sent.filter((x) => x.type === "refine_all").pop();
+            window.__fromBackend({ type: "refine_all_done", requestId: m ? m.requestId : "x", saved: 0, skipped: 0 });
+            window.__fromBackend({ type: "refine_done", ok: false, why: "stopped" });
+          });
+          await settle(page);
+        }
+        ok(say + "the run went from the first reply to reply 112", said.some((t) => /reply 1 of 120/.test(t)) && said.some((t) => /reply 112 of 120, 100 refined, 11 left alone/.test(t)), JSON.stringify(said.slice(0, 6)));
+        ok(say + "the Stop button never moves", moved.length === 0, moved.join(" | "));
+      });
+    }
+  }
+}
+
+console.log("\nthe time left is for the call that is running");
+{
+  // The backend gives each call to the model the whole wait. A refine that
+  // asks again, after the provider turned it away or after a failed check,
+  // has the whole wait again, so the time left and the give-up timer start
+  // again with each call. The clock beside it is the whole refine.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true, timeoutSecs: 100 } }, async (page) => {
+      await goTab(page, "Log");
+      await page.evaluate(() => {
+        const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+        window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+      });
+      await settle(page);
+      const line = () => page.evaluate(() => (document.querySelector("#drawer").textContent.match(/Refining, \d+s(, \d+s\sleft(\son\sthis\stry)?)?/) || [""])[0]);
+      const ahead = (secs) =>
+        page.evaluate((secs) => {
+          window.__ahead = (window.__ahead || 0) + secs * 1000;
+          if (!window.__realNow) {
+            window.__realNow = Date.now.bind(Date);
+            Date.now = () => window.__realNow() + window.__ahead;
+          }
+        }, secs);
+      await page.evaluate(() => {
+        Array.from(document.querySelectorAll("#drawer button"))
+          .find((b) => /Refine the latest reply/.test(b.textContent))
+          .click();
+        const id = window.__sent.filter((m) => m.type === "refine_now").pop().requestId;
+        window.__fromBackend({ type: "refine_ack", requestId: id });
+        window.__fromBackend({ type: "refine_progress", stage: "asking" });
+      });
+      await ahead(60);
+      await page.waitForTimeout(500);
+      const first = await line();
+      ok(label + ": on the first call the time left is the wait less the clock", /^Refining, 6[01]s, (40|39)s\sleft$/.test(first), first);
+      await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "waiting", waitMs: 20000, attempt: 1, of: 2 }));
+      await ahead(20);
+      await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "asking" }));
+      await ahead(30);
+      await page.waitForTimeout(500);
+      const second = await line();
+      ok(label + ": on the next call the whole wait starts again", /^Refining, 11[01]s, (70|69)s\sleft\son\sthis\stry$/.test(second), second);
+      await ahead(50);
+      await page.waitForTimeout(600);
+      const still = await page.evaluate(() => ({
+        busy: /Refining/.test(document.querySelector("#drawer").textContent),
+        toasts: (window.__toasts || []).join(" | "),
+      }));
+      ok(label + ": the panel does not give up on a call still inside its wait", still.busy && !/never came back/.test(still.toasts), JSON.stringify(still));
+      await ahead(70);
+      await page.waitForTimeout(600);
+      const gone = await page.evaluate(() => ({
+        busy: /Refining/.test(document.querySelector("#drawer").textContent),
+        toasts: (window.__toasts || []).join(" | "),
+      }));
+      ok(label + ": and gives up once that call is past it", !gone.busy && /never came back/.test(gone.toasts), JSON.stringify(gone));
+    });
+  }
+}
+
+console.log("\na pass on its own model setup has that setup's wait");
+{
+  // The backend says each call's wait. A pass on a model setup that waits
+  // longer than the Model tab is not given up on at the Model tab's wait, and
+  // its time left counts down from its own.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true, timeoutSecs: 100 } }, async (page) => {
+      await goTab(page, "Log");
+      await page.evaluate(() => {
+        const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+        window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+      });
+      await settle(page);
+      const line = () => page.evaluate(() => (document.querySelector("#drawer").textContent.match(/Refining, \d+s(, \d+s\sleft(\son\sthis\stry)?)?/) || [""])[0]);
+      const ahead = (secs) =>
+        page.evaluate((secs) => {
+          window.__ahead = (window.__ahead || 0) + secs * 1000;
+          if (!window.__realNow) {
+            window.__realNow = Date.now.bind(Date);
+            Date.now = () => window.__realNow() + window.__ahead;
+          }
+        }, secs);
+      await page.evaluate(() => {
+        Array.from(document.querySelectorAll("#drawer button"))
+          .find((b) => /Refine the latest reply/.test(b.textContent))
+          .click();
+        const id = window.__sent.filter((m) => m.type === "refine_now").pop().requestId;
+        window.__fromBackend({ type: "refine_ack", requestId: id });
+        window.__fromBackend({ type: "refine_progress", stage: "asking", waitSecs: 300 });
+      });
+      await ahead(60);
+      await page.waitForTimeout(500);
+      const first = await line();
+      ok(label + ": the time left counts down from the pass's own wait", /^Refining, 6[01]s, (240|239)s\sleft$/.test(first), first);
+      await ahead(100);
+      await page.waitForTimeout(600);
+      const still = await page.evaluate(() => ({
+        busy: /Refining/.test(document.querySelector("#drawer").textContent),
+        toasts: (window.__toasts || []).join(" | "),
+      }));
+      ok(label + ": past the Model tab's wait, the panel still waits for the pass", still.busy && !/never came back/.test(still.toasts), JSON.stringify(still));
+      await ahead(200);
+      await page.waitForTimeout(600);
+      const gone = await page.evaluate(() => ({
+        busy: /Refining/.test(document.querySelector("#drawer").textContent),
+        toasts: (window.__toasts || []).join(" | "),
+      }));
+      ok(label + ": and gives up once the pass is past its own wait", !gone.busy && /never came back/.test(gone.toasts), JSON.stringify(gone));
+    });
+  }
+}
+
+console.log("\nUse the built-in list, when it is already the built-in list");
+{
+  // Pressed with the built-in list already in the box, nothing changes and the
+  // line beside the button says so. Pressed on a list of your own, the
+  // built-in one goes back in.
+  const tryBox = async (page, key, button) => {
+    const press = () =>
+      page.evaluate((button) => {
+        document.querySelector("#drawer [" + button + "]").click();
+      }, button);
+    const read = () =>
+      page.evaluate(({ key, button }) => {
+        const box = document.querySelector('#drawer [data-arf-field="' + key + '"]');
+        const said = document.querySelector("#drawer [" + button + "]").parentElement.textContent;
+        return { value: box ? box.value : null, said };
+      }, { key, button });
+    const before = await read();
+    await page.evaluate(() => (window.__toasts = []));
+    await press();
+    await settle(page);
+    const already = await read();
+    const toasts = await page.evaluate(() => window.__toasts.length);
+    const mine = async () => {
+      await page.evaluate((key) => {
+        const box = document.querySelector('#drawer [data-arf-field="' + key + '"]');
+        box.value = ".my-own-box";
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        box.dispatchEvent(new Event("change", { bubbles: true }));
+        box.dispatchEvent(new Event("blur"));
+      }, key);
+      await settle(page);
+    };
+    // Lumiverse's confirmation pop-up, answered no first and then yes.
+    await mine();
+    await page.evaluate(() => { window.__confirms = []; window.__confirmSay = false; });
+    await press();
+    await settle(page);
+    const declined = await read();
+    const asked = await page.evaluate(() => (window.__confirms || []).map((c) => c.title + " | " + c.message));
+    await page.evaluate(() => { window.__confirmSay = true; });
+    await press();
+    await settle(page);
+    const back = await read();
+    return { before, already, toasts, asked, declined, back };
+  };
+
+  // The drawer scrolls on its own, as Lumiverse's does, so the question comes
+  // up as Lumiverse's pop-up rather than as press-again.
+  const DRAWER = "#drawer{height:100vh;overflow-y:auto;box-sizing:border-box}";
+  await inTab(browser, { css: DRAWER, saved: { inputRefine: true } }, async (page) => {
+    await goTab(page, "Setup");
+    const out = await tryBox(page, "inputSelector", "data-arf-resetinput");
+    ok("input box: pressed on the built-in list, it says so", /already the built-in list\. Nothing changed\./.test(out.already.said), JSON.stringify(out.already).slice(0, 200));
+    ok("and changes nothing", out.already.value === out.before.value, JSON.stringify(out).slice(0, 300));
+    ok("without a pop-up", out.toasts === 0, String(out.toasts));
+    ok("pressed on a list of your own, a confirmation pop-up asks first", out.asked.length === 1 && /^Use the built-in list \| Replace what is in Where the input box is/.test(out.asked[0]), JSON.stringify(out.asked));
+    ok("answered no, your list stays", out.declined.value === ".my-own-box", JSON.stringify(out.declined).slice(0, 200));
+    ok("answered yes, the built-in one goes back", out.back.value === out.before.value && !/Nothing changed/.test(out.back.said), JSON.stringify(out.back).slice(0, 200));
+  });
+
+  // On Limits, under the switch it hangs off.
+  await inTab(browser, { css: DRAWER, saved: { enabled: true, asSwipe: true } }, async (page) => {
+    await goTab(page, "Limits");
+    const out = await tryBox(page, "swipeSelector", "data-arf-resetswipe");
+    ok("swipe button: pressed on the built-in list, it says so", /already the built-in list\. Nothing changed\./.test(out.already.said), JSON.stringify(out.already).slice(0, 200));
+    ok("and changes nothing", out.already.value === out.before.value, JSON.stringify(out).slice(0, 300));
+    ok("pressed on a list of your own, a confirmation pop-up asks first", out.asked.length === 1 && /^Use the built-in list \| Replace what is in Your next \/ swipe button/.test(out.asked[0]), JSON.stringify(out.asked));
+    ok("answered no, your list stays", out.declined.value === ".my-own-box", JSON.stringify(out.declined).slice(0, 200));
+    ok("answered yes, the built-in one goes back", out.back.value === out.before.value && !/Nothing changed/.test(out.back.said), JSON.stringify(out.back).slice(0, 200));
+  });
+}
+
+console.log("\na temporary chat");
+{
+  // A chat with no card on it is the temporary chat: a scratch conversation
+  // with the model, thrown away on the way out. The switch has to work in one,
+  // and must not be written down, because the next one carries a different id
+  // and the entry could never match anything again.
+  const asTemp = async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat",
+        requestId: id,
+        chatId: "temp-1",
+        character: null,
+        hasCharacter: false,
+        resolved: true,
+      });
+    });
+    await settle(page);
+  };
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    await asTemp(page);
+    const said = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+    ok("the panel says it is a temporary chat", /temporary chat/i.test(said));
+    ok("and does not call it a chat with no card", !/no character card on it/.test(said));
+
+    // The switch still works: it is held in memory and the backend is told.
+    await page.evaluate(() => {
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => b.textContent.trim() === "Turn off here")
+        .click();
+    });
+    await settle(page);
+    const after = await page.evaluate(() => ({
+      told: (window.__sent.filter((m) => m.type === "set_chats_off").pop() || {}).chats,
+      written: JSON.parse(localStorage.getItem("lv-auto-refine:chats-off:v1") || "[]"),
+      said: document.querySelector("#drawer .arf-body").textContent,
+    }));
+    ok("switching it off still reaches the backend", (after.told || []).indexOf("temp-1") >= 0, JSON.stringify(after.told));
+    ok("but nothing about it is written down", after.written.indexOf("temp-1") < 0, JSON.stringify(after.written));
+    ok("and the panel says the switch will not be remembered", /not remembered/.test(after.said));
+  });
+
+  // An ordinary chat switched off afterwards must not drag the temporary one
+  // into storage with it.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    await asTemp(page);
+    await page.evaluate(() => {
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => b.textContent.trim() === "Turn off here")
+        .click();
+    });
+    await settle(page);
+    // Now an ordinary chat, switched off in turn. The reply has to answer the
+    // question the panel actually asked: an answer to anything else is about a
+    // chat nobody is looking at, and the panel is right to drop it.
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat",
+        requestId: id,
+        chatId: "real-1",
+        character: "Wren",
+        hasCharacter: true,
+        resolved: true,
+      });
+    });
+    await settle(page);
+    await page.evaluate(() => {
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => b.textContent.trim() === "Turn off here")
+        .click();
+    });
+    await settle(page);
+    const written = await page.evaluate(() =>
+      JSON.parse(localStorage.getItem("lv-auto-refine:chats-off:v1") || "[]"),
+    );
+    ok("a real chat is remembered", written.indexOf("real-1") >= 0, JSON.stringify(written));
+    ok("and does not carry the temporary one into storage", written.indexOf("temp-1") < 0, JSON.stringify(written));
+  });
+
+  // A backend that could not look is not evidence of no card.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat",
+        requestId: id,
+        chatId: "unknown-1",
+        character: null,
+        hasCharacter: false,
+        resolved: false,
+      });
+    });
+    await settle(page);
+    const said = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+    ok("a chat it could not look at is not called temporary", !/temporary chat/i.test(said));
+  });
+}
+
+console.log("\nthe mark stays readable on the button it sits on");
+{
+  // The one part of this extension that sits over somebody else's chat, in
+  // their theme. worstText walks text nodes and the button has none, so until
+  // now nothing measured it at all: a color change could have taken the mark
+  // to nothing and every check would have stayed green.
+  const themes = [
+    ["the stock theme", ""],
+    [
+      "a light theme",
+      ":root{--lumiverse-bg:#fff;--lumiverse-bg-elevated:#f4f2f8;" +
+        "--lumiverse-card-bg-solid:#fff;--lumiverse-text:rgba(0,0,0,.9);" +
+        "--lumiverse-text-muted:rgba(0,0,0,.55);--lumiverse-text-dim:rgba(0,0,0,.4);" +
+        "--lumiverse-fill:rgba(0,0,0,.05)}body{background:#fff}",
+    ],
+    [
+      "a pale accent",
+      ":root{--lumiverse-primary:#d9c8ff;--lumiverse-primary-text:#e6dcff;" +
+        "--lumiverse-primary-020:rgba(217,200,255,.2);" +
+        "--lumiverse-primary-050:rgba(217,200,255,.5)}",
+    ],
+  ];
+  for (const [what, css] of themes) {
+    await inTab(browser, { css, saved: { widgetOn: true, refineOn: true } }, async (page) => {
+      const sel = "#float .arf-float";
+      const rest = await markContrast(page, sel);
+      ok(what + ": the mark is measurable on the button", !!rest, JSON.stringify(rest));
+      ok(
+        what + ": and readable where it rests",
+        rest && rest.r >= rest.want,
+        rest ? rest.r + " against " + rest.want : "no reading",
+      );
+
+      // Running, which is the state with the accent on the fill and the ink.
+      await page.evaluate(() => {
+        const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+        window.__fromBackend({
+          type: "active_chat", requestId: id, chatId: "c1",
+          character: "Wren", hasCharacter: true, resolved: true,
+        });
+        for (const f of window.__handlers.GENERATION_ENDED || []) f({ chatId: "c1", messageId: "m2" });
+      });
+      await settle(page);
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 340)));
+      const busy = await markContrast(page, sel);
+      ok(
+        what + ": and readable while a refine is running",
+        busy && busy.r >= busy.want,
+        busy ? busy.r + " against " + busy.want : "no reading",
+      );
+    });
+  }
+}
+
+console.log("\nthe eye on the floating button");
+{
+  // One shape in three states rather than one icon per state. The clock
+  // repaints the button two and a half times a second, and rewriting the icon
+  // on each repaint would throw the element away: an element that was replaced
+  // has nothing to move from, so the lid would pop open rather than open, and
+  // the pupil would start its crossing again from the top every 400ms. So the
+  // check is that the same node survives and only its class changes.
+  await inTab(browser, { saved: { widgetOn: true, refineOn: true } }, async (page) => {
+    const eye = () =>
+      page.evaluate(() => {
+        const svg = document.querySelector("#float .arf-eye");
+        if (!svg) return null;
+        const ball = svg.querySelector(".arf-eye-ball");
+        const lid = svg.querySelector(".arf-eye-lid");
+        const pupil = svg.querySelector(".arf-eye-pupil");
+        return {
+          cls: svg.getAttribute("class"),
+          same: svg.getAttribute("data-arf-same-node"),
+          lidShown: lid ? Number(getComputedStyle(lid).opacity) : null,
+          ballShown: ball ? Number(getComputedStyle(ball).opacity) : null,
+          reads: pupil ? getComputedStyle(pupil).animationName : null,
+          blinks: ball ? getComputedStyle(ball).animationName : null,
+        };
+      });
+
+    // Nothing running, so the eye is shut.
+    const resting = await eye();
+    ok("the button carries an eye", !!resting, JSON.stringify(resting));
+    ok("and it is shut while nothing is running",
+      resting && /arf-eye-shut/.test(resting.cls), JSON.stringify(resting));
+    ok("with the lid drawn and the open eye faded out",
+      resting && resting.lidShown === 1 && resting.ballShown === 0, JSON.stringify(resting));
+
+    await page.evaluate(() => {
+      document.querySelector("#float .arf-eye").setAttribute("data-arf-same-node", "1");
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat", requestId: id, chatId: "c1",
+        character: "Wren", hasCharacter: true, resolved: true,
+      });
+      for (const f of window.__handlers.GENERATION_ENDED || []) f({ chatId: "c1", messageId: "m2" });
+    });
+    await settle(page);
+    // The lid takes 260ms to get out of the way, and two frames is not that. A
+    // read before it lands catches the eye half open, which is the transition
+    // working rather than a state to check.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 340)));
+    const working = await eye();
+    ok("a refine opens it and sets it reading",
+      working && /arf-eye-read/.test(working.cls) && !/arf-eye-shut/.test(working.cls),
+      JSON.stringify(working));
+    ok("the lid is out of the way", working && working.lidShown === 0, JSON.stringify(working));
+    ok("the pupil crosses the eye", working && working.reads === "arf-read", JSON.stringify(working));
+    ok("and it blinks on the way back", working && working.blinks === "arf-blink",
+      JSON.stringify(working));
+    ok("opening it did not throw the eye away and draw a new one",
+      working && working.same === "1", JSON.stringify(working));
+
+    // Long enough for several ticks of the clock.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 1400)));
+    const kept = await eye();
+    ok("and it survives the repaints, so the reading is not restarted every tick",
+      kept && kept.same === "1", JSON.stringify(kept));
+
+    // The refine lands. The lid does not just drop: the eye blinks once and
+    // then shuts, which is the one moment the button has something to say.
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "refined", chatId: "c1", messageId: "m2", canUndo: true,
+        before: "It hit him like an electric shock.",
+        after: "It hit him hard.",
+      });
+    });
+    await settle(page);
+    const done = await eye();
+    ok("a refine finishing blinks the eye rather than dropping the lid",
+      done && /arf-eye-done/.test(done.cls), JSON.stringify(done));
+    ok("and the blink is a state of its own, not the reading one",
+      done && !/arf-eye-read/.test(done.cls), JSON.stringify(done));
+
+    // It has to survive the clock, which repaints two and a half times a
+    // second: rewriting the class would restart the blink on every tick.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 450)));
+    const midBlink = await eye();
+    ok("the blink is left alone while it plays",
+      midBlink && /arf-eye-done/.test(midBlink.cls), JSON.stringify(midBlink));
+
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 900)));
+    const settled = await eye();
+    ok("and it settles shut once the blink is over",
+      settled && /arf-eye-shut/.test(settled.cls) && !/arf-eye-done/.test(settled.cls),
+      JSON.stringify(settled));
+  });
+
+  // Every other eye there is. The mark on the panel, the one in the drawer tab
+  // and the ones on the buttons are all drawn shut, wake when they appear, and
+  // open to a pointer. The floating button is the exception: it is shut because
+  // nothing is running rather than because it has just arrived.
+  await inTab(browser, { saved: { widgetOn: true } }, async (page) => {
+    const mark = () =>
+      page.evaluate(() => {
+        const svg = document.querySelector("#drawer [data-arf-header] .arf-eye");
+        if (!svg) return null;
+        const ball = svg.querySelector(".arf-eye-ball");
+        const lid = svg.querySelector(".arf-eye-lid");
+        return {
+          cls: svg.getAttribute("class"),
+          wakes: getComputedStyle(ball).animationName,
+          lidWakes: getComputedStyle(lid).animationName,
+          // Shut is what it looks like, not what it is called. An eye carrying
+          // no state class rests shut, since that is what the shape does with
+          // nothing asked of it, so reading the class name here would have been
+          // reading the label rather than the result.
+          open: Number(getComputedStyle(ball).opacity),
+          lidOn: Number(getComputedStyle(lid).opacity),
+        };
+      });
+    const m = await mark();
+    ok("the mark on the panel is an eye", !!m, JSON.stringify(m));
+    // Waking belongs to a mark that is drawn once and left alone. This header is
+    // rebuilt on every repaint, and a fresh node replays a CSS animation from
+    // the start, so a waking eye here blinked at somebody every time they moved
+    // between tabs.
+    ok("and it rests shut, since this one is redrawn constantly",
+      m && m.open === 0 && m.lidOn === 1, JSON.stringify(m));
+    ok("so it never wakes", m && m.wakes === "none" && m.lidWakes === "none",
+      JSON.stringify(m));
+
+    await goTab(page, "Context");
+    await goTab(page, "Log");
+    await goTab(page, "Prompt");
+    const after = await mark();
+    ok("it is still there after moving between tabs", !!after, JSON.stringify(after));
+    ok("and does not start blinking on any of them",
+      after && after.wakes === "none" && after.lidWakes === "none", JSON.stringify(after));
+    ok("still resting shut", after && after.open === 0 && after.lidOn === 1,
+      JSON.stringify(after));
+
+    // Nor does the floating button, which holds a state of its own.
+    const onButton = await page.evaluate(() => {
+      const svg = document.querySelector("#float .arf-eye");
+      if (!svg) return null;
+      return {
+        cls: svg.getAttribute("class"),
+        wakes: getComputedStyle(svg.querySelector(".arf-eye-ball")).animationName,
+      };
+    });
+    ok("the floating button's eye carries its own state", onButton && /arf-eye-shut/.test(onButton.cls),
+      JSON.stringify(onButton));
+    ok("and does not wake, since it is shut for a reason",
+      onButton && onButton.wakes === "none", JSON.stringify(onButton));
+  });
+
+  // Pointing at a button opens the eye on it. Done on a real one under a
+  // message, since those are the buttons that carry the mark rather than a
+  // word. One message as the host draws it, cut to the footer slot and the id
+  // the host writes into its scope. The prose is invented for this check.
+  const ONE_MESSAGE = `
+  <div id="wrap">
+    <div class="_bubble_86318_171">
+      <div data-component="MessageContent"><div class="_prose_1rr8k_181"><p>The lamp over the bench had been out for a week.</p></div></div>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:minimal:footer" style="display:contents"></span>
+    </div>
+  </div>`;
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await page.evaluate(async (markup) => {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = markup;
+      document.body.appendChild(wrap.firstElementChild);
+      (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" }));
+      await new Promise((r) => setTimeout(r, 700));
+    }, ONE_MESSAGE);
+    const sel = '[data-arf-slot="message"]';
+    const ball = (s2) =>
+      page.evaluate((q) => {
+        const b = document.querySelector(q);
+        const svg = b && b.querySelector(".arf-eye");
+        if (!svg) return null;
+        return {
+          cls: svg.getAttribute("class"),
+          open: Number(getComputedStyle(svg.querySelector(".arf-eye-ball")).opacity),
+          // The animation itself, not the class asking for it. Reading the
+          // class only proved the markup was right, so taking the whole
+          // animation out of the stylesheet left this green.
+          wakes: getComputedStyle(svg.querySelector(".arf-eye-ball")).animationName,
+        };
+      }, s2);
+
+    const found = await ball(sel);
+    ok("the button under a message carries the eye", !!found, JSON.stringify(found));
+    // Every mark reads while a refine runs, including the ones drawn after it
+    // started. A message arriving mid-refine would otherwise sit shut among a
+    // set that is reading.
+    const together = await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop();
+      if (id) {
+        window.__fromBackend({
+          type: "active_chat", requestId: id.requestId, chatId: "c1",
+          character: "Wren", hasCharacter: true, resolved: true,
+        });
+      }
+      window.__fromBackend({ type: "refine_progress", stage: "asking" });
+      return new Promise((r) =>
+        setTimeout(() => {
+          const eyes = Array.from(document.querySelectorAll(".arf-eye"))
+            .filter((n) => !n.closest(".arf-float"))
+            .map((n) => /arf-eye-read/.test(n.getAttribute("class") || ""));
+          r({ count: eyes.length, all: eyes.every(Boolean) });
+        }, 260),
+      );
+    });
+    ok("there are marks on the page to check", together.count > 0, JSON.stringify(together));
+    ok("and every one of them reads while a refine is running",
+      together.all, JSON.stringify(together));
+
+    // Put it back to rest before anything below reads these again. Left
+    // running, the checks after this one find an eye that is reading and call
+    // it a fault, which is this check's doing rather than the panel's.
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "refined", chatId: "c1", messageId: "m2", canUndo: true,
+        before: "It hit him like an electric shock.",
+        after: "It hit him hard.",
+      });
+      return new Promise((r) => setTimeout(r, 1200));
+    });
+    // And take the card with it. A landed refine puts a card on the page with a
+    // dim behind it, and the dim sits over the button the checks below want to
+    // point at.
+    await page.evaluate(() => {
+      const keep = document.querySelector("[data-arf-pop-keep]");
+      if (keep) keep.click();
+    });
+    await settle(page);
+    ok("and it is one that answers a pointer", found && /arf-opens/.test(found.cls),
+      JSON.stringify(found));
+    // The selection buttons are the ones this bit most: they are built the
+    // moment text is highlighted and thrown away when it is let go, so anything
+    // that plays on being drawn plays on every highlight.
+    const onPick = await page.evaluate(() => {
+      const svg = document.querySelector('[data-arf-slot="part"] .arf-eye');
+      if (!svg) return null;
+      return getComputedStyle(svg.querySelector(".arf-eye-ball")).animationName;
+    });
+    if (onPick !== null)
+      ok("and the mark for a selection does not play on being drawn", onPick === "none",
+        String(onPick));
+    // Nothing wakes. A CSS animation replays whenever its element is built
+    // again, and this button is built again for every new reply, while the two
+    // selection buttons are built the moment something is highlighted and
+    // thrown away when it is let go. A wake on any of them fired over and over
+    // and read as the marks flickering out of step.
+    ok("and nothing on it wakes", found && found.wakes === "none", JSON.stringify(found));
+
+    // Waited out, or the read catches the wake still running rather than where
+    // the eye rests.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 1700)));
+    const rest = await ball(sel);
+    ok("which rests shut once it has woken", rest && rest.open === 0, JSON.stringify(rest));
+
+    await page.hover(sel);
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 340)));
+    const hovered = await ball(sel);
+    ok("and opens when the pointer is on it", hovered && hovered.open === 1,
+      JSON.stringify(hovered));
+
+    // Keyboard reaches the same state, on any device.
+    await page.evaluate((q) => {
+      document.querySelector(q).blur();
+      document.querySelector(q).focus();
+    }, sel);
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 340)));
+    const focused = await ball(sel);
+    ok("and to a keyboard as well as a pointer", focused && focused.open === 1,
+      JSON.stringify(focused));
+  });
+
+  // A phone has no hover, and tapping a button leaves it matching :hover in most
+  // mobile browsers until something else is tapped. Without a guard the eye sat
+  // open on whichever button was last used, which is the one state it must never
+  // be left in by a tap.
+  await inTab(
+    browser,
+    { saved: { enabled: true, messageButton: true }, viewport: { width: 390, height: 844 }, touch: true },
+    async (page) => {
+      await page.evaluate(async (markup) => {
+        const wrap = document.createElement("div");
+        wrap.innerHTML = markup;
+        document.body.appendChild(wrap.firstElementChild);
+        (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" }));
+        await new Promise((r) => setTimeout(r, 700));
+      }, ONE_MESSAGE);
+      const sel = '[data-arf-slot="message"]';
+      // Past the wake, so what is read is where the eye rests.
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 1700)));
+      await page.hover(sel);
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 340)));
+      const after = await page.evaluate((q) => {
+        const b = document.querySelector(q);
+        const svg = b && b.querySelector(".arf-eye");
+        return svg
+          ? {
+              open: Number(getComputedStyle(svg.querySelector(".arf-eye-ball")).opacity),
+              stuck: b.matches(":hover"),
+            }
+          : null;
+      }, sel);
+      ok("the button really is left matching hover, or this proves nothing",
+        after && after.stuck === true, JSON.stringify(after));
+      ok("and the eye stays shut on a touch screen all the same",
+        after && after.open === 0, JSON.stringify(after));
+    },
+  );
+
+  // The ring that fills while the button is held, which is the only thing
+  // saying a hold is under way before the menu arrives. Auto Retry draws the
+  // same ring the same way.
+  // On a desk and in a hand. The hold is a touch gesture first, and the button
+  // is 44px, so a phone is where a fault in it turns up.
+  for (const [where, how] of [
+    ["on a desktop", { saved: { widgetOn: true, refineOn: true } }],
+    ["on a phone", {
+      saved: { widgetOn: true, refineOn: true },
+      viewport: { width: 390, height: 844 },
+      touch: true,
+    }],
+  ])
+  await inTab(browser, how, async (page) => {
+    const ring = () =>
+      page.evaluate(() => {
+        const b = document.querySelector("#float .arf-float");
+        const r = b && b.querySelector(".arf-hold");
+        if (!r) return null;
+        const c = r.querySelector("circle");
+        const rs = getComputedStyle(r);
+        const cs = getComputedStyle(c);
+        return {
+          held: b.getAttribute("data-arf-holding"),
+          shown: Number(rs.opacity),
+          offset: parseFloat(cs.strokeDashoffset),
+          len: parseFloat(cs.strokeDasharray),
+          spins: /rotate\(-?90deg\)|matrix/.test(rs.transform),
+        };
+      });
+    const press = (ms) =>
+      page.evaluate((hold) => {
+        const b = document.querySelector("#float .arf-float");
+        b.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 60, clientY: 60 }));
+        return new Promise((r) => setTimeout(r, hold));
+      }, ms);
+
+    const idle = await ring();
+    ok(where + ": there is a ring on the button", !!idle, JSON.stringify(idle));
+    ok(where + ": out of sight until something is held", idle && idle.shown === 0, JSON.stringify(idle));
+    ok(where + ": and drawn at no length at all", idle && idle.offset === idle.len, JSON.stringify(idle));
+    ok(where + ": it starts at the top rather than at three o'clock", idle && idle.spins, JSON.stringify(idle));
+
+    // A tap, read while the finger is still down and well inside one. The ring
+    // is what tells a hold from a tap, so drawing one on every press is the
+    // button saying it does not know which you meant.
+    await press(70);
+    const tapRing = await ring();
+    await page.evaluate(() => {
+      window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      return new Promise((r) => setTimeout(r, 340));
+    });
+    ok(where + ": a tap draws no ring, so it never reads as a hold",
+      tapRing && tapRing.shown === 0, JSON.stringify(tapRing));
+
+    await press(240);
+    const mid = await ring();
+
+    // A hair before the hold is up, which is the moment the ring has to be
+    // closed by. A ring timed to the same length as the hold finishes a frame
+    // after it, and the menu opens over a ring a few per cent short.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 230)));
+    const nearlyUp = await ring();
+    ok(where + ": holding the button shows it", mid && mid.held === "1" && mid.shown > 0.5, JSON.stringify(mid));
+    ok(where + ": part way round, not all of it", mid && mid.offset > 0 && mid.offset < mid.len,
+      JSON.stringify(mid));
+
+    ok(where + ": the ring is all the way round before the menu opens",
+      nearlyUp && nearlyUp.offset === 0, JSON.stringify(nearlyUp));
+
+    await page.evaluate(() => {
+      window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      return new Promise((r) => setTimeout(r, 340));
+    });
+    const after = await ring();
+    ok(where + ": letting go early wipes it back",
+      after && after.held === null && after.offset === after.len, JSON.stringify(after));
+  });
+}
+
+console.log("\nthe floating button's size");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    // Its settings belong to it: with the button off there is nothing to size.
+    ok("its settings are hidden while the button is off", !(await onScreen(page, "widgetSize")));
+
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-field="widgetOn"]').click();
+    });
+    await settle(page);
+    // The same range Auto Retry's floating button uses, so the two sit at
+    // matching sizes for somebody running both.
+    const out = await onScreen(page, "widgetSize");
+    const shown = await page.evaluate(() => {
+      const n = document.querySelector('#drawer [data-arf-field="widgetSize"]');
+      return n && { min: n.min, max: n.max, value: n.value };
+    });
+    ok("switching it on brings its settings back under it", out);
+    ok(
+      "and its range matches Auto Retry's",
+      shown && shown.min === "28" && shown.max === "96" && shown.value === "44",
+      JSON.stringify(shown),
+    );
+  });
+
+  await inTab(browser, { saved: { widgetOn: true, widgetSize: 400 } }, async (page) => {
+    const spec = await page.evaluate(() => window.__widgetSpec);
+    ok("a size past the end of the range is pulled back", spec && spec.width === 96, JSON.stringify(spec));
+  });
+
+  // The button is rebuilt on every size change, and it listens on the window to
+  // tell a tap from the host dragging it. Those listeners have to come off with
+  // the button they belong to, or every resize leaves another set behind
+  // running on every pointermove across the page.
+  await inTab(browser, { saved: { widgetOn: true } }, async (page) => {
+    await goTab(page, "Setup");
+    const counted = await page.evaluate(async () => {
+      let live = 0;
+      const add = EventTarget.prototype.addEventListener;
+      const rm = EventTarget.prototype.removeEventListener;
+      EventTarget.prototype.addEventListener = function (t, f, c) {
+        if (this === window && /^pointer/.test(t)) live++;
+        return add.call(this, t, f, c);
+      };
+      EventTarget.prototype.removeEventListener = function (t, f, c) {
+        if (this === window && /^pointer/.test(t)) live--;
+        return rm.call(this, t, f, c);
+      };
+      // Re-queried each time: the row is rebuilt with the panel.
+      const step = async (v) => {
+        const size = document.querySelector('#drawer [data-arf-field="widgetSize"]');
+        if (!size) throw new Error("no size field on screen");
+        size.value = String(v);
+        size.dispatchEvent(new Event("change", { bubbles: true }));
+        await new Promise((r) => requestAnimationFrame(r));
+      };
+      // Rebuild it several times over.
+      for (const v of [50, 60, 70, 80]) await step(v);
+      const after = live;
+      await step(90);
+      return { after: after, andAgain: live };
+    });
+    ok(
+      "rebuilding the button does not pile up window listeners",
+      counted.after <= 3 && counted.andAgain <= 3,
+      JSON.stringify(counted),
+    );
+  });
+
+  // A size change rebuilds the button, and a rebuild that starts where a fresh
+  // one starts throws away wherever it had been dragged to. Auto Retry has the
+  // same check against the same numbers.
+  await inTab(browser, { saved: { widgetOn: true, widgetSize: 44 } }, async (page) => {
+    await goTab(page, "Setup");
+    const out = await page.evaluate(async () => {
+      const host = document.getElementById("float");
+      if (!host) return { noHost: true };
+      // Where a drag left it. The extension cannot see the host move its own
+      // container, so the read after a pointerup is what tells it, exactly as
+      // it would be told on a real drag.
+      host.style.position = "fixed";
+      host.style.left = "300px";
+      host.style.top = "260px";
+      window.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      // Past the 400ms settle the read waits out.
+      await new Promise((r) => setTimeout(r, 520));
+      const size = document.querySelector('#drawer [data-arf-field="widgetSize"]');
+      if (!size) return { noField: true };
+      size.value = "72";
+      size.dispatchEvent(new Event("change", { bubbles: true }));
+      // The rebuild runs on the 260ms settle, not on the change. Reading before
+      // that waits out measures the button as it stood before the thing this
+      // check is about could happen.
+      await new Promise((r) => setTimeout(r, 420));
+      const spec = window.__widgetSpec;
+      return {
+        at: spec ? spec.initialPosition : null,
+        size: spec ? spec.width : null,
+        stored: localStorage.getItem("lv-auto-refine:layout:v1"),
+      };
+    });
+    ok("the dragged position is written down", /"x":300/.test(out.stored || ""), JSON.stringify(out));
+    ok("a size change rebuilds it at the new size", out.size === 72, JSON.stringify(out));
+    // The position a host is given is a top-left, so carrying it across
+    // unchanged pins the corner and lets the button grow away from it. Taken
+    // from the middle instead: the old button sits at 300,260 at 44 across, so
+    // its middle is 322,282, and a 72 across button around that middle starts
+    // at 286,246.
+    ok(
+      "and it keeps the middle of the button where it was, rather than its corner",
+      out.at && out.at.x === 286 && out.at.y === 246,
+      JSON.stringify(out),
+    );
+  });
+}
+
+console.log("\nsearch");
+{
+  await inTab(browser, {}, async (page) => {
+    await page.evaluate(() => {
+      const box = document.querySelector('#drawer [data-arf-field="hunt"]');
+      box.value = "temperature";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // The search waits for a gap in the typing before it repaints, so the
+    // filtered list is not there the instant a key goes in.
+    await page.waitForTimeout(220);
+    await settle(page);
+    const found = await page.evaluate(() => {
+      const body = document.querySelector("#drawer .arf-body");
+      return { text: body.textContent, cards: body.querySelectorAll(".arf-card").length };
+    });
+    ok("it finds a setting from another tab", /Samplers/.test(found.text) && found.cards >= 1);
+
+    // The tab strip goes while searching: what is shown is from every tab, so
+    // there is no tab to be standing on.
+    const strip = await page.evaluate(() => !!document.querySelector("#drawer .arf-tabs"));
+    ok("the tab strip steps out of the way", !strip);
+
+    await page.evaluate(() => {
+      const box = document.querySelector('#drawer [data-arf-field="hunt"]');
+      box.value = "zzzznothing";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    // The search waits for a gap in the typing before it repaints, so the
+    // filtered list is not there the instant a key goes in.
+    await page.waitForTimeout(220);
+    await settle(page);
+    const empty = await page.evaluate(() =>
+      document.querySelector("#drawer .arf-body").textContent,
+    );
+    ok("and says so when nothing matched", /Nothing matched/.test(empty));
+  });
+}
+
+console.log("\nthe bigger editor");
+{
+  const errors = await inTab(browser, {}, async (page) => {
+    // Prompt blocks no longer carry an Expand of their own. The two places the
+    // big editor is still reached from are the debug report, which is editable
+    // so nothing private is pasted into a public issue, and the preview, which
+    // is read only. This is the editable one.
+    await goTab(page, "Log");
+    await page.evaluate(() => {
+      window.__copied = [];
+      try {
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: {
+            writeText: (t) => {
+              window.__copied.push(t);
+              return Promise.resolve();
+            },
+          },
+        });
+      } catch (_) {}
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => b.textContent.trim() === "Read and edit it first")
+        .click();
+    });
+    await settle(page);
+    const open = await page.evaluate(() => {
+      const over = document.querySelector(".arf-over:not(.arf-leaving)");
+      const ta = over && over.querySelector("textarea");
+      const big = over && over.querySelector(".arf-bigbox");
+      return {
+        moves: !!over && getComputedStyle(over).animationName === "arf-fade-in" && !!big && getComputedStyle(big).animationName === "arf-card-in",
+        there: !!over,
+        filled: ta ? ta.value.length > 0 : false,
+        editable: ta ? !ta.readOnly : false,
+        // Focusing a textarea is what raises the keyboard on a phone.
+        focused: document.activeElement === ta,
+      };
+    });
+    ok("it opens with the report in it", open.there && open.filled);
+    ok("and it fades in, with the card sliding up a little", open.moves);
+    ok("and lets you take lines out before it is copied", open.editable);
+    ok("and does not focus the box, so no keyboard pops up", !open.focused);
+
+    await page.evaluate(() => {
+      const ta = document.querySelector(".arf-over textarea");
+      ta.value = "edited in the big editor";
+      Array.from(document.querySelectorAll(".arf-over button"))
+        .find((b) => b.textContent.trim() === "Done")
+        .click();
+    });
+    await settle(page);
+    const copied = await page.evaluate(() => window.__copied.slice());
+    ok("Done copies what you left in it", copied.indexOf("edited in the big editor") >= 0, copied.join(" | "));
+    await page.waitForTimeout(400);
+    const shut = await page.evaluate(() => !document.querySelector(".arf-over"));
+    ok("and closes, and is gone once it has faded", shut);
+  });
+  ok("no errors in the big editor", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\nchoosing what goes where");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    // Switch off the prompt for export, then check the file that comes out.
+    await page.evaluate(() => {
+      const fold = Array.from(document.querySelectorAll("#drawer .arf-fold")).find((h) =>
+        /What goes in the file/.test(h.textContent),
+      );
+      fold.click();
+    });
+    await settle(page);
+    const boxes = await page.evaluate(
+      () => document.querySelectorAll('#drawer [data-arf-part^="exportParts:"]').length,
+    );
+    ok("export offers every part", boxes >= 9, "found " + boxes);
+
+    await page.evaluate(() => {
+      const one = document.querySelector('#drawer [data-arf-part="exportParts:prompt"]');
+      one.checked = false;
+      one.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle(page);
+    const kept = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last.settings.exportParts;
+    });
+    ok("and remembers what you switched off", kept && kept.prompt === false);
+
+    // Reset offers the same parts, and refuses to run with none chosen.
+    await page.evaluate(() => {
+      const fold = Array.from(document.querySelectorAll("#drawer .arf-fold")).find((h) =>
+        /What to put back/.test(h.textContent),
+      );
+      fold.click();
+    });
+    await settle(page);
+    await page.evaluate(() => {
+      document
+        .querySelector('#drawer [data-arf-picker="resetParts"] [data-arf-pick="none"]')
+        .click();
+    });
+    // The switches press, slide and land first, and the rest of the tab
+    // catches up after them.
+    await page.waitForTimeout(800);
+    await settle(page);
+    const off = await page.evaluate(() => {
+      const btn = document.querySelector("#drawer [data-arf-reset]");
+      return { disabled: btn.disabled, label: btn.textContent };
+    });
+    ok("reset with nothing chosen cannot be pressed", off.disabled, off.label);
+  });
+}
+
+// ---- All, None and Fold all move each one ----
+// A press on one of these moves every switch or block as a press on one does.
+// A rebuild puts them all in their new place in one frame, with no movement.
+console.log("\nAll, None and Fold all move each one");
+for (const size of [
+  { name: "phone", viewport: { width: 412, height: 860 }, touch: true },
+  { name: "laptop", viewport: { width: 1280, height: 860 }, touch: false },
+]) {
+  const ok2 = (what, pass, detail) => ok(size.name + ": " + what, pass, detail);
+  const errors = await inTab(browser, { viewport: size.viewport, touch: size.touch }, async (page) => {
+    await goTab(page, "Setup");
+    await page.evaluate(() => {
+      const fold = Array.from(document.querySelectorAll("#drawer .arf-fold")).find((h) =>
+        /What goes in the file/.test(h.textContent),
+      );
+      fold.click();
+    });
+    await settle(page);
+    const slid = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const box = document.querySelector('#drawer [data-arf-part="exportParts:prompt"]');
+      const knob = () => parseFloat(getComputedStyle(box, "::after").left);
+      const width = () => parseFloat(getComputedStyle(box, "::after").width);
+      const from = knob();
+      const restWidth = width();
+      document.querySelector('#drawer [data-arf-picker="exportParts"] [data-arf-pick="none"]').click();
+      // First the press: the knob stretches toward where it is going, as it
+      // does under a finger.
+      await wait(90);
+      const pressed = { left: knob(), width: width() };
+      // Then it lets go and slides, overshooting a little before it settles.
+      // Read from the moment it lets go until the panel catches up.
+      for (let i = 0; i < 30 && box.classList.contains("arf-nudge"); i++)
+        await new Promise((r) => requestAnimationFrame(() => r()));
+      const letGo = knob();
+      let mid = null;
+      let least = letGo;
+      for (let i = 0; i < 40 && box.isConnected; i++) {
+        await new Promise((r) => requestAnimationFrame(() => r()));
+        if (!box.isConnected) break;
+        const l = knob();
+        if (mid === null && l < letGo - 0.5) mid = l;
+        least = Math.min(least, l);
+      }
+      const kept = mid !== null;
+      await wait(700);
+      const now = document.querySelector('#drawer [data-arf-part="exportParts:prompt"]');
+      const said = document.querySelector('#drawer [data-arf-picker="exportParts"] .arf-note').textContent;
+      const end = parseFloat(getComputedStyle(now, "::after").left);
+      return { from, restWidth, pressed, mid, least, end, kept, off: !now.checked, said };
+    });
+    ok2("None presses each switch first: the knob stretches", slid.pressed.width > slid.restWidth + 1, JSON.stringify(slid));
+    ok2("None slides each switch off where it stands", slid.kept && slid.mid < slid.from && slid.mid > slid.end, JSON.stringify(slid));
+    ok2("and the knob springs past its end before it settles", slid.least < slid.end - 0.5, JSON.stringify(slid));
+    ok2("and every switch ends off", slid.off && /^0 of /.test(slid.said), JSON.stringify(slid));
+    const back = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const box = document.querySelector('#drawer [data-arf-part="exportParts:prompt"]');
+      document.querySelector('#drawer [data-arf-picker="exportParts"] [data-arf-pick="all"]').click();
+      await wait(250);
+      return { kept: box.isConnected, on: box.checked };
+    });
+    ok2("All turns them on the same way", back.kept && back.on, JSON.stringify(back));
+
+    await goTab(page, "Prompt");
+    await settle(page);
+    const folds = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+      const block = document.querySelectorAll("#drawer .arf-block")[1];
+      const body = block.querySelector("[data-arf-blockbody]");
+      const full = body.getBoundingClientRect().height;
+      document.querySelector("#drawer [data-arf-foldall]").click();
+      await frame();
+      await frame();
+      await wait(60);
+      const mid = body.isConnected ? body.getBoundingClientRect().height : -1;
+      await wait(800);
+      return { full, mid, kept: block.isConnected, hidden: body.hidden };
+    });
+    ok2("Fold all closes each block over a moment", folds.kept && folds.mid > 0 && folds.mid < folds.full, JSON.stringify(folds));
+    ok2("and each ends folded", folds.hidden, JSON.stringify(folds));
+    const opens = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const block = document.querySelectorAll("#drawer .arf-block")[1];
+      const body = block.querySelector("[data-arf-blockbody]");
+      document.querySelector("#drawer [data-arf-foldall]").click();
+      await wait(60);
+      const mid = body.getBoundingClientRect().height;
+      await wait(800);
+      return { mid, end: body.getBoundingClientRect().height, kept: block.isConnected, says: document.querySelector("#drawer [data-arf-foldall]").textContent };
+    });
+    ok2("Open all opens each block over a moment", opens.kept && opens.mid > 0 && opens.mid < opens.end, JSON.stringify(opens));
+    ok2("and the bar offers to fold them again", /Fold all/.test(opens.says), opens.says);
+  });
+  ok2("no errors pressing All, None or Fold all", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\ntaking more than one file at a time");
+{
+  await inTab(browser, {}, async (page) => {
+    const said = () =>
+      page.evaluate(() =>
+        Array.from(document.querySelectorAll("#drawer .arf-note"))
+          .map((n) => n.textContent)
+          .filter((t) => /^Imported |^Everything |^Nothing |\.json/.test(t))
+          .join(" | "));
+    const names = () =>
+      page.evaluate(() =>
+        JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1") || "[]").map((p) => p.name));
+    const preset = (name, n) => ({
+      extension: "auto-refine",
+      version: "1.0.0",
+      parts: ["presets"],
+      settings: {},
+      presets: [{ name: name, at: 1, settings: { contextMessages: n } }],
+    });
+    const drop = async (files) => {
+      await page.setInputFiles(
+        '#drawer [data-arf-file="import"]',
+        files.map((f) => ({
+          name: f.name,
+          mimeType: "application/json",
+          buffer: Buffer.from(JSON.stringify(f.body)),
+        })),
+      );
+      await settle(page);
+      await settle(page);
+    };
+
+    await goTab(page, "Setup");
+    // Two files, one press. The count is what somebody is reading to find out
+    // where they stand, so it has to be the total rather than the last file's.
+    await drop([
+      { name: "one.json", body: preset("A rewrite of my own", 5) },
+      { name: "two.json", body: preset("A second one", 9) },
+    ]);
+    ok("two files in one press count as two", /Imported 2 presets/.test(await said()), await said());
+    ok("and both are held", (await names()).length === 2, JSON.stringify(await names()));
+    // Neither file named a chat, so the line has no business mentioning them.
+    ok("and it claims nothing the files did not carry",
+      !/chats switched off/.test(await said()), await said());
+
+    // The same two again, which is nothing happening rather than two more.
+    await drop([
+      { name: "one.json", body: preset("A rewrite of my own", 5) },
+      { name: "two.json", body: preset("A second one", 9) },
+    ]);
+    ok("the same two again changes nothing", (await names()).length === 2, JSON.stringify(await names()));
+
+    // One file in the pick is unreadable. The import stops and names it, rather
+    // than taking half and leaving somebody to work out what landed.
+    await page.setInputFiles('#drawer [data-arf-file="import"]', [
+      { name: "good.json", mimeType: "application/json",
+        buffer: Buffer.from(JSON.stringify(preset("A third one", 3))) },
+      { name: "broken.json", mimeType: "application/json", buffer: Buffer.from("{ not json") },
+    ]);
+    await settle(page);
+    await settle(page);
+    ok("a bad file in the pick is named", /broken\.json/.test(await said()), await said());
+    ok("and nothing from the good one landed either", (await names()).length === 2,
+      JSON.stringify(await names()));
+  });
+
+  // Export refuses only when there is really nothing to write. Ticking just the
+  // model setups used to be refused outright, because the check that decides
+  // never looked at them.
+  await inTab(browser, { setups: [{ name: "A careful model", at: 1, settings: { samplers: { temperature: 0.6 } } }] },
+    async (page) => {
+    const files = [];
+    page.on("download", (d) => files.push(d.suggestedFilename()));
+    await goTab(page, "Setup");
+    await page.evaluate(() => {
+      const fold = Array.from(document.querySelectorAll("#drawer .arf-fold")).find((h) =>
+        /What goes in the file/.test(h.textContent));
+      fold.click();
+    });
+    await settle(page);
+    // Everything off except the saved model setups.
+    await page.evaluate(() => {
+      for (const box of document.querySelectorAll('#drawer [data-arf-part^="exportParts:"]')) {
+        const want = box.getAttribute("data-arf-part") === "exportParts:setups";
+        if (box.checked !== want) {
+          box.checked = want;
+          box.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      }
+    });
+    await settle(page);
+    const ticked = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('#drawer [data-arf-part^="exportParts:"]'))
+        .filter((b) => b.checked).map((b) => b.getAttribute("data-arf-part")));
+    ok("only the model setups are ticked", JSON.stringify(ticked) === '["exportParts:setups"]',
+      JSON.stringify(ticked));
+
+    await page.evaluate(() =>
+      document.querySelector('#drawer [data-arf-transfer="export"]').click());
+    await settle(page);
+    const line = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("#drawer .arf-note"))
+        .map((n) => n.textContent).filter((t) => /^Exported |^Nothing /.test(t)).join(" | "));
+    ok("a setup on its own exports", files.length === 1, JSON.stringify(files) + " " + line);
+    ok("and says it did", /^Exported 1 part\./.test(line), line);
+
+    // Nothing ticked at all is still refused, and says so plainly.
+    await page.evaluate(() => {
+      for (const box of document.querySelectorAll('#drawer [data-arf-part^="exportParts:"]')) {
+        if (box.checked) { box.checked = false; box.dispatchEvent(new Event("change", { bubbles: true })); }
+      }
+    });
+    await settle(page);
+    await page.evaluate(() =>
+      document.querySelector('#drawer [data-arf-transfer="export"]').click());
+    await settle(page);
+    const none = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("#drawer .arf-note"))
+        .map((n) => n.textContent).filter((t) => /^Exported |^Nothing /.test(t)).join(" | "));
+    ok("with nothing ticked it still refuses", /^Nothing is chosen/.test(none), none);
+    ok("and wrote no second file", files.length === 1, JSON.stringify(files));
+  });
+}
+
+console.log("\nthe three buttons agree about the home screen");
+{
+  // The two beside it were grayed off a chat and this one stayed lit, which
+  // read as the one that still worked. There is no input box out there to read,
+  // so pressing it could only ever fail.
+  await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+    const state = () =>
+      page.evaluate(() => {
+        const one = (sel) => {
+          const n = document.querySelector("#drawer " + sel);
+          return n ? { off: !!n.disabled, why: n.title } : null;
+        };
+        return {
+          latest: one('[data-arf-now="1"]'),
+          every: one('[data-arf-sweep="1"]'),
+          draft: one('[data-arf-draft="1"]'),
+        };
+      });
+    const tellChat = async (id) => {
+      await page.evaluate((chatId) => {
+        const last = window.__sent.filter((m) => m.type === "active_chat").pop();
+        window.__fromBackend({
+          type: "active_chat",
+          requestId: last && last.requestId,
+          chatId: chatId,
+          character: chatId ? "Wren" : null,
+          hasCharacter: !!chatId,
+          resolved: true,
+          found: !!chatId,
+        });
+      }, id);
+      await settle(page);
+    };
+
+    // The probe's own aim: all three have to be on screen, or nothing below is
+    // measuring a button.
+    const first = await state();
+    ok("all three buttons are on the panel",
+      !!first.latest && !!first.every && !!first.draft, JSON.stringify(first));
+
+    await tellChat(null);
+    const home = await state();
+    ok("off a chat, refine the latest is grayed", home.latest.off, JSON.stringify(home.latest));
+    ok("and refine every reply here is grayed", home.every.off, JSON.stringify(home.every));
+    ok("and so is refine what I am typing", home.draft.off, JSON.stringify(home.draft));
+    ok("which says why rather than just going dim",
+      /no chat/i.test(home.draft.why || ""), home.draft.why);
+
+    await tellChat("c-home-1");
+    const inChat = await state();
+    ok("back in a chat it is live again", !inChat.draft.off, JSON.stringify(inChat.draft));
+  });
+
+  // A page loaded on the home screen, which already knows where chat ids sit
+  // in the address from an earlier visit. A reply or a refine finishing in a
+  // chat that is not open, one walked out of or one in another tab, is still
+  // reported here, and it must not light the buttons.
+  const outside = [
+    ["a reply finishing", (p) => { for (const f of window.__handlers.GENERATION_ENDED || []) f(p); }],
+    ["a character message", (p) => { for (const f of window.__handlers.CHARACTER_MESSAGE_RENDERED || []) f(p); }],
+    ["a user message", (p) => { for (const f of window.__handlers.USER_MESSAGE_RENDERED || []) f(p); }],
+    ["a refine finishing", (p) => window.__fromBackend({ type: "refined", chatId: p.chatId, messageId: p.messageId, before: "a", after: "b" })],
+    // Taken at its word, since it is the host naming a chat. The address then
+    // says otherwise, and the address watch has to put it right on a page
+    // that was loaded on the home screen as well.
+    ["the host naming a chat", (p) => { for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: p.chatId }); }, true],
+  ];
+  for (const [what, send, believed] of outside) {
+    await inTab(
+      browser,
+      { saved: { inputRefine: true }, storage: { "lv-auto-refine:url-slot:v1": JSON.stringify({ at: 1, after: "chat" }) } },
+      async (page) => {
+        const state = () =>
+          page.evaluate(() => {
+            const off = (sel) => { const n = document.querySelector("#drawer " + sel); return n ? !!n.disabled : null; };
+            const d = document.querySelector('#drawer [data-arf-draft="1"]');
+            // Grayed for the right reason. A reply finishing also marks a
+            // refine as starting, and a busy panel grays the buttons too.
+            return { latest: off('[data-arf-now="1"]'), draft: off('[data-arf-draft="1"]'), noChat: /no chat/i.test((d && d.title) || "") };
+          });
+        await page.evaluate(() => {
+          const last = window.__sent.filter((m) => m.type === "active_chat").pop();
+          window.__fromBackend({ type: "active_chat", requestId: last && last.requestId, chatId: null, resolved: true, found: false });
+        });
+        await settle(page);
+        await page.evaluate("(" + send.toString() + ")({ chatId: 'elsewhere0001', messageId: 'm9' })");
+        // Drawn again, so the buttons show what the panel now believes. Not
+        // every event redraws on its own: a reply finishing with automatic
+        // refines off does not.
+        await page.evaluate(() => window.__fromBackend({ type: "connections", list: [{ id: "redraw", name: "Redraw" }] }));
+        await settle(page);
+        if (!believed) {
+          const now = await state();
+          ok("on the home screen, " + what + " in a chat that is not open leaves the buttons grayed", now.latest === true && now.draft === true && now.noChat, JSON.stringify(now));
+        }
+        // Past a tick of the address watch, which is what puts it right when
+        // the event was taken.
+        await page.waitForTimeout(900);
+        const got = await state();
+        ok("and a moment later they are still grayed, after " + what, got.latest === true && got.draft === true && got.noChat, JSON.stringify(got));
+      },
+    );
+  }
+}
+
+console.log("\nthe run through the chat");
+{
+  // One button, in one place. It was moved next to Refine the latest reply and
+  // left behind in This chat as well, so the panel offered the same thing twice
+  // on two different tabs. The notification at the end of a run is a switch,
+  // off by default, so it is turned on here.
+  await inTab(browser, { saved: { toast: true } }, async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat", requestId: id, chatId: "c1",
+        character: "Wren", hasCharacter: true, resolved: true,
+      });
+    });
+    await settle(page);
+    const counts = [];
+    const tabs = await page.evaluate(() =>
+      [...document.querySelectorAll("#drawer .arf-tab")].map((b) => b.textContent.trim()));
+    for (const t of tabs) {
+      await goTab(page, t);
+      counts.push(
+        t + ":" + (await page.evaluate(() => document.querySelectorAll("[data-arf-sweep]").length)),
+      );
+    }
+    ok(
+      "the button is in one place, on every tab",
+      counts.every((c) => c.split(":")[1] === "1"),
+      counts.join(" "),
+    );
+
+    // While it runs, it takes the place of the buttons rather than reporting
+    // from somewhere else.
+    await page.evaluate(() => {
+      const m = window.__sent.filter((x) => x.type === "refine_all").pop();
+      window.__fromBackend({
+        type: "refine_all_progress",
+        requestId: m ? m.requestId : "x",
+        chatId: "c1", at: 3, of: 8, saved: 2, skipped: 0,
+      });
+    });
+    await settle(page);
+
+    // Each reply refined on the way through raises no notification of its
+    // own. The run says how it went once, at the end.
+    const told = await page.evaluate(async () => {
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      window.__toasts = [];
+      const m = window.__sent.filter((x) => x.type === "refine_all").pop();
+      const id = m ? m.requestId : "x";
+      for (let i = 0; i < 3; i++) {
+        window.__fromBackend({ type: "refine_all_progress", requestId: id, chatId: "c1", at: 4 + i, of: 8, saved: 2 + i, skipped: 0 });
+        window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m" + (4 + i), before: "a", after: "b" });
+        await wait(30);
+      }
+      const during = window.__toasts.slice();
+      window.__fromBackend({ type: "refine_all_done", requestId: id, saved: 5, skipped: 0 });
+      await wait(60);
+      return { during, after: window.__toasts.slice() };
+    });
+    ok("a reply refined during the run raises no notification of its own", told.during.length === 0, told.during.join(" | "));
+    ok("and the run raises one when it ends", told.after.length === 1 && /5 replies refined/.test(told.after[0]), told.after.join(" | "));
+  });
+}
+
+console.log("\nstopping a refine without a floating button");
+{
+  // Stopping cannot live on the floating button alone: switched off, there
+  // would be no way to call a refine off at all, and a panel that answers a
+  // running refine by graying both its buttons out says wait rather than
+  // saying there is a way
+  // out of this.
+  const running = async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat", requestId: id, chatId: "c1",
+        character: "Wren", hasCharacter: true, resolved: true,
+      });
+      for (const f of window.__handlers.GENERATION_ENDED || []) f({ chatId: "c1", messageId: "m2" });
+    });
+    await settle(page);
+  };
+
+  await inTab(browser, { saved: { widgetOn: false, refineOn: true } }, async (page) => {
+    ok(
+      "there is no stop while nothing is running",
+      await page.evaluate(() => !document.querySelector("[data-arf-stop]")),
+    );
+    await running(page);
+    const there = await page.evaluate(() => {
+      const b = document.querySelector("[data-arf-stop]");
+      return b ? { text: b.textContent, off: b.disabled, has: true } : { has: false };
+    });
+    ok("a running refine puts a stop where the button that started it was",
+      there.has && !there.off, JSON.stringify(there));
+    ok("named for what it does", there.has && /stop/i.test(there.text), JSON.stringify(there));
+    ok(
+      "with no floating button anywhere",
+      await page.evaluate(() => !document.querySelector("#float")),
+    );
+
+    await page.evaluate(() => document.querySelector("[data-arf-stop]").click());
+    await settle(page);
+    ok(
+      "and pressing it asks the backend to stop",
+      await page.evaluate(() => window.__sent.some((m) => m.type === "cancel_refine")),
+    );
+  });
+
+  // And with no floating button at all, the panel's own stop is the one that
+  // has to be there: it is the only way to call a refine off from a screen
+  // where nothing else of ours is drawn.
+  await inTab(browser, { saved: { widgetOn: false, refineOn: true } }, async (page) => {
+    await running(page);
+    const b = await page.evaluate(() => {
+      const el = document.querySelector("#drawer [data-arf-stop]");
+      return el ? { text: el.textContent } : null;
+    });
+    ok("the panel's stop is there with no button on screen", !!b, JSON.stringify(b));
+  });
+}
+
+console.log("\nwatching it work");
+{
+  // The working is not put on the page at all. A card of its own would have to
+  // be handed over to the one saying what the refine did, and that hand-over
+  // reads as a second card popping up. It goes to the Log, where it can be read
+  // at whatever pace suits and nothing
+  // has to be caught.
+  const say = async (page, notes) => {
+    await page.evaluate((n) => {
+      window.__fromBackend({ type: "refine_progress", stage: "writing", chars: 400, notes: n });
+    }, notes);
+    await settle(page);
+  };
+  const onScreen = (page) =>
+    page.evaluate(() => ({
+      cards: document.querySelectorAll("[data-arf-pop]").length,
+      dims: document.querySelectorAll(".arf-shade").length,
+    }));
+
+  await inTab(browser, {}, async (page) => {
+    ok("nothing is up before the model says anything", JSON.stringify(await onScreen(page)) === '{"cards":0,"dims":0}');
+    await say(page, "<REFINE_NOTES>\nWhat reads weakly: the simile could sit in any story.\n</REFINE_NOTES>");
+    const mid = await onScreen(page);
+    ok("and nothing opens while it is working", mid.cards === 0 && mid.dims === 0, JSON.stringify(mid));
+
+    // The refine lands, and that is the one card there is.
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "refined", chatId: "c1", messageId: "m2", canUndo: true,
+        before: "The cold hit her like an electric shock, and her body went stiff.",
+        after: "The cold met her, and her body locked.",
+      });
+    });
+    await settle(page);
+    const done = await page.evaluate(() => {
+      const el = document.querySelector("[data-arf-pop]");
+      const dim = document.querySelector("[data-arf-shade]");
+      const still = (n) => !!n && getComputedStyle(n).animationName === "none" && /^0s$/.test(getComputedStyle(n).transitionDuration);
+      return el
+        ? {
+            cards: document.querySelectorAll("[data-arf-pop]").length,
+            diff: !!el.querySelector("[data-arf-diff]"),
+            moves: getComputedStyle(el).animationName === "arf-card-in" && !!dim && getComputedStyle(dim).animationName === "arf-fade-in" && still(el.querySelector(".arf-pop-body")),
+          }
+        : null;
+    });
+    ok("landing opens one card, and it says what changed", !!done && done.cards === 1 && done.diff, JSON.stringify(done));
+    // The card fades in and slides up a little, and the dim fades in. Nothing
+    // inside the card moves.
+    ok("the card fades in and slides up a little, and its dim fades in", !!done && done.moves, JSON.stringify(done));
+
+    // And the working that never went on screen is in the Log.
+    await goTab(page, "Log");
+    const kept = await page.evaluate(() => document.querySelector("[data-arf-kept]").textContent);
+    ok("the working it never showed is in the Log", /could sit in any story/.test(kept), kept);
+  });
+}
+
+console.log("\na long reply is still marked");
+{
+  // A long reply is marked word by word like a short one. The words the two
+  // share are kept plain, so the plain and taken-out words read back as the
+  // reply before, and the plain and put-in words as the reply after.
+  const make = (paras, words) => {
+    const pick = ["lamp", "harbor", "rope", "ledger", "gull", "tide", "keeper", "salt", "window", "stair"];
+    const out = [];
+    for (let p = 0; p < paras; p++) {
+      const line = [];
+      for (let w = 0; w < words; w++) line.push(pick[(p * 7 + w * 3) % pick.length] + (w % 9 === 8 ? "." : ""));
+      out.push(line.join(" ") + ".");
+    }
+    return out;
+  };
+  for (const [label, paras, words] of [["about 900 words", 9, 100], ["about 9000 words", 60, 150]]) {
+    await inTab(browser, {}, async (page) => {
+      const got = await page.evaluate(([paras, words, make]) => {
+        const build = new Function("return " + make)();
+        const before = build(paras, words);
+        const after = before.map((p, i) => (i % 3 === 1 ? p.replace(/ledger/g, "logbook") : p));
+        after.splice(2, 0, "A new line about the boats came in here.");
+        const b = before.join("\n\n");
+        const a = after.join("\n\n");
+        const t0 = performance.now();
+        window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", canUndo: true, before: b, after: a });
+        const took = performance.now() - t0;
+        const w = document.querySelector("[data-arf-pop] [data-arf-diff]");
+        const spans = Array.from(w.querySelectorAll("span"));
+        const read = (skip) => spans.filter((n) => !n.classList.contains(skip)).map((n) => n.textContent).join("");
+        return {
+          tooLong: /Too long to mark up/.test(w.textContent),
+          cuts: w.querySelectorAll(".arf-cut").length,
+          adds: w.querySelectorAll(".arf-add").length,
+          beforeBack: read("arf-add") === b,
+          afterBack: read("arf-cut") === a,
+          newLineMarked: Array.from(w.querySelectorAll(".arf-add")).some((n) => /new line about the boats/.test(n.textContent)),
+          took: Math.round(took),
+        };
+      }, [paras, words, make.toString()]);
+      ok(label + ": the changes are marked", !got.tooLong && got.cuts > 0 && got.adds > 0, JSON.stringify(got));
+      ok(label + ": the plain and taken-out words read as the reply before", got.beforeBack, JSON.stringify(got));
+      ok(label + ": the plain and put-in words read as the reply after", got.afterBack, JSON.stringify(got));
+      ok(label + ": a paragraph put in is marked as put in", got.newLineMarked, JSON.stringify(got));
+      ok(label + ": the card is drawn without a long pause", got.took < 1500, JSON.stringify(got));
+    });
+  }
+}
+
+console.log("\nthinking held back from a refine is left off the card");
+{
+  // The backend holds the thinking at the front of a message back from the
+  // refine and says which part it was. Shown on the card, with its tags taken
+  // out for reading, it looked like part of the reply the refine had read.
+  const held = "<reasoning>\n# One\nWary mood at the gate, keep it short.\n</reasoning>\n";
+  const land = async (page) => {
+    await page.evaluate((held) => {
+      window.__fromBackend({
+        type: "refined",
+        chatId: "c1",
+        messageId: "m2",
+        canUndo: true,
+        held,
+        before: held + "She stepped through and, suddenly, the cold just hit her.",
+        after: held + "She stepped through and the cold hit her.",
+      });
+    }, held);
+    await settle(page);
+  };
+  const read = (page) => page.evaluate(() =>
+    Array.from(document.querySelectorAll("[data-arf-diff]")).map((n) => ({
+      mode: n.getAttribute("data-arf-diff-mode"),
+      text: n.textContent,
+    })));
+  for (const side of [false, true]) {
+    const view = side ? "side by side" : "read together";
+    await inTab(browser, { saved: { sideBySide: side } }, async (page) => {
+      await land(page);
+      const all = await read(page);
+      ok(view + ": there is a before and after on screen", all.length > 0, JSON.stringify(all));
+      ok(view + ": every one of them leaves the thinking out",
+        all.length > 0 && all.every((d) => !/Wary mood/.test(d.text)), JSON.stringify(all).slice(0, 300));
+      ok(view + ": and still shows the reply",
+        all.length > 0 && all.every((d) => /stepped through/.test(d.text)), JSON.stringify(all).slice(0, 300));
+      ok(view + ": and says the thinking is left out",
+        all.length > 0 && all.every((d) => /thinking is left out/.test(d.text)), JSON.stringify(all).slice(0, 300));
+      // The switch draws the card again from what it holds, so the thinking
+      // stays out after it too.
+      await page.evaluate(() => document.querySelector("[data-arf-diff-switch]").click());
+      await settle(page);
+      const flipped = await read(page);
+      ok(view + ": the other view leaves it out as well",
+        flipped.length > 0 && flipped.every((d) => !/Wary mood/.test(d.text) && /stepped through/.test(d.text)),
+        JSON.stringify(flipped).slice(0, 300));
+    });
+  }
+
+  // The note above the marked text fits on a phone.
+  await inTab(browser, { viewport: { width: 360, height: 740 }, touch: true }, async (page) => {
+    await land(page);
+    const fit = await page.evaluate(() => {
+      const note = document.querySelector("[data-arf-pop] [data-arf-diff] .arf-note");
+      const box = document.querySelector("[data-arf-pop]").getBoundingClientRect();
+      const r = note && note.getBoundingClientRect();
+      return {
+        note: !!note,
+        inside: !!r && r.left >= box.left - 1 && r.right <= box.right + 1,
+        sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+      };
+    });
+    ok("phone: the note fits inside the card, with no sideways scroll",
+      fit.note && fit.inside && !fit.sideways, JSON.stringify(fit));
+  });
+
+  // The put-back list read back from the backend, as after a reload.
+  await inTab(browser, { saved: { enabled: true } }, async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+    });
+    await settle(page);
+    await page.evaluate((held) => {
+      window.__fromBackend({
+        type: "undoable_list",
+        list: [{ chatId: "c1", messageId: "m2", at: Date.now() - 30000, held,
+          before: held + "She stepped through and, suddenly, the cold just hit her.",
+          after: held + "She stepped through and the cold hit her." }],
+      });
+    }, held);
+    await goTab(page, "Log");
+    await settle(page);
+    const all = await read(page);
+    ok("the put-back list leaves the thinking out too",
+      all.length > 0 && all.every((d) => !/Wary mood/.test(d.text) && /stepped through/.test(d.text)),
+      JSON.stringify(all).slice(0, 300));
+  });
+
+  // An older refine is named in the list by its time and its first words.
+  // Those words are the reply's, not the thinking's, and carry no tags.
+  await inTab(browser, { saved: { enabled: true } }, async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+    });
+    await settle(page);
+    await page.evaluate((held) => {
+      const now = Date.now();
+      window.__fromBackend({
+        type: "undoable_list",
+        list: [
+          { chatId: "c1", messageId: "m2", at: now - 60000, held,
+            before: held + "She stepped through and, suddenly, the cold just hit her.",
+            after: held + "She stepped through and the cold hit her." },
+          { chatId: "c1", messageId: "m3", at: now - 30000,
+            before: "The bell rang twice, and then, after a while, it rang again.",
+            after: "The bell rang twice, then again." },
+        ],
+      });
+    }, held);
+    await goTab(page, "Log");
+    await settle(page);
+    const names = await page.evaluate(() => {
+      const card = document.querySelector("[data-arf-last]");
+      return card ? card.textContent : "";
+    });
+    ok("an older refine is named by the reply's first words", /: She stepped through/.test(names), names.slice(0, 300));
+    ok("and not by its thinking or a tag", !/Wary mood|<reasoning>|# One/.test(names), names.slice(0, 300));
+  });
+}
+
+// A past refine opened at full size from its card. The before and after is
+// marked the same way, fills most of the screen, scrolls as one, and the view
+// switch works in it. Close, Escape and a tap outside each close it.
+console.log("\na past refine opened at full size");
+for (const [label, viewport, touch] of [["phone", { width: 390, height: 800 }, true], ["laptop", { width: 1280, height: 800 }, false]]) {
+  await inTab(browser, { viewport, touch, saved: { enabled: true } }, async (page) => {
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+    });
+    await settle(page);
+    const long = Array.from({ length: 120 }, (_, i) => "The ferry crossed the river for the " + (i + 1) + "th time that night, slowly.").join(" ");
+    await page.evaluate((long) => {
+      window.__fromBackend({
+        type: "undoable_list",
+        list: [{ chatId: "c1", messageId: "m2", at: Date.now() - 30000,
+          before: long, after: long.replace(/, slowly\./g, ".") }],
+      });
+    }, long);
+    await goTab(page, "Log");
+    await settle(page);
+    const opened = await page.evaluate(async () => {
+      const b = document.querySelector("[data-arf-last] [data-arf-expand-refine]");
+      if (!b) return null;
+      const r = b.getBoundingClientRect();
+      b.scrollIntoView({ block: "center" });
+      b.click();
+      await new Promise((res) => setTimeout(res, 300));
+      const box = document.querySelector("[data-arf-bigdiff]");
+      if (!box) return { button: Math.round(r.height), box: false };
+      const body = box.querySelector(".arf-bigdiff");
+      const marks = box.querySelectorAll(".arf-cut, .arf-add").length;
+      const br = box.getBoundingClientRect();
+      body.scrollTop = 1e6;
+      const scrolls = body.scrollTop > 0;
+      const wide = document.documentElement.scrollWidth <= window.innerWidth;
+      // The switch inside the full view redraws the marked text in it.
+      const sw = box.querySelector("[data-arf-diff-switch]");
+      const before = box.querySelector("[data-arf-diff]").getAttribute("data-arf-diff-mode");
+      sw.click();
+      await new Promise((res) => setTimeout(res, 100));
+      const after = box.querySelector("[data-arf-diff]").getAttribute("data-arf-diff-mode");
+      sw.click();
+      return { button: Math.round(r.height), box: true, marks, tall: Math.round(br.height), vh: window.innerHeight, scrolls, wide, before, after };
+    });
+    ok(label + ": each past refine has an Expand button, tall enough to tap", !!opened && opened.button >= 32, JSON.stringify(opened));
+    ok(label + ": it opens the before and after at full size, marked", !!opened && opened.box && opened.marks > 0 && opened.tall > opened.vh * 0.6, JSON.stringify(opened));
+    ok(label + ": the text scrolls as one, and nothing runs off the side", !!opened && opened.scrolls && opened.wide, JSON.stringify(opened));
+    ok(label + ": the view switch works inside it", !!opened && opened.before !== opened.after, JSON.stringify(opened));
+    for (const how of ["Close", "Escape", "outside"]) {
+      const shut = await page.evaluate(async (how) => {
+        if (!document.querySelector("[data-arf-bigdiff]")) document.querySelector("[data-arf-last] [data-arf-expand-refine]").click();
+        await new Promise((res) => setTimeout(res, 250));
+        const over = document.querySelector("[data-arf-bigdiff]").parentElement;
+        if (how === "Close") [...over.querySelectorAll("button")].find((b) => b.textContent === "Close").click();
+        if (how === "Escape") document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+        if (how === "outside") over.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await new Promise((res) => setTimeout(res, 400));
+        return !document.querySelector("[data-arf-bigdiff]");
+      }, how);
+      ok(label + ": " + how + " closes it", shut);
+    }
+  });
+}
+
+console.log("\nthe card that comes up on the page");
+{
+  // A refine changes writing somebody was reading. The panel is behind a tab
+  // they may never have opened, so the before, the after and the way back go on
+  // the page itself.
+  const land = async (page) => {
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "refined",
+        chatId: "c1",
+        messageId: "m2",
+        canUndo: true,
+        before: "It hit him like an electric shock, and his whole upper body went stiff.",
+        after: "It hit him hard, and his whole upper body locked rigid.",
+      });
+    });
+    await settle(page);
+  };
+  const pop = (page) => page.evaluate(() => !!document.querySelector("[data-arf-pop]"));
+
+  await inTab(browser, {}, async (page) => {
+    ok("nothing is on the page before a refine lands", !(await pop(page)));
+    await land(page);
+    ok("a refine puts a card on the page", await pop(page));
+    const said = await page.evaluate(() =>
+      document.querySelector("[data-arf-pop]").textContent);
+    ok("with what it said before", /electric shock/.test(said), said.slice(0, 80));
+    ok("and what it says now", /locked rigid/.test(said), said.slice(0, 80));
+
+    // What changed is marked on the words, not left for the reader to find by
+    // comparing two paragraphs.
+    const marks = await page.evaluate(() => {
+      const w = document.querySelector("[data-arf-diff]");
+      const grab = (cls) => Array.from(w.querySelectorAll("." + cls)).map((n) => n.textContent).join("|");
+      const plain = Array.from(w.querySelectorAll("span"))
+        .filter((n) => !n.className)
+        .map((n) => n.textContent)
+        .join("|");
+      const cutStyle = w.querySelector(".arf-cut") && getComputedStyle(w.querySelector(".arf-cut"));
+      const addStyle = w.querySelector(".arf-add") && getComputedStyle(w.querySelector(".arf-add"));
+      return {
+        cut: grab("arf-cut"),
+        add: grab("arf-add"),
+        plain: plain,
+        struck: cutStyle ? cutStyle.textDecorationLine : "",
+        addStruck: addStyle ? addStyle.textDecorationLine : "",
+        cutColor: cutStyle ? cutStyle.color : "",
+        addColor: addStyle ? addStyle.color : "",
+      };
+    });
+    ok("words taken out are marked", /electric shock/.test(marks.cut), JSON.stringify(marks.cut));
+    ok("and struck through", /line-through/.test(marks.struck), marks.struck);
+    ok("words put in are marked", /locked rigid/.test(marks.add), JSON.stringify(marks.add));
+    ok("and not struck through", !/line-through/.test(marks.addStruck), marks.addStruck);
+    ok("the two are not the same color", marks.cutColor !== marks.addColor,
+      marks.cutColor + " vs " + marks.addColor);
+    // "It" and "him" survive the rewrite in the fixture below, unmarked.
+    ok("and what did not change is left plain", marks.plain.trim().length > 0, JSON.stringify(marks.plain));
+
+    // The same two versions, in their own columns. Marked up together is the
+    // quicker read when a rewrite moved a word here and there, and the harder
+    // one when whole sentences were replaced, so both are on offer and the
+    // choice is remembered.
+    const switchSays = (page) =>
+      page.evaluate(() => {
+        const b = document.querySelector("[data-arf-diff-switch]");
+        return b ? b.textContent : null;
+      });
+    ok("there is a switch beside what changed", (await switchSays(page)) === "Read them side by side",
+      String(await switchSays(page)));
+    await page.evaluate(() => document.querySelector("[data-arf-diff-switch]").click());
+    await settle(page);
+    ok("and pressing it turns the label round", (await switchSays(page)) === "Read them together",
+      String(await switchSays(page)));
+
+    const cols = await page.evaluate(() => {
+      const w = document.querySelector("[data-arf-pop] [data-arf-diff]");
+      const b = w.querySelector('[data-arf-side="before"]');
+      const a = w.querySelector('[data-arf-side="after"]');
+      const grab = (n, cls) => Array.from(n.querySelectorAll("." + cls)).map((x) => x.textContent).join("|");
+      const bb = b && b.getBoundingClientRect();
+      const ab = a && a.getBoundingClientRect();
+      return {
+        mode: w.getAttribute("data-arf-diff-mode"),
+        before: b ? b.textContent : null,
+        after: a ? a.textContent : null,
+        beforeCut: b ? grab(b, "arf-cut") : "",
+        beforeAdds: b ? b.querySelectorAll(".arf-add").length : -1,
+        afterAdd: a ? grab(a, "arf-add") : "",
+        afterCuts: a ? a.querySelectorAll(".arf-cut").length : -1,
+        beside: !!(bb && ab) && Math.abs(bb.top - ab.top) < 2 && bb.left < ab.left,
+        labels: Array.from(w.querySelectorAll(".arf-sbs-lab")).map((n) => n.textContent).join("|"),
+      };
+    });
+    ok("the card knows which view it is drawing", cols.mode === "side", String(cols.mode));
+    ok("the left column reads as the whole original",
+      cols.before === "It hit him like an electric shock, and his whole upper body went stiff.", String(cols.before));
+    ok("the right column reads as the whole rewrite",
+      cols.after === "It hit him hard, and his whole upper body locked rigid.", String(cols.after));
+    ok("what was taken out is marked on the left", /electric shock/.test(cols.beforeCut), cols.beforeCut);
+    ok("and nothing put in is on the left", cols.beforeAdds === 0, String(cols.beforeAdds));
+    ok("what was put in is marked on the right", /locked rigid/.test(cols.afterAdd), cols.afterAdd);
+    ok("and nothing taken out is on the right", cols.afterCuts === 0, String(cols.afterCuts));
+    ok("the two sit beside each other where there is room", cols.beside, JSON.stringify(cols));
+    ok("and each says which one it is", cols.labels === "Before|After", cols.labels);
+
+    // Back to the marked-up view, and the card knows it.
+    await page.evaluate(() => document.querySelector("[data-arf-diff-switch]").click());
+    await settle(page);
+    const backAgain = await page.evaluate(() => ({
+      mode: document.querySelector("[data-arf-pop] [data-arf-diff]").getAttribute("data-arf-diff-mode"),
+      cols: document.querySelectorAll("[data-arf-side]").length,
+    }));
+    ok("pressing it again puts them back together", backAgain.mode === "inline" && backAgain.cols === 0,
+      JSON.stringify(backAgain));
+  });
+
+  // The choice is a setting, so the next card comes up the way the last one was
+  // left rather than back on the default.
+  await inTab(browser, { saved: { sideBySide: true } }, async (page) => {
+    await land(page);
+    const kept = await page.evaluate(() => ({
+      mode: document.querySelector("[data-arf-pop] [data-arf-diff]").getAttribute("data-arf-diff-mode"),
+      cols: document.querySelectorAll("[data-arf-pop] [data-arf-side]").length,
+      all: Array.from(document.querySelectorAll("[data-arf-diff]"))
+        .map((n) => n.getAttribute("data-arf-diff-mode")),
+    }));
+    ok("the view you chose is the one the next card opens on", kept.mode === "side" && kept.cols === 2,
+      JSON.stringify(kept));
+
+    // The card on the page and the one on the tab are both showing this refine,
+    // so there are two of these on screen at once and a switch that changed one
+    // of them would read as a button that half worked.
+    ok("there is more than one before and after on screen to check", kept.all.length > 1, JSON.stringify(kept.all));
+    ok("and every one of them opens on the view you chose",
+      kept.all.every((m) => m === "side"), JSON.stringify(kept.all));
+
+    await page.evaluate(() => document.querySelector("[data-arf-diff-switch]").click());
+    await settle(page);
+    const wrote = await page.evaluate(() => {
+      const raw = localStorage.getItem("lv-auto-refine:settings:v1");
+      return raw ? JSON.parse(raw).sideBySide : "nothing saved";
+    });
+    ok("and turning it off is written down", wrote === false, JSON.stringify(wrote));
+    const turned = await page.evaluate(() =>
+      Array.from(document.querySelectorAll("[data-arf-diff]"))
+        .map((n) => n.getAttribute("data-arf-diff-mode")));
+    ok("pressing the switch on one turns all of them round",
+      turned.length > 1 && turned.every((m) => m === "inline"), JSON.stringify(turned));
+  });
+
+  // On a narrow phone two columns of twenty characters would be worse than a
+  // scroll, so they stack instead of squeezing.
+  await inTab(browser, { viewport: { width: 320, height: 568 }, touch: true, saved: { sideBySide: true } }, async (page) => {
+    await land(page);
+    const stacked = await page.evaluate(() => {
+      const b = document.querySelector('[data-arf-side="before"]');
+      const a = document.querySelector('[data-arf-side="after"]');
+      if (!b || !a) return null;
+      const bb = b.getBoundingClientRect();
+      const ab = a.getBoundingClientRect();
+      return { sameLeft: Math.abs(bb.left - ab.left) < 2, below: ab.top > bb.top, wide: bb.width };
+    });
+    ok("on a narrow phone the two stack rather than squeeze",
+      !!stacked && stacked.sameLeft && stacked.below, JSON.stringify(stacked));
+    ok("and each one gets the full width", !!stacked && stacked.wide > 200, JSON.stringify(stacked));
+  });
+
+  await inTab(browser, {}, async (page) => {
+    await land(page);
+
+    // A dim behind it, so the eye goes to the card.
+    const shade = await page.evaluate(() => {
+      const el = document.querySelector("[data-arf-shade]");
+      if (!el) return null;
+      const st = getComputedStyle(el);
+      return { z: Number(st.zIndex), bg: st.backgroundColor, fixed: st.position === "fixed" };
+    });
+    ok("with a dim behind it", !!shade && shade.fixed && /rgba?\(/.test(shade.bg), JSON.stringify(shade));
+    ok(
+      "under the card rather than over it",
+      shade &&
+        shade.z <
+          (await page.evaluate(() => Number(getComputedStyle(document.querySelector("[data-arf-pop]")).zIndex))),
+    );
+
+    // Readable on the theme, measured the same way the panel is.
+    const worst = await page.evaluate(() => {
+      const parse = (s) => {
+        const m = /rgba?\(([^)]+)\)/.exec(s || "");
+        if (!m) return null;
+        const p = m[1].split(",").map((x) => parseFloat(x.trim()));
+        return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 };
+      };
+      const over = (f, b) => ({
+        r: f.r * f.a + b.r * (1 - f.a), g: f.g * f.a + b.g * (1 - f.a),
+        b: f.b * f.a + b.b * (1 - f.a), a: 1,
+      });
+      const lum = (c) => {
+        const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+        return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+      };
+      const ratio = (a, b) => { const x = lum(a), y = lum(b); return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05); };
+      const backdrop = (node) => {
+        const stack = []; let el = node;
+        while (el && el !== document.documentElement) {
+          const c = parse(getComputedStyle(el).backgroundColor);
+          if (c && c.a > 0) { stack.push(c); if (c.a >= 0.999) break; }
+          el = el.parentElement;
+        }
+        let base = { r: 255, g: 255, b: 255, a: 1 };
+        const pg = parse(getComputedStyle(document.body).backgroundColor);
+        if (pg && pg.a >= 0.999) base = pg;
+        for (let i = stack.length - 1; i >= 0; i--) base = over(stack[i], base);
+        return base;
+      };
+      let worst = 99;
+      let where = "";
+      for (const el of document.querySelectorAll("[data-arf-pop] *")) {
+        if (!Array.from(el.childNodes).some((n) => n.nodeType === 3 && n.textContent.trim())) continue;
+        const box = el.getBoundingClientRect();
+        if (!box.width || !box.height) continue;
+        const st = getComputedStyle(el);
+        const fg = parse(st.color);
+        if (!fg) continue;
+        const px = parseFloat(st.fontSize) || 16;
+        const big = px >= 24 || ((parseInt(st.fontWeight, 10) || 400) >= 700 && px >= 18.66);
+        const r = ratio(over(fg, backdrop(el)), backdrop(el)) / (big ? 3 : 4.5);
+        if (r < worst) {
+          worst = r;
+          where = (el.className || el.tagName) + ": " + el.textContent.trim().slice(0, 30);
+        }
+      }
+      return { worst: worst, where: where };
+    });
+    ok(
+      "and every word on it is readable",
+      worst.worst >= 1,
+      "worst was " + worst.worst.toFixed(2) + " of its floor on " + worst.where,
+    );
+
+    // Keeping it closes the card and leaves the refine in the Log.
+    await page.evaluate(() => document.querySelector("[data-arf-pop-keep]").click());
+    await settle(page);
+    await page.waitForTimeout(400);
+    ok("keeping it closes the card", !(await pop(page)) && (await page.evaluate(() => !document.querySelector(".arf-pop"))));
+    ok(
+      "and takes the dim with it",
+      await page.evaluate(() => !document.querySelector("[data-arf-shade]")),
+    );
+    await goTab(page, "Log");
+    ok(
+      "and the refine is still there to put back",
+      await page.evaluate(() => !!document.querySelector("[data-arf-last]")),
+    );
+  });
+
+  // The same refine twice is one card, not two stacked on each other.
+  await inTab(browser, {}, async (page) => {
+    await land(page);
+    await land(page);
+    const n = await page.evaluate(() => document.querySelectorAll("[data-arf-pop]").length);
+    ok("the same refine does not stack a second card", n === 1, "found " + n);
+  });
+
+  // It sits on the page, over somebody's chat, at whatever size their screen
+  // is. The two that matter are a narrow phone, where anything fixed-width
+  // pushes the page sideways, and a desktop, where it must not take the middle
+  // of the screen.
+  const fits = (page) =>
+    page.evaluate(() => {
+      const el = document.querySelector("[data-arf-pop]");
+      const r = el.getBoundingClientRect();
+      const row = el.querySelector(".arf-pop-row").getBoundingClientRect();
+      return {
+        inside: r.left >= 0 && r.right <= innerWidth + 1 && r.top >= 0 && r.bottom <= innerHeight + 1,
+        sideways: document.documentElement.scrollWidth > innerWidth + 1,
+        // The buttons are pinned, so they are on screen however long the reply
+        // is. A card whose way back has scrolled off the bottom has no way back.
+        buttonsSeen: row.bottom <= innerHeight + 1 && row.top >= 0,
+        // One scroll region rather than a scroll inside a scroll.
+        scrollers: Array.from(el.querySelectorAll("*")).filter((n) => {
+          const st = getComputedStyle(n);
+          return (
+            (st.overflowY === "auto" || st.overflowY === "scroll") &&
+            n.scrollHeight > n.clientHeight + 1
+          );
+        }).length,
+      };
+    });
+
+  for (const [what, viewport] of [
+    ["a narrow phone", { width: 320, height: 568 }],
+    ["a usual phone", { width: 390, height: 844 }],
+    ["a desktop", { width: 1440, height: 900 }],
+  ]) {
+    await inTab(browser, { viewport, touch: viewport.width < 560 }, async (page) => {
+      await land(page);
+      const got = await fits(page);
+      ok(what + ": it is on the screen", got.inside, JSON.stringify(got));
+      ok(what + ": and nothing is pushed sideways", !got.sideways);
+      ok(what + ": with the way back still reachable", got.buttonsSeen);
+      ok(what + ": and one thing scrolling, not two", got.scrollers <= 1, "found " + got.scrollers);
+    });
+  }
+
+  // Switched off, nothing appears on the page and the Log still has it.
+  await inTab(browser, { saved: { popup: false } }, async (page) => {
+    await land(page);
+    ok("switched off, nothing comes up on the page", !(await pop(page)));
+    await goTab(page, "Log");
+    ok(
+      "and the refine is still in the tab",
+      await page.evaluate(() => !!document.querySelector("[data-arf-last]")),
+    );
+  });
+}
+
+console.log("\nthe preview says which prompt it used");
+{
+  // There are two prompt lists, and the preview builds from whichever fits the
+  // message it is previewing. A preset writes to one of them, so somebody who
+  // loads a reply preset while their own message is newest gets a preview of
+  // the list they did not touch. Saying nothing about that reads as a preset
+  // that failed to load.
+  await inTab(browser, {}, async (page) => {
+    const feed = async (which, jevLeft, passes) => {
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-preview="build"]').click());
+      await page.evaluate(({ w, jevLeft, passes }) => {
+        const id = window.__sent.filter((m) => m.type === "preview_prompt").pop().requestId;
+        window.__fromBackend({
+          type: "prompt_preview",
+          requestId: id,
+          ok: true,
+          real: true,
+          which: w,
+          messages: [{ role: "system", content: "a rule of mine" }],
+          tokens: { total: 4, counted: true, passage: 2, parts: [] },
+          parameters: null,
+          wrapOutput: true,
+          connectionId: "",
+          jevFoundLeftOut: !!jevLeft,
+          passes: passes || [],
+        });
+      }, { w: which, jevLeft, passes });
+      await settle(page);
+      return page.evaluate(() => {
+        const n = document.querySelector('#drawer [data-arf-preview="which"]');
+        return n ? n.textContent : null;
+      });
+    };
+    const jevLine = () =>
+      page.evaluate(() => {
+        const n = document.querySelector('#drawer [data-arf-preview="jevfound"]');
+        return n ? n.textContent : null;
+      });
+    await goTab(page, "Context");
+    const replies = await feed("replies");
+    ok("a reply preview says it used the reply prompt",
+      /prompt for replies/.test(replies || ""), replies);
+    ok("and warns the other list will not show here",
+      /will not show here/.test(replies || ""), replies);
+    const yours = await feed("yours");
+    ok("your own turn says it used the prompt for your writing",
+      /your own writing/.test(yours || ""), yours);
+    ok("with nothing left out for the second model, nothing is said about it", (await jevLine()) === null);
+    // A preview never asks the second model, so a block holding {{checks_found}} is empty here.
+    await feed("replies", true);
+    const left = await jevLine();
+    ok("a preview with Checks Found left out says so, and where to look instead",
+      /left out here/.test(left || "") && /The Log says when it was sent/.test(left || ""), left);
+    // With several passes, neither list on the Prompt tab is sent, so the line
+    // naming one gives way to a line naming the passes.
+    const withPasses = await feed("replies", false, ["Tighten", "Polish"]);
+    const passLine = await page.evaluate(() => {
+      const n = document.querySelector('#drawer [data-arf-preview="passes"]');
+      return n ? n.textContent : null;
+    });
+    ok("with several passes, the preview says it is pass 1 and names them in order",
+      /pass 1 of 2, Tighten/.test(passLine || "") && /In order: Tighten, Polish/.test(passLine || ""), passLine);
+    ok("and does not name a Prompt tab list it did not use", withPasses === null, withPasses);
+  });
+}
+
+console.log("\nthe refine card fades in and glows once");
+{
+  // The card saying a refine happened fades in and slides up a little, with
+  // the dim fading in behind it. Its edge glows once, slowly, and goes back to
+  // normal. On the way out it fades. With Reduce motion on, from the panel or
+  // the device, it appears and goes at once with no glow. Checked at a phone
+  // width and a laptop width.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const how of ["off", "panel", "device"]) {
+      await inTab(browser, { viewport, touch, saved: { enabled: true, popup: true, reduceMotion: how === "panel" } }, async (page) => {
+        if (how === "device") await page.emulateMedia({ reducedMotion: "reduce" });
+        await page.evaluate(() =>
+          window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", canUndo: true, before: "The old line of the reply.", after: "The new line of the reply." }),
+        );
+        await page.waitForTimeout(40);
+        const got = await page.evaluate(() => {
+          const pop = document.querySelector("[data-arf-pop]");
+          const shade = document.querySelector("[data-arf-shade]");
+          if (!pop) return null;
+          const glow = getComputedStyle(pop, "::after");
+          const anims = pop.getAnimations({ subtree: true }).filter((a) => a.animationName === "arf-glow");
+          const timing = anims[0] ? anims[0].effect.getTiming() : null;
+          return {
+            pop: getComputedStyle(pop).animationName,
+            shade: shade ? getComputedStyle(shade).animationName : null,
+            glow: glow.animationName,
+            // Once only, and slow: a glow, not a blink.
+            glowRuns: timing ? timing.iterations : 0,
+            glowMs: timing ? timing.duration : 0,
+          };
+        });
+        await page.waitForTimeout(1900);
+        const settled = await page.evaluate(() => {
+          const p = document.querySelector("[data-arf-pop]");
+          return p ? { transform: getComputedStyle(p).transform, opacity: Number(getComputedStyle(p).opacity), glow: Number(getComputedStyle(p, "::after").opacity) } : null;
+        });
+        await page.evaluate(() => document.querySelector("[data-arf-pop-keep]").click());
+        const leaving = await page.evaluate(() => ({ still: document.querySelectorAll(".arf-pop").length, open: document.querySelectorAll("[data-arf-pop]").length }));
+        await page.waitForTimeout(400);
+        const gone = await page.evaluate(() => document.querySelectorAll(".arf-pop, .arf-shade").length);
+        const name = label + (how === "off" ? "" : ", Reduce motion from the " + how);
+        if (how === "off") {
+          ok(name + ": the card fades in and slides up a little, and the dim fades in", !!got && got.pop === "arf-card-in" && got.shade === "arf-fade-in", JSON.stringify(got));
+          ok(name + ": its edge glows once, slowly", !!got && got.glow === "arf-glow" && got.glowRuns === 1 && got.glowMs >= 1000, JSON.stringify(got));
+          ok(name + ": closing, it fades out before it is taken away", leaving.still === 1 && leaving.open === 0, JSON.stringify(leaving));
+        } else {
+          ok(name + ": the card appears at once, with no glow", !!got && got.pop === "none" && got.shade === "none" && got.glow === "none", JSON.stringify(got));
+          ok(name + ": closing, it goes at once", leaving.still === 0, JSON.stringify(leaving));
+        }
+        ok(name + ": it settles in place, with the glow gone", !!settled && settled.opacity === 1 && settled.glow === 0 && /matrix\(1, 0, 0, 1, 0, 0\)|none/.test(settled.transform), JSON.stringify(settled));
+        ok(name + ": once closed, nothing is left behind", gone === 0, String(gone));
+      });
+    }
+  }
+}
+
+console.log("\nshow me the pop-up");
+{
+  // Under Show the before and after on screen, a button shows the real card
+  // with made-up text. Nothing is refined or sent, and its buttons only close
+  // it. With the switch off, the button is not there. Checked at a phone width
+  // and a laptop width.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true, popup: true } }, async (page, host) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      const btn = page.locator("#drawer [data-arf-popdemo]");
+      await btn.scrollIntoViewIfNeeded();
+      const r = await btn.boundingBox();
+      const before = await page.evaluate(() => (window.__sent || []).length);
+      await btn.click();
+      await page.waitForTimeout(300);
+      const got = await page.evaluate((before) => {
+        const pop = document.querySelector("[data-arf-pop]");
+        const pr = pop && pop.getBoundingClientRect();
+        return pop
+          ? {
+              title: pop.querySelector(".arf-h").textContent,
+              diff: !!pop.querySelector("[data-arf-diff]"),
+              inside: pr.left >= 0 && pr.right <= window.innerWidth + 1 && pr.bottom <= window.innerHeight + 1,
+              sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+              // Nothing that asks the backend to do anything. A settings
+              // save from the panel is not about the card.
+              sent: (window.__sent || []).slice(before).map((m) => m.type).filter((t) => t !== "set_settings" && t !== "active_chat"),
+            }
+          : null;
+      }, before);
+      ok(label + ": the button shows the card", !!got && /an example/.test(got.title) && got.diff, JSON.stringify(got));
+      ok(label + ": nothing is sent for it", !!got && got.sent.length === 0, JSON.stringify(got));
+      ok(label + ": the card fits on the screen", !!got && got.inside && !got.sideways, JSON.stringify(got));
+      if (touch) ok(label + ": the button is tall enough to tap", r && r.height >= 32, JSON.stringify(r));
+      await page.evaluate(() => document.querySelector("[data-arf-pop-undo]").click());
+      await page.waitForTimeout(400);
+      ok(label + ": its Put it back only closes it", await page.evaluate(() => !document.querySelector(".arf-pop")), "");
+    });
+  }
+  await inTab(browser, { saved: { enabled: true, popup: false } }, async (page) => {
+    await goTab(page, "Setup");
+    await settle(page);
+    const shown = await page.evaluate(() => {
+      const b = document.querySelector("#drawer [data-arf-popdemo]");
+      return !!b && !b.closest("[hidden]") && b.getClientRects().length > 0;
+    });
+    ok("with the card switched off, the button is not there", !shown, "");
+  });
+}
+
+console.log("\nthe raw view");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Context");
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-preview="build"]').click());
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "preview_prompt").pop().requestId;
+      window.__fromBackend({
+        type: "prompt_preview",
+        requestId: id,
+        ok: true,
+        real: true,
+        messages: [{ role: "system", content: "the instruction" }],
+        parameters: { temperature: 0.4 },
+        connectionId: "c-fast",
+        reasoning: { source: "off" },
+        jevFoundLeftOut: true,
+      });
+    });
+    await settle(page);
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-preview="flip"]').click());
+    await settle(page);
+    const raw = await page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+    ok("raw shows the request as data", /"messages"/.test(raw) && /"temperature": 0.4/.test(raw));
+    ok("with the connection it goes to", /c-fast/.test(raw));
+    // What the request below does not hold is said in the raw view too, not
+    // only in the one it was first written for.
+    ok("and says Checks Found is left out, in the raw view as well",
+      !!(await page.evaluate(() => document.querySelector('#drawer [data-arf-preview="jevfound"]'))));
+    ok("without calling it the request exactly as it goes out", !/as it goes out\./.test(raw) && /apart from anything named above/.test(raw));
+  });
+}
+
+console.log("\non a desktop");
+{
+  // The drawer is wider on a computer, and a panel that only ever gets checked
+  // at 380px can lay out badly with room to spare.
+  await inTab(
+    browser,
+    {
+      viewport: { width: 1440, height: 900 },
+      css: "#drawer{width:460px}",
+    },
+    async (page) => {
+      const spill = await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth + 1,
+      );
+      ok("nothing pushes the page sideways", spill);
+      const m = await worstText(page);
+      ok(
+        "every label is readable",
+        m.ok,
+        "worst " + m.worst.toFixed(2) + " against " + m.want + " on " + m.where,
+      );
+
+      // A mouse gets the smaller targets, which is the point of asking the
+      // pointer rather than the width.
+      const tall = await page.evaluate(() => {
+        const b = Array.from(document.querySelectorAll("#drawer .arf-btn")).find((x) =>
+          x.getBoundingClientRect().height > 0,
+        );
+        return b ? b.getBoundingClientRect().height : 0;
+      });
+      ok("buttons are mouse sized, not finger sized", tall > 0 && tall < 38, String(tall));
+
+      await goTab(page, "Prompt");
+      const wide = await page.evaluate(() => {
+        const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+        const box = ta.getBoundingClientRect();
+        const card = ta.closest(".arf-card").getBoundingClientRect();
+        return { ta: box.width, card: card.width };
+      });
+      ok(
+        "a block box fills the width it is given",
+        wide.ta > wide.card - 60,
+        JSON.stringify(wide),
+      );
+    },
+  );
+}
+
+console.log("\nlight and dark, after every change");
+{
+  for (const [name, css] of [
+    ["dark", ""],
+    [
+      "light",
+      ":root{--lumiverse-bg:#fff;--lumiverse-bg-elevated:#f4f2f8;" +
+        "--lumiverse-text:rgba(0,0,0,.9);--lumiverse-text-muted:rgba(0,0,0,.55);" +
+        "--lumiverse-text-dim:rgba(0,0,0,.4);--lumiverse-fill:rgba(0,0,0,.05);" +
+        "--lumiverse-fill-subtle:rgba(0,0,0,.03);--lumiverse-border:rgba(0,0,0,.12)}" +
+        "body{background:#fff}#drawer{background:#fff}",
+    ],
+  ]) {
+    await inTab(browser, { css }, async (page) => {
+      // Every tab, since a card only added to one of them is a card only one
+      // theme check would ever see.
+      for (const label of ["Prompt", "Context", "Model", "Limits", "Log", "Setup"]) {
+        await goTab(page, label);
+        const m = await worstText(page);
+        ok(
+          name + ": " + label + " is readable",
+          m.ok,
+          "worst " + m.worst.toFixed(2) + " on " + m.where,
+        );
+      }
+    });
+  }
+}
+
+console.log("\nthe theme engine's own colors, light and dark");
+{
+  // The colors Lumiverse's own theme engine writes for a purple accent, kept
+  // in lumiverse-themes.json. A hand-written test theme tends to set every
+  // color to suit itself, which the engine does not do: it leaves a few at
+  // their stock dark values on a light theme. Every tab is read on both, with
+  // and without a pattern behind the panel.
+  const ENGINE = JSON.parse(readFileSync(join(root, "test", "lumiverse-themes.json"), "utf8"));
+  for (const mode of ["dark", "light"]) {
+    for (const pattern of ["", "diamonds", "dots"]) {
+      const css = ENGINE[mode] + "body{background:var(--lumiverse-bg-deep)}#drawer{background:var(--lumiverse-bg)}";
+      await inTab(browser, { css, saved: { enabled: true, panelPattern: pattern } }, async (page) => {
+        for (const label of ["Prompt", "Context", "Model", "Limits", "Log", "Setup"]) {
+          await goTab(page, label);
+          const m = await worstText(page);
+          ok(mode + ", " + (pattern || "no pattern") + ": " + label + " is readable", m.ok, "worst " + m.worst.toFixed(2) + " on " + m.where);
+        }
+      });
+    }
+  }
+}
+
+console.log("\nhow much it is told");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Context");
+    const there = await page.evaluate(() => ({
+      msgs: !!document.querySelector('#drawer [data-arf-field="contextMessages"]'),
+      hist: !!document.querySelector('#drawer [data-arf-field="maxHistoryTokens"]'),
+      lore: !!document.querySelector('#drawer [data-arf-field="maxLoreTokens"]'),
+    }));
+    ok("both token budgets are there beside the message count", there.msgs && there.hist && there.lore);
+
+    await page.evaluate(() => {
+      const b = document.querySelector('#drawer [data-arf-field="maxLoreTokens"]');
+      b.value = "800";
+      b.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    const sent = await page.evaluate(() => {
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last.settings;
+    });
+    ok("and reach the backend", sent.maxLoreTokens === 800);
+  });
+}
+
+console.log("\na switch and the rows that hang off it");
+{
+  // A row that hangs off a switch has to go when the switch does, on the spot.
+  // Two things have to hold for that: the row is drawn only while the switch is
+  // on, and flipping the switch repaints. Miss either and the panel only tells
+  // the truth after you leave the tab and come back. This drives the switch and
+  // reads the panel without leaving it.
+  //
+  // Nothing here waits for the rebuild that follows a switch. A row arriving has
+  // to be right in the frame after the tap, because the whole point of doing it
+  // in place is that nobody is waiting on a rebuild. A row leaving closes over
+  // a few frames on purpose, so that one waits out the close and no more.
+  const there = (page, key) => onScreen(page, key);
+  const flip = async (page, key) => {
+    await page.evaluate((k) => {
+      document.querySelector('[data-arf-field="' + k + '"]').click();
+    }, key);
+    await settle(page);
+  };
+
+  await inTab(browser, { saved: { widgetOn: true } }, async (page) => {
+    await goTab(page, "Setup");
+    ok("the row is there while the switch above it is on", await there(page, "widgetSize"));
+    await flip(page, "widgetOn");
+    await closed(page);
+    ok("switching it off closes the row away", !(await there(page, "widgetSize")));
+    await flip(page, "widgetOn");
+    ok("and switching it back on brings it back on the spot", await there(page, "widgetSize"));
+    // The switch itself has to survive its own repaint, or a second tap lands
+    // on a box that was never redrawn.
+    const state = await page.evaluate(
+      () => document.querySelector('[data-arf-field="widgetOn"]').checked,
+    );
+    ok("the switch is left reading the way it was set", state === true);
+  });
+}
+
+console.log("\na pick that rebuilds the card still moves its rows");
+{
+  // Picking a Decision connection or what to refine rebuilds the card, since
+  // names in the rows around it change. A row that comes or goes with the pick
+  // still has to fade in and fold away like every other row, and not appear
+  // or vanish in one frame. Here that is the line saying a connection has no
+  // key. Checked at a phone width and a laptop width.
+  const LIST = [
+    { id: "dc-1", name: "Quick checks", provider: "openrouter", model: "~typesafe/jev-latest", isDefault: true, hasKey: true },
+    { id: "dc-2", name: "Slow checks", provider: "typesafe", model: "jev-1.14.0", isDefault: false, hasKey: false },
+  ];
+  const pickConnection = (page, id) =>
+    page.evaluate((v) => {
+      const s = document.querySelector('#drawer [data-arf-field="judgeConnection"]');
+      s.value = v;
+      s.dispatchEvent(new Event("change", { bubbles: true }));
+    }, id);
+  const problemRow = (page) =>
+    page.evaluate(() => {
+      const row = document.querySelector('#drawer [data-arf-hangs="decision problem"]');
+      return {
+        there: !!row,
+        hidden: !!row && row.hidden,
+        arriving: !!row && !!row._arfUnfold,
+        folding: !!row && !row.hidden && !!row.style.height,
+      };
+    });
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    const errors = await inTab(browser, { viewport, touch, saved: { judgeMode: "two", judgeConnection: "dc-1" } }, async (page) => {
+      await goTab(page, "Model");
+      await page.evaluate((list) => window.__fromBackend({ type: "decision_connections", list, state: "ok" }), LIST);
+      await closed(page);
+      ok(label + ": the problem line starts hidden", (await problemRow(page)).hidden, JSON.stringify(await problemRow(page)));
+      await pickConnection(page, "dc-2");
+      await settle(page);
+      await settle(page);
+      const shown = await problemRow(page);
+      ok(label + ": picking a connection with no key opens the line", shown.there && !shown.hidden && shown.arriving, JSON.stringify(shown));
+      await closed(page);
+      await pickConnection(page, "dc-1");
+      await settle(page);
+      await settle(page);
+      const going = await problemRow(page);
+      ok(label + ": picking one with a key folds it away", going.folding, JSON.stringify(going));
+      await closed(page);
+      const gone = await problemRow(page);
+      ok(label + ": and then it is hidden", gone.hidden, JSON.stringify(gone));
+    });
+    ok(label + ": no console errors", !errors || !errors.length, JSON.stringify(errors));
+  }
+}
+
+console.log("\nyour own messages are held up by their own prompt");
+{
+  // Your messages and your draft are refined with the prompt for your
+  // messages. Whether the floating button is ready, with only your messages
+  // refined, depends on that prompt having {{message}}, not on the one for
+  // replies. Checked both ways round, at a phone width and a laptop width.
+  const NO_TURN = [{ id: "a", name: "No turn", on: true, role: "system", text: "cut filler" }];
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const [which, saved, ready] of [
+      ["only the replies prompt is missing it", { blocks: NO_TURN }, true],
+      ["only the prompt for your messages is missing it", { userBlocks: NO_TURN }, false],
+    ]) {
+      await inTab(browser, { viewport, touch, saved: { widgetOn: true, enabled: true, refineSide: "mine", ...saved } }, async (page) => {
+        const out = await page.evaluate(async () => {
+          history.pushState({}, "", "/chat/c1");
+          for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+          await new Promise((r) => setTimeout(r, 400));
+          const b = document.querySelector("#float .arf-float");
+          const idle = b.classList.contains("arf-idle");
+          const title = b.getAttribute("title");
+          const mineBtn = document.querySelector("#drawer [data-arf-mine]");
+          window.__sent.length = 0;
+          b.click();
+          await new Promise((r) => setTimeout(r, 100));
+          return {
+            idle,
+            title,
+            panelButtonOff: !!mineBtn && mineBtn.disabled,
+            sent: window.__sent.filter((m) => m && m.type === "refine_now" && m.mine === true).length,
+          };
+        });
+        const what = label + ", only your messages refined, " + which;
+        if (ready) {
+          ok(what + ": the floating button is ready", !out.idle, JSON.stringify(out));
+          ok(what + ": the panel button is not grayed out", !out.panelButtonOff, JSON.stringify(out));
+          ok(what + ": a tap refines your latest message", out.sent === 1, JSON.stringify(out));
+        } else {
+          ok(what + ": the floating button says why it is not ready", out.idle && /prompt for your messages/.test(out.title), JSON.stringify(out));
+          ok(what + ": the panel button is grayed out", out.panelButtonOff, JSON.stringify(out));
+          ok(what + ": a tap sends nothing", out.sent === 0, JSON.stringify(out));
+        }
+      });
+    }
+  }
+}
+
+console.log("\nopening a fold");
+{
+  // The rows inside are already worked out, so opening one shows them without
+  // repainting the whole drawer. A teardown and rebuild here is a flash.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const before = await page.evaluate(() => {
+      const head = Array.from(document.querySelectorAll("#drawer .arf-fold"))[0];
+      if (!head) return null;
+      head.__mark = "the fold";
+      const card = head.closest(".arf-card");
+      card.__mark = "the card";
+      const body = head.nextElementSibling;
+      return { shut: !!body.hidden, expanded: head.getAttribute("aria-expanded") };
+    });
+    ok("a fold starts shut", before && before.shut && before.expanded === "false");
+
+    await page.evaluate(() => document.querySelectorAll("#drawer .arf-fold")[0].click());
+    const now = await page.evaluate(() => {
+      const head = document.querySelectorAll("#drawer .arf-fold")[0];
+      return {
+        open: !head.nextElementSibling.hidden,
+        expanded: head.getAttribute("aria-expanded"),
+        sameHead: head.__mark === "the fold",
+        sameCard: head.closest(".arf-card").__mark === "the card",
+      };
+    });
+    ok("clicking it opens the body", now.open && now.expanded === "true");
+    ok("without rebuilding the fold", now.sameHead);
+    ok("or the card around it", now.sameCard);
+
+    await page.evaluate(() => document.querySelectorAll("#drawer .arf-fold")[0].click());
+    // It closes over a moment, so it is looked at once that is over.
+    await closed(page);
+    const shut = await page.evaluate(() => {
+      const head = document.querySelectorAll("#drawer .arf-fold")[0];
+      return { shut: !!head.nextElementSibling.hidden, sameHead: head.__mark === "the fold" };
+    });
+    ok("and shutting it is the same one closing", shut.shut && shut.sameHead);
+  });
+}
+
+console.log("\nthe working, read as prose");
+{
+  // What comes back while the model is writing has had the tags taken off by
+  // the backend already. What comes back at the end is everything outside
+  // <REFINED>, which is the same working with its own tags still round it. Both
+  // read as prose on the card, and neither reads as markup.
+  const RAW =
+    "<REFINE_NOTES>\nThe second line could sit in any story.\n<plan>Cut the simile.</plan>\n</REFINE_NOTES>";
+  await inTab(browser, {}, async (page) => {
+    await page.evaluate((raw) => {
+      window.__fromBackend({ type: "refine_notes", chatId: "c1", messageId: "m1", notes: raw });
+    }, RAW);
+    await goTab(page, "Log");
+    const kept = () => page.evaluate(() => document.querySelector("[data-arf-kept]").textContent);
+    const clean = await kept();
+    ok("the Log shows no tags", !/[<>]/.test(clean), clean);
+    ok("and reads as the working alone", /could sit in any story/.test(clean) && /Cut the simile/.test(clean));
+    ok("with no blank left behind where a tag was", !/\n\n\n/.test(clean), JSON.stringify(clean));
+    ok(
+      "and no switch on the card offering to put them back",
+      await page.evaluate(() => !document.querySelector('#drawer [data-arf-field="notesTags"]')),
+    );
+  });
+
+  // A model that leaves the working's closing tag off, which is what a call cut
+  // short looks like. Everything after the opening tag is the working, and
+  // showing it is better than showing nothing.
+  await inTab(browser, {}, async (page) => {
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "refine_notes",
+        chatId: "c1",
+        messageId: "m1",
+        notes: "<REFINE_NOTES>\nThe simile is doing no work.",
+      });
+    });
+    await goTab(page, "Log");
+    const cut = await page.evaluate(() => document.querySelector("[data-arf-kept]").textContent);
+    ok("working with no closing tag still reads", /simile is doing no work/.test(cut) && !/[<>]/.test(cut), cut);
+  });
+
+  // A prompt that asks for no working still gets an answer. The rewrite in it
+  // is on the card, so it is never shown as the model's notes. Its words
+  // outside the rewrite are, since they can be the only place it says why.
+  await inTab(browser, { saved: { blocks: [{ id: "rules", name: "Only rules", on: true, role: "system", text: "cut filler {{message}}" }] } }, async (page) => {
+    await page.evaluate(() => {
+      window.__fromBackend({
+        type: "refined",
+        chatId: "c1",
+        messageId: "m1",
+        canUndo: true,
+        before: "She let out a breath she did not know she was holding.",
+        after: "She breathed out and turned away.",
+      });
+      window.__fromBackend({
+        type: "refine_notes",
+        chatId: "c1",
+        messageId: "m1",
+        notes: "Here you go.\n<REFINED>\nShe breathed out and turned away.\n</REFINED>",
+      });
+    });
+    await goTab(page, "Log");
+    const said = await page.evaluate(() => {
+      const well = document.querySelector("[data-arf-kept]");
+      return {
+        well: well ? well.textContent : null,
+        card: document.querySelector('[data-arf-card="What the model said outside the rewrite"]').textContent,
+      };
+    });
+    ok("the rewrite is not kept as the model's notes", !/turned away/.test(String(said.well)), String(said.well));
+    ok("but its words outside the rewrite are", /Here you go/.test(String(said.well)), String(said.well));
+  });
+
+  // Handed back unchanged by a prompt that asks for no working. The reason is
+  // written outside the rewrite, and the line saying so points at where it is.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { blocks: [{ id: "rules", name: "Only rules", on: true, role: "system", text: "cut filler {{message}}" }] } }, async (page) => {
+      await page.evaluate(() => {
+        window.__fromBackend({
+          type: "refine_skipped",
+          chatId: "c1",
+          messageId: "m1",
+          same: true,
+          why: "the model handed it back unchanged and said why. Its words are on the Log tab, under What the model said outside the rewrite",
+          notes: "The stars around this line are the character's own emphasis, so I left it.\n<REFINED>*Run,* he said.</REFINED>",
+        });
+      });
+      await goTab(page, "Log");
+      const out = await page.evaluate(() => {
+        const well = document.querySelector("#drawer [data-arf-kept]");
+        return { well: well ? well.textContent : null, sideways: document.documentElement.scrollWidth > innerWidth + 1 };
+      });
+      ok(label + ": a passage handed back unchanged shows the model's reason in the Log",
+        /character's own emphasis/.test(String(out.well)) && !/he said/.test(String(out.well)), JSON.stringify(out));
+      ok(label + ": and nothing runs off the side", !out.sideways, "");
+    });
+  }
+}
+
+console.log("\nthe working the Log keeps");
+{
+  const notes = "The second line could sit in any story. Cutting the simile.";
+  const feed = (page, m) => page.evaluate((x) => window.__fromBackend(x), m);
+  const working = (page) =>
+    feed(page, { type: "refine_progress", stage: "writing", chars: 40, notes: notes });
+  const kept = (page) =>
+    page.evaluate(() => {
+      const card = document.querySelector('#drawer [data-arf-card="What the model said outside the rewrite"]');
+      return card ? card.textContent : "";
+    });
+
+  // A refine that finished leaves its working where it can be read afterwards,
+  // since the card that lands on screen covers the one that was showing it.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    ok("nothing kept before a refine", !/could sit in any story/.test(await kept(page)));
+    await working(page);
+    await feed(page, {
+      type: "refined",
+      chatId: "c1",
+      messageId: "m1",
+      canUndo: true,
+      before: "a",
+      after: "b",
+    });
+    await settle(page);
+    ok("a refine that finished leaves its working in the Log", /could sit in any story/.test(await kept(page)));
+    ok("said to be from a refine that was saved", /saved/.test(await kept(page)));
+
+    // Working runs long and a drawer is narrow, so it opens at the size of the
+    // screen the same way the request preview does.
+    const opened = await page.evaluate(() => {
+      const card = document.querySelector('#drawer [data-arf-card="What the model said outside the rewrite"]');
+      const big = [...card.querySelectorAll("button")].find((b) => b.textContent.trim() === "Expand");
+      if (!big) return { there: false };
+      big.click();
+      // It opens into a textarea, so the text is its value and not its content.
+      const ta = document.querySelector("textarea.arf-bigta");
+      return { there: true, shown: !!ta && /could sit in any story/.test(ta.value) };
+    });
+    ok("the working has an Expand of its own", opened.there, JSON.stringify(opened));
+    ok("and it opens carrying the working", opened.shown, JSON.stringify(opened));
+  });
+
+  // Changing your mind is not a finished refine, so it takes nothing away.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await working(page);
+    await feed(page, {
+      type: "refined",
+      chatId: "c1",
+      messageId: "m1",
+      canUndo: false,
+      before: "a",
+      after: "b",
+    });
+    await settle(page);
+    ok("one refine's working is kept", /could sit in any story/.test(await kept(page)));
+
+    await feed(page, {
+      type: "refine_progress",
+      stage: "writing",
+      chars: 5,
+      notes: "Halfway through a thought",
+    });
+    await feed(page, { type: "refine_stopped", stopped: true });
+    await settle(page);
+    const after = await kept(page);
+    ok("stopping the next one leaves it alone", /could sit in any story/.test(after));
+    ok("and does not keep what it had half written", !/Halfway through a thought/.test(after));
+  });
+
+  // A rewrite the checks threw out still finished, and its working is the most
+  // useful thing on the panel for working out why.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await working(page);
+    await feed(page, {
+      type: "refine_skipped",
+      chatId: "c1",
+      messageId: "m1",
+      why: "the rewrite grew by half",
+      notes: notes,
+    });
+    await settle(page);
+    const said = await kept(page);
+    ok("a dropped rewrite keeps its working too", /could sit in any story/.test(said));
+    ok("and says what happened to it", /grew by half/.test(said));
+  });
+
+  // The card's name is long. On a phone it wraps beside its pill rather than
+  // running under it or off the side.
+  for (const [label, viewport, touch] of [["phone", { width: 360, height: 740 }, true], ["laptop", { width: 1280, height: 860 }, false]]) {
+    await inTab(browser, { viewport, touch }, async (page) => {
+      await goTab(page, "Log");
+      await working(page);
+      await feed(page, { type: "refined", chatId: "c1", messageId: "m1", canUndo: true, before: "a", after: "b" });
+      await settle(page);
+      const fit = await page.evaluate(() => {
+        const card = document.querySelector('#drawer [data-arf-card="What the model said outside the rewrite"]');
+        if (!card) return null;
+        const name = card.querySelector(".arf-cardh .arf-grow").getBoundingClientRect();
+        const pill = card.querySelector(".arf-cardh .arf-pill").getBoundingClientRect();
+        const box = card.getBoundingClientRect();
+        const apart = name.right <= pill.left + 0.5 || name.bottom <= pill.top + 0.5;
+        return { apart, inside: pill.right <= box.right + 0.5 && name.left >= box.left - 0.5, sideways: document.documentElement.scrollWidth > window.innerWidth + 1 };
+      });
+      ok(label + ": the card's name and its pill do not overlap", !!fit && fit.apart, fit);
+      ok(label + ": both stay inside the card, with no sideways scroll", !!fit && fit.inside && !fit.sideways, fit);
+    });
+  }
+}
+
+console.log("\nthe card is handed over, never swapped");
+{
+  // Counting what is on the page cannot catch this: the swap happens inside one
+  // task, so there is never a frame with two cards in it. What reads as a
+  // second card is a new element fading up from nothing where the old one was,
+  // at a different height, with the dim behind it restarting its own fade. So
+  // what is measured is whether the card survived.
+  //
+  // The automatic pass lands one reply after another, which is where this
+  // happens: a card for the second refine replacing the card for the first.
+  await inTab(browser, {}, async (page) => {
+    const out = await page.evaluate(async () => {
+      const card = () => document.querySelector("[data-arf-pop]");
+      // The fade's length, then until it has finished. A busy machine can run
+      // the fade late, and reading it partway says nothing about a swap.
+      const rest = async () => {
+        await new Promise((r) => setTimeout(r, 450));
+        for (let i = 0; i < 30 && card() && getComputedStyle(card()).opacity !== "1"; i++)
+          await new Promise((r) => setTimeout(r, 50));
+      };
+      const read = () => {
+        const c = card();
+        if (!c) return { gone: true };
+        return {
+          same: c.__id === "A",
+          lit: Math.round(getComputedStyle(c).opacity * 100),
+          dims: document.querySelectorAll(".arf-shade").length,
+        };
+      };
+      const land = (id, before, after) =>
+        window.__fromBackend({ type: "refined", chatId: "c1", messageId: id, canUndo: true, before, after });
+      const steps = {};
+      land("m1", "She let out a breath she did not know she was holding, then turned.", "She breathed out.");
+      card().__id = "A";
+      await rest();
+      steps.first = read();
+      land("m2", "A different sentence entirely, rather longer than the last one was.", "Shorter.");
+      steps.second = read();
+      await rest();
+      steps.settled = read();
+      land("m3", "And a third, shorter.", "Third.");
+      steps.third = read();
+      await rest();
+      return steps;
+    });
+    const kept = (r) => r && !r.gone && r.same && r.lit === 100 && r.dims === 1;
+    ok("the first refine opens the card", kept(out.first), JSON.stringify(out.first));
+    ok("the next one fills the same card", kept(out.second), JSON.stringify(out.second));
+    ok("and it settles as the same card", kept(out.settled), JSON.stringify(out.settled));
+    ok("and so does the one after that", kept(out.third), JSON.stringify(out.third));
+  });
+}
+
+console.log("\nnever two things on the screen at once");
+{
+  // Ending a refine leaves the card showing the working standing for one frame,
+  // so the card saying what the refine did can fill the same box rather than a
+  // second one arriving beside it. One ending fills nothing: a refine waiting on
+  // your yes hands the screen to the host's own question instead, and waiting a
+  // frame there had the question painted on top of the working card. Two cards
+  // at once, which is one popping up under another.
+  const NOTES = Array.from({ length: 14 }, (_, i) => "line " + i + " of the working").join("\n");
+  const worst = async (page, msgs) =>
+    page.evaluate(async (list) => {
+      const look = () => ({
+        cards: document.querySelectorAll("[data-arf-pop]").length,
+        dims: document.querySelectorAll(".arf-shade").length,
+        host: document.getElementById("hostmodal") ? 1 : 0,
+      });
+      let cards = 0;
+      let dims = 0;
+      let both = 0;
+      const take = () => {
+        const n = look();
+        cards = Math.max(cards, n.cards);
+        dims = Math.max(dims, n.dims);
+        if (n.cards && n.host) both = 1;
+      };
+      for (const m of list) {
+        if (m.__wait) {
+          for (let i = 0; i < m.__wait; i++) {
+            await new Promise((r) => requestAnimationFrame(r));
+            take();
+          }
+          continue;
+        }
+        window.__fromBackend(m);
+        take();
+      }
+      for (let i = 0; i < 12; i++) {
+        await new Promise((r) => requestAnimationFrame(r));
+        take();
+      }
+      return { cards, dims, both };
+    }, msgs);
+
+  const prog = { type: "refine_progress", stage: "writing", chars: 40, notes: NOTES };
+  const landed = {
+    type: "refined",
+    chatId: "c1",
+    messageId: "m1",
+    canUndo: true,
+    before: "She let out a breath she did not know she was holding, then turned away.",
+    after: "She breathed out and turned away.",
+  };
+  const wait = { __wait: 14 };
+  const one = (got) => got.cards <= 1 && got.dims <= 1 && !got.both;
+
+  await inTab(browser, {}, async (page) => {
+    ok("working, then it lands", one(await worst(page, [prog, wait, landed])), JSON.stringify(await worst(page, [])));
+    ok("a second refine over the card the first left", one(await worst(page, [prog, wait, landed])));
+    ok("two back to back with no gap at all", one(await worst(page, [prog, landed, prog, landed])));
+    ok(
+      "one that is stopped, then one that lands",
+      one(await worst(page, [prog, wait, { type: "refine_stopped", stopped: true }, prog, wait, landed])),
+    );
+  });
+
+  await inTab(browser, { saved: { confirmBeforeSave: true } }, async (page) => {
+    const got = await worst(page, [
+      prog,
+      wait,
+      {
+        type: "confirm_refine",
+        chatId: "c1",
+        messageId: "m1",
+        before: "a long line that was there before",
+        after: "short now",
+      },
+    ]);
+    ok("a refine waiting on your yes never shows two", one(got), JSON.stringify(got));
+    // The tab is open here, so the question is the Waiting for you card in
+    // it, and nothing is left on the page over it.
+    ok("and the question is the one in the tab, with nothing over it",
+      await page.evaluate(() => !document.getElementById("hostmodal") && !document.querySelector(".arf-pop:not(.arf-leaving)") && /Waiting for you/.test(document.querySelector("#drawer").textContent)));
+  });
+}
+
+console.log("\nno card while it is working");
+{
+  // The working never goes on the page. A card of its own would have to be
+  // handed over or taken down depending on how the refine ended, which is four
+  // endings each with its own way to leave a card behind.
+  // keeps says whether that ending is a refine that finished. A stop is not, so
+  // it leaves the Log holding whatever the last finished one worked out, which
+  // here is nothing.
+  const endings = [
+    { what: "stopped", keeps: false, msg: { type: "refine_stopped", stopped: true } },
+    {
+      what: "dropped by a check",
+      keeps: true,
+      msg: { type: "refine_skipped", why: "the rewrite grew by half" },
+    },
+    {
+      what: "saved with nothing to put back",
+      keeps: true,
+      msg: { type: "refined", chatId: "c1", messageId: "m1", canUndo: false },
+    },
+  ];
+  for (const one of endings) {
+    await inTab(browser, {}, async (page) => {
+      const up = await page.evaluate(() => {
+        window.__fromBackend({
+          type: "refine_progress",
+          stage: "writing",
+          chars: 40,
+          notes: "<REFINE_NOTES>The second line could sit in any story.</REFINE_NOTES>",
+        });
+        return document.querySelectorAll("[data-arf-pop],.arf-shade").length;
+      });
+      ok(one.what + ": nothing is on screen while it works", up === 0, String(up));
+      await page.evaluate((m) => window.__fromBackend(m), one.msg);
+      await settle(page);
+      const after = await page.evaluate(
+        () => document.querySelectorAll("[data-arf-pop],.arf-shade").length,
+      );
+      ok(one.what + ": and nothing is left behind by the ending", after === 0, String(after));
+      await goTab(page, "Log");
+      const kept = await page.evaluate(() => {
+        const well = document.querySelector("[data-arf-kept]");
+        return well ? well.textContent : null;
+      });
+      if (one.keeps)
+        ok(one.what + ": the working is in the Log", /could sit in any story/.test(kept || ""), String(kept));
+      else
+        ok(one.what + ": nothing is kept, since it never finished", kept === null, String(kept));
+    });
+  }
+}
+
+console.log("\nswitching without the panel jumping");
+{
+  // A switch that rebuilds the panel takes its own knob down with it, so the
+  // slide never runs, and the page lands wherever the rebuild left it. Both
+  // read as the panel flinching under the finger. The Prompt tab is where it
+  // was worst: the whole prompt is there, several boxes of it, and graying one
+  // block out was tearing all of it down.
+  await inTab(browser, { viewport: { width: 420, height: 520 } }, async (page) => {
+    await goTab(page, "Prompt");
+    const before = await page.evaluate(() => {
+      // Marks that only survive if the nodes do.
+      const boxes = document.querySelectorAll("#drawer .arf-block textarea");
+      for (let i = 0; i < boxes.length; i++) boxes[i].__mark = i;
+      const sw = document.querySelector("#drawer .arf-block .arf-box");
+      sw.__mark = "the switch";
+      const head = Array.from(document.querySelectorAll("#drawer .arf-cardh")).find((h) =>
+        / on$/.test(h.textContent.trim()),
+      );
+      window.scrollTo(0, 180);
+      return { at: window.scrollY, count: head && head.textContent.trim() };
+    });
+    ok("there is enough prompt to scroll past", before.at > 0);
+
+    await page.evaluate(() => document.querySelector("#drawer .arf-block .arf-box").click());
+    await settle(page);
+    const now = await page.evaluate(() => {
+      const sw = document.querySelector("#drawer .arf-block .arf-box");
+      const ta = document.querySelector("#drawer .arf-block textarea");
+      return {
+        at: window.scrollY,
+        sameSwitch: sw.__mark === "the switch",
+        sameText: ta.__mark === 0,
+        hushed: /arf-hushed/.test(sw.closest(".arf-block").className),
+        off: !sw.checked,
+      };
+    });
+    ok("the switch is the same one, so its knob has something to slide", now.sameSwitch);
+    ok("the prompt boxes are left standing", now.sameText);
+    ok("the block grays out on the spot", now.off && now.hushed);
+    ok("and the page has not moved", now.at === before.at, before.at + " -> " + now.at);
+
+    // The count on the card, the warning about {{message}} and the header all
+    // catch up, and none of it is a rebuild: the boxes of prompt are the
+    // tallest thing on the tab, and tearing them down to change a count was
+    // the flicker.
+    const at = await page.evaluate(() => {
+      const head = Array.from(document.querySelectorAll("#drawer .arf-cardh")).find((h) =>
+        / on$/.test(h.textContent.trim()),
+      );
+      return head && head.textContent.trim();
+    });
+    ok("the card catches up with what is on, at once", at !== before.count, before.count + " -> " + at);
+
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 500)));
+    const after = await page.evaluate(() => {
+      const ta = document.querySelector("#drawer .arf-block textarea");
+      return { rebuilt: ta.__mark === undefined, at: window.scrollY, count: (Array.from(document.querySelectorAll("#drawer .arf-cardh")).find((h) => / on$/.test(h.textContent.trim())) || {}).textContent };
+    });
+    ok("and the boxes of prompt are never rebuilt for it", !after.rebuilt);
+    ok("the count stays right after everything has settled", (after.count || "").trim() === at);
+    ok("and it lands where you were reading", after.at === before.at, before.at + " -> " + after.at);
+  });
+
+  // The same for a switch with rows hanging off it: the row arrives without the
+  // panel being built again around it.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-field="widgetOn"]').__mark = "the switch";
+    });
+    await page.evaluate(() => {
+      document.querySelector('#drawer [data-arf-field="widgetOn"]').click();
+    });
+    const kept = await page.evaluate(
+      () => document.querySelector('#drawer [data-arf-field="widgetOn"]').__mark === "the switch",
+    );
+    ok("the switch survives its own row appearing", kept);
+    ok("and the row is there in the same frame", await onScreen(page, "widgetSize"));
+  });
+
+  // The address is watched on a timer and the backend is asked where we are
+  // whenever the two disagree. Most of those answers say what the last one
+  // said, and rebuilding for one of them lands in the middle of whatever
+  // somebody was reading, which is the other half of a panel that jumps on its
+  // own.
+  await inTab(browser, {}, async (page) => {
+    const answer = () =>
+      page.evaluate(() => {
+        const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+        window.__fromBackend({
+          type: "active_chat",
+          requestId: id,
+          chatId: "c1",
+          character: "Ada",
+          hasCharacter: true,
+          resolved: true,
+          found: true,
+        });
+      });
+    await answer();
+    await settle(page);
+    await answer();
+    await settle(page);
+    await page.evaluate(() => {
+      document.querySelector("#drawer .arf-tabs").__mark = "the tabs";
+    });
+    await answer();
+    await settle(page);
+    const kept = await page.evaluate(
+      () => document.querySelector("#drawer .arf-tabs").__mark === "the tabs",
+    );
+    ok("an answer saying what the last one said rebuilds nothing", kept);
+  });
+}
+
+console.log("\nwalking back into a chat");
+{
+  // Tapping a character opens a chat, and on some builds nothing says so. A
+  // watch that stops the moment there is no chat to lose track of would leave
+  // the panel on "No chat open" until a reply happened to arrive.
+  const answer = async (page, chatId) => {
+    await page.evaluate((id) => {
+      const req = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat",
+        requestId: req,
+        chatId: id,
+        character: id ? "Wren" : null,
+        hasCharacter: !!id,
+        resolved: true,
+      });
+    }, chatId);
+    await settle(page);
+  };
+  const asked = (page) =>
+    page.evaluate(() => window.__sent.filter((m) => m.type === "active_chat").length);
+  const saysNoChat = (page) =>
+    page.evaluate(() => document.querySelector("#drawer").textContent.indexOf("No chat") >= 0);
+  // Not in any chat by name, which is what "did it take a guess for a chat"
+  // asks. Saying no chat is open is a different claim and has its own check.
+  const noneNamed = (page) =>
+    page.evaluate(() => !/You are in .*'s chat/.test(document.querySelector("#drawer").textContent));
+  // The watch reads the address on a timer, so these have to wait for a tick.
+  const tick = (page) => page.evaluate(() => new Promise((r) => setTimeout(r, 1600)));
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    await answer(page, null);
+    ok("the home screen says no chat is open", await saysNoChat(page));
+
+    const before = await asked(page);
+    await page.evaluate(() => history.pushState({}, "", "/chat/abcdef123456"));
+    await tick(page);
+    ok("an address that becomes a chat's is asked about", (await asked(page)) > before);
+
+    await answer(page, "abcdef123456");
+    ok("and the panel stops saying no chat is open", !(await saysNoChat(page)));
+    ok(
+      "and names the chat it is in",
+      await page.evaluate(
+        () => document.querySelector("#drawer").textContent.indexOf("You are in Wren's chat") >= 0,
+      ),
+    );
+
+    // Walking out again, with the backend still naming the chat just left.
+    // That one answer is the reason the address is read at all.
+    await page.evaluate(() => history.pushState({}, "", "/"));
+    await tick(page);
+    await answer(page, "abcdef123456");
+    ok("walking out reads as no chat, whatever the backend says", await saysNoChat(page));
+  });
+
+  // Tapping a character on Lumiverse does not open a chat, it makes one, and
+  // that is the only way in. For a moment afterwards the server does not call
+  // the new chat the active one, so a question of "which chat is open" comes
+  // back "none" while you are plainly sitting in one, so an id the host has
+  // named is not thrown away on that answer.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    await answer(page, null);
+
+    await page.evaluate(() => history.pushState({}, "", "/chat/madejustnow99"));
+    await page.evaluate(() => {
+      for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "madejustnow99" });
+    });
+    await settle(page);
+    const ask = await page.evaluate(() => {
+      const m = window.__sent.filter((x) => x.type === "active_chat").pop();
+      return m ? m.chatId : null;
+    });
+    ok("a chat the host named is asked about by name", ask === "madejustnow99", "asked about " + ask);
+
+    // The server, still behind. This is the answer that must not undo it.
+    await answer(page, null);
+    ok("and an answer about no active chat does not undo it", !(await saysNoChat(page)));
+  });
+
+  // And the harder shape of the same thing, which is what was actually
+  // happening: nothing announces the new chat at all, and the server is behind,
+  // so the only thing that knows is the address. Reading the id out of it needs
+  // to know where in an address an id sits, which is learned from a chat we
+  // were sure about rather than assumed from the shape of a Lumiverse URL.
+  const reply = async (page, body) => {
+    await page.evaluate((b) => {
+      const m = window.__sent.filter((x) => x.type === "active_chat").pop();
+      window.__fromBackend(Object.assign({ type: "active_chat", requestId: m.requestId }, b));
+    }, body);
+    await settle(page);
+  };
+  const askedAbout = (page) =>
+    page.evaluate(() => {
+      const m = window.__sent.filter((x) => x.type === "active_chat").pop();
+      return m ? m.chatId : undefined;
+    });
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    // In a chat, with its id in the address. This is the moment the slot is
+    // learned, and the only moment it can be.
+    await page.evaluate(() => history.pushState({}, "", "/chat/oldchat00001"));
+    await reply(page, {
+      chatId: "oldchat00001", character: "Wren", hasCharacter: true, resolved: true, found: true,
+    });
+    await tick(page);
+
+    // Out to the home screen.
+    await page.evaluate(() => history.pushState({}, "", "/"));
+    await tick(page);
+    await reply(page, { chatId: null, resolved: true, found: false });
+    ok("out on the home screen, no chat is open", await saysNoChat(page));
+
+    // Tap a character. The chat is made. No event, and the server has not
+    // caught up.
+    await page.evaluate(() => history.pushState({}, "", "/chat/madejustnow01"));
+    await tick(page);
+    ok(
+      "the id in the address is what gets asked about",
+      (await askedAbout(page)) === "madejustnow01",
+      "asked about " + (await askedAbout(page)),
+    );
+    // An id the backend cannot find a chat under is not a chat.
+    await reply(page, { chatId: "madejustnow01", resolved: true, found: false });
+    ok("an id that names no chat is not taken for one", await noneNamed(page));
+    // But it stops claiming there is no chat, because the address says there is.
+    ok("and it stops saying no chat is open", !(await saysNoChat(page)));
+
+    // The server catches up. Nothing navigates, nothing reloads.
+    await tick(page);
+    await reply(page, {
+      chatId: "madejustnow01", character: "Wren", hasCharacter: true, resolved: true, found: true,
+    });
+    ok(
+      "and it lands in the chat once the server agrees it exists",
+      await page.evaluate(
+        () => document.querySelector("#drawer").textContent.indexOf("You are in Wren's chat") >= 0,
+      ),
+    );
+  });
+
+  // ---- and the same question asked the moment the panel is built ----
+  // Pressing Update in the extensions panel tears the panel down and sets it up
+  // again in place, with no reload. It comes back knowing nothing: no chat, and
+  // nothing walked out of. Asked which chat is open, the backend answers with
+  // the account's most recent one, which on the home screen is the chat you
+  // were in before the update.
+  const rebuild = (page, url) =>
+    page.evaluate((u) => {
+      try { window.__teardown && window.__teardown(); } catch (_) {}
+      document.getElementById("drawer").innerHTML = "";
+      history.pushState({}, "", u);
+      window.__sent = [];
+      window.__handlers = {};
+      window.__teardown = window.__setup({
+        events: {
+          on: (n, f) => {
+            (window.__handlers[n] = window.__handlers[n] || []).push(f);
+            return () => {};
+          },
+        },
+        ui: {
+          registerDrawerTab: () => ({
+            root: document.getElementById("drawer"),
+            setBadge: () => {}, activate: () => {}, destroy: () => {},
+          }),
+          registerInputBarAction: () => ({ onClick: () => () => {}, destroy: () => {} }),
+        },
+        dom: { addStyle: () => () => {}, inject: () => {}, cleanup: () => {} },
+        storage: { get: async () => null, set: async () => {} },
+        sendToBackend: (m) => window.__sent.push(m),
+        onBackendMessage: (cb) => { window.__fromBackend = cb; return () => {}; },
+      });
+    }, url);
+  // Every question outstanding, answered the same way. The panel asks more than
+  // once on purpose after a rebuild, and answering only the last one would
+  // leave the earlier ones hanging.
+  const answerAll = (page, body) =>
+    page.evaluate((b) => {
+      const asks = window.__sent.filter((x) => x.type === "active_chat");
+      for (const one of asks)
+        window.__fromBackend(Object.assign({ type: "active_chat", requestId: one.requestId }, b));
+      return asks.length;
+    }, body);
+  const readyToRefine = (page) =>
+    page.evaluate(
+      () => document.querySelector("#drawer").textContent.indexOf("waiting for you to press") >= 0,
+    );
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    // A chat first, so the address has taught the panel where an id sits. That
+    // is remembered in this browser, which is why it survives the rebuild.
+    await page.evaluate(() => history.pushState({}, "", "/chat/oldchat00001"));
+    await reply(page, {
+      chatId: "oldchat00001", character: "Wren", hasCharacter: true, resolved: true, found: true,
+    });
+    await tick(page);
+
+    await rebuild(page, "/");
+    await settle(page);
+    await answerAll(page, {
+      chatId: "oldchat00001", character: "Wren", hasCharacter: true, resolved: true, found: true,
+    });
+    await settle(page);
+    ok("rebuilt on the home screen, the last chat is not taken for this one",
+      await saysNoChat(page));
+    ok("and it does not offer to refine there", !(await readyToRefine(page)));
+  });
+
+  // The other way round, on a build whose addresses name no chats: the backend
+  // has just restarted with the panel and does not know yet. One answer of
+  // "nobody is in a chat" cannot be the last word, or the panel sits on it in a
+  // chat somebody is reading.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    await rebuild(page, "/");
+    await settle(page);
+    await answerAll(page, { chatId: null, resolved: true, found: false });
+    await settle(page);
+    ok("a backend still starting up says no chat, and is believed for now",
+      await saysNoChat(page));
+
+    // It comes up, and is asked again without anybody navigating.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 6500)));
+    const asks = await page.evaluate(
+      () => window.__sent.filter((x) => x.type === "active_chat").length);
+    ok("but it is asked again rather than taken as final", asks > 1, "asked " + asks);
+    await answerAll(page, {
+      chatId: "warmchat00001", character: "Wren", hasCharacter: true, resolved: true, found: true,
+    });
+    await settle(page);
+    ok("and the panel lands in the chat once it answers", !(await saysNoChat(page)));
+  });
+}
+
+console.log("\nthe live line while a refine is running");
+{
+  // The clock writes the status line four times a second, and a repaint builds
+  // it from nothing. They worked it out separately and disagreed: the clock
+  // wrote "Thinking, 12s" and a repaint wrote "Refining a reply", so switching
+  // tabs mid-refine threw the line back to the flat wording and the count
+  // started again, which reads as the thing stopping.
+  const line = (page) =>
+    page.evaluate(() => {
+      const dot = document.querySelector("#drawer .arf-dot");
+      return dot && dot.parentElement ? dot.parentElement.textContent.trim() : "";
+    });
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+      window.__fromBackend({
+        type: "active_chat", requestId: id, chatId: "c1",
+        character: "Wren", hasCharacter: true, resolved: true,
+      });
+    });
+    await settle(page);
+    // A refine, thinking.
+    await page.evaluate(() => {
+      for (const f of window.__handlers.GENERATION_ENDED || []) f({ chatId: "c1", messageId: "m2" });
+    });
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "refine_progress", stage: "thinking" });
+    });
+    await settle(page);
+    const running = await line(page);
+    ok("it says what the refine is doing", /think/i.test(running), "line read " + JSON.stringify(running));
+
+    await goTab(page, "Setup");
+    const after = await line(page);
+    ok(
+      "and goes on saying it after a tab switch",
+      /think/i.test(after),
+      "line read " + JSON.stringify(after),
+    );
+    ok(
+      "with the clock where it was, not back at nothing",
+      after.replace(/\d+s/, "") === running.replace(/\d+s/, ""),
+      JSON.stringify(running) + " became " + JSON.stringify(after),
+    );
+    // The second model reading the rewrite, and the refine that can follow
+    // it, each named.
+    await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "rechecking" }));
+    await settle(page);
+    const rereading = await line(page);
+    ok("the second model reading the rewrite is named", /The second model is reading the rewrite/.test(rereading), JSON.stringify(rereading));
+    await page.evaluate(() => window.__fromBackend({ type: "refine_progress", stage: "again" }));
+    await settle(page);
+    const again = await line(page);
+    ok("and so is the refine after it", /Refining once more/.test(again), JSON.stringify(again));
+  });
+}
+
+console.log("\nhow long to wait");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Model");
+    const box = await page.evaluate(() => {
+      const el = document.querySelector('[data-arf-field="timeoutSecs"]');
+      return el ? { min: el.min, max: el.max } : null;
+    });
+    // A reasoning model on a high effort level can think for a long time, so
+    // ten minutes is not the ceiling and there has to be a way to switch the
+    // wait off entirely.
+    ok("the wait goes up to an hour", box && Number(box.max) >= 3600, JSON.stringify(box));
+    ok("and down to nought, which is off", box && Number(box.min) === 0, JSON.stringify(box));
+
+    await page.evaluate(() => {
+      const el = document.querySelector('[data-arf-field="timeoutSecs"]');
+      el.value = "0";
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("blur", { bubbles: true }));
+    });
+    await settle(page);
+    const sent = await page.evaluate(() => {
+      const m = window.__sent.filter((x) => x.type === "set_settings").pop();
+      return m ? m.settings.timeoutSecs : "(nothing sent)";
+    });
+    ok("switching it off reaches the backend as nought", sent === 0, "sent " + sent);
+  });
+}
+
+console.log("\nreading the request at full size");
+{
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Context");
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-preview="build"]').click());
+    await page.evaluate(() => {
+      const id = window.__sent.filter((m) => m.type === "preview_prompt").pop().requestId;
+      window.__fromBackend({
+        type: "prompt_preview",
+        requestId: id,
+        ok: true,
+        real: true,
+        messages: [{ role: "system", content: "the whole instruction, at length" }],
+        parameters: null,
+        connectionId: "",
+        reasoning: { source: "off" },
+      });
+    });
+    await settle(page);
+    await page.evaluate(() => {
+      const card = Array.from(document.querySelectorAll("#drawer .arf-card")).find((c) =>
+        /See what gets sent/.test(c.textContent),
+      );
+      Array.from(card.querySelectorAll("button"))
+        .find((b) => b.textContent.trim() === "Expand")
+        .click();
+    });
+    await settle(page);
+    const view = await page.evaluate(() => {
+      const over = document.querySelector(".arf-over");
+      const ta = over && over.querySelector("textarea");
+      const labels = Array.from(over.querySelectorAll("button")).map((b) => b.textContent.trim());
+      return {
+        text: ta ? ta.value : "",
+        readOnly: ta ? ta.readOnly : false,
+        noCaret: (() => { const c = ta ? getComputedStyle(ta).caretColor : ""; return c === "transparent" || /^rgba\(\d+, \d+, \d+, 0\)$/.test(c) ? true : c; })(),
+        labels: labels,
+      };
+    });
+    ok("the preview opens at full size", /the whole instruction, at length/.test(view.text));
+    ok("as something to read rather than edit", view.readOnly, view.labels.join(","));
+    ok("and with no typing cursor in it", view.noCaret === true, JSON.stringify(view.noCaret));
+    ok("with Copy and Close, and no Done", view.labels.indexOf("Done") < 0 && view.labels.indexOf("Close") >= 0);
+
+    // It fades in and the card slides up a little. With less motion asked
+    // for, it appears at once.
+    const moves = async () => {
+      await page.evaluate(() => {
+        const over = document.querySelector(".arf-over:not(.arf-leaving)");
+        const close = over && Array.from(over.querySelectorAll("button")).find((b) => b.textContent.trim() === "Close");
+        if (close) close.click();
+        const card = Array.from(document.querySelectorAll("#drawer .arf-card")).find((c) =>
+          /See what gets sent/.test(c.textContent),
+        );
+        Array.from(card.querySelectorAll("button"))
+          .find((b) => b.textContent.trim() === "Expand")
+          .click();
+      });
+      return page.evaluate(() => {
+        const over = document.querySelector(".arf-over:not(.arf-leaving)");
+        const box = over && over.querySelector(".arf-bigbox");
+        return {
+          dim: over ? getComputedStyle(over).animationName : "",
+          box: box ? getComputedStyle(box).animationName : "",
+          running: over ? over.getAnimations({ subtree: true }).length : 0,
+        };
+      });
+    };
+    const normal = await moves();
+    ok("the full-size view fades in, with the card sliding up a little", normal.dim === "arf-fade-in" && normal.box === "arf-card-in", JSON.stringify(normal));
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const still = await moves();
+    ok("with less motion asked for, it just appears", still.dim === "none" && still.box === "none" && still.running === 0, JSON.stringify(still));
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+  });
+}
+
+
+console.log("\nrefining the draft from the panel");
+{
+  // The draft is the third thing a refine can be pointed at, and it stands with
+  // the other two above the tabs on the same terms: its own setting puts it
+  // there, rather than leaving it to a menu or a row inside Extras.
+  await inTab(browser, {}, async (page) => {
+    // Built either way and hidden while the switch is off, the same as every
+    // other row that hangs off one, so what is asked is whether it is on the
+    // panel rather than whether the element exists.
+    ok("no draft button until the setting asks for it",
+      await page.evaluate(() => {
+        const b = document.querySelector('#drawer [data-arf-draft]');
+        return !b || b.offsetParent === null;
+      }));
+  });
+
+  await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+    ok("the draft button stands with the other two", !!(await page.$('#drawer [data-arf-draft]')));
+    const order = await page.evaluate(() =>
+      [...document.querySelectorAll("#drawer button")]
+        .map((b) => b.textContent.trim())
+        .filter((t) => /^Refine /.test(t)));
+    // Asserted as an order rather than as positions, so a button added between
+    // two of these does not read as the order being wrong when it is not. What
+    // matters is the reading: the latest reply first because it is what most
+    // people came for, the whole chat beside it, the part you selected under
+    // the two, and your own writing in its own group after the replies.
+    const where = (t) => order.indexOf(t);
+    ok("in the order they are reached for",
+      where("Refine the latest reply") === 0 &&
+        where("Refine every reply here") > where("Refine the latest reply") &&
+        where("Refine the part I selected") > where("Refine every reply here") &&
+        where("Refine my latest message") > where("Refine the part I selected") &&
+        where("Refine what I am typing") === order.length - 1,
+      JSON.stringify(order));
+
+    // It reads the real box, the same one every other way in reads. A chat is
+    // open first, since the button waits for one like every button beside it.
+    await page.evaluate(() => (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" })));
+    await settle(page);
+    await page.evaluate(() => window.__makeComposer("i walk through it, suddenly"));
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-draft]').click());
+    await settle(page);
+    const asked = await page.evaluate(() => {
+      const m = window.__sent.filter((x) => x.type === "try_refine").pop();
+      return m && { text: m.text, id: m.requestId };
+    });
+    ok("pressing it sends the draft",
+      asked && /i walk through it/.test(asked.text), asked);
+    // The panel says a refine is running from the moment it is sent, the same
+    // as it does for a reply: the three buttons give way to Stop. A draft
+    // refine is a stoppable run on the backend, so the offer is a real one.
+    const running = await page.evaluate(() => ({
+      stop: !!document.querySelector("#drawer [data-arf-stop]"),
+      gone: !document.querySelector("#drawer [data-arf-draft]"),
+      dot: !!document.querySelector("#drawer .arf-dot.arf-busy"),
+    }));
+    ok("the panel says it is running from the moment it is sent",
+      running.stop && running.gone, running);
+    ok("with the live dot turning, which is what the widget follows",
+      running.dot, running);
+
+    // A refine that takes longer than the backend watchdog. The backend says it
+    // has the request, then reports progress, and a progress message is proof
+    // it is answering, so that message has to clear the watchdog rather than
+    // arm it. Armed by it, a draft refine slower than five seconds reports a
+    // backend that is not installed.
+    await page.evaluate((id) => {
+      window.__fromBackend({ type: "refine_ack", requestId: id });
+      window.__fromBackend({ type: "refine_progress", stage: "asking" });
+    }, asked.id);
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 6000)));
+    // The complaint would arrive as a toast and as a line in the Log, so both
+    // are read: a check that looked at only one of them passed with the fault
+    // still in place.
+    const cried = await page.evaluate(async () => {
+      const tabs = [...document.querySelectorAll("#drawer .arf-tab, #drawer [role=tab]")];
+      const log = tabs.find((t) => (t.textContent || "").trim() === "Log");
+      if (log) log.click();
+      await new Promise((r) => requestAnimationFrame(r));
+      return {
+        toasts: (window.__toasts || []).map((t) => (t && t.text) || String(t)).join(" | "),
+        panel: document.querySelector("#drawer").textContent,
+      };
+    });
+    ok("a slow draft refine is not called a missing backend",
+      cried.toasts.indexOf("not answering") < 0 && cried.panel.indexOf("fully installed") < 0,
+      cried.toasts.slice(0, 160));
+
+    // And when it lands, the same card the replies get.
+    await page.evaluate((id) => {
+      window.__fromBackend({ type: "try_result", requestId: id, ok: true,
+                            after: "I walk through it." });
+    }, asked.id);
+    await settle(page);
+    const card = await page.evaluate(() => {
+      const el = document.querySelector("[data-arf-pop]");
+      return el && { text: el.textContent, back: !!el.querySelector("[data-arf-pop-undo]") };
+    });
+    ok("a card comes up saying what changed", !!card && /What changed/.test(card.text), card);
+    ok("titled for the draft rather than for a reply",
+      !!card && /Your draft, refined/.test(card.text), card && card.text.slice(0, 60));
+    ok("with a way back on it", !!card && card.back);
+
+    // The way back writes the old draft into the box, since a draft was never
+    // saved anywhere for the backend to hold.
+    await page.evaluate(() => document.querySelector("[data-arf-pop-undo]").click());
+    await settle(page);
+    ok("which puts the draft back as it was",
+      await page.evaluate(() =>
+        document.querySelector('[data-component="InputArea"] textarea').value
+          === "i walk through it, suddenly"),
+      await page.evaluate(() =>
+        document.querySelector('[data-component="InputArea"] textarea').value));
+    await page.waitForTimeout(400);
+    ok("and closes the card", !(await page.$("[data-arf-pop]")) && !(await page.$(".arf-pop")));
+  });
+
+  // ---- and its working reaches the Log, the same as a reply's ----
+  // The backend sends the working on the draft's answer as well as on a
+  // reply's. It was read off the progress messages and then dropped here, so
+  // the draft was the one kind of refine whose working never reached the Log.
+  const WORKING = "<REFINE_NOTES>\nThe simile is doing no work. Cutting it.\n</REFINE_NOTES>";
+  const draftRun = async (page, answer) => {
+    await page.evaluate(() => window.__makeComposer("i walk through it, suddenly"));
+    // The button waits for a chat, like every button beside it.
+    await page.evaluate(() => (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" })));
+    await settle(page);
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-draft]').click());
+    await settle(page);
+    const id = await page.evaluate(
+      () => window.__sent.filter((x) => x.type === "try_refine").pop().requestId);
+    await page.evaluate((a) => {
+      window.__fromBackend({ type: "refine_ack", requestId: a.id });
+      window.__fromBackend({ type: "refine_progress", stage: "asking" });
+      window.__fromBackend(Object.assign({ type: "try_result", requestId: a.id }, a.body));
+    }, { id: id, body: answer });
+    await settle(page);
+  };
+  const kept = (page) =>
+    page.evaluate(() => {
+      const w = document.querySelector("[data-arf-kept]");
+      const card = w && w.closest(".arf-card");
+      return w && { text: w.textContent, said: card ? card.textContent : "" };
+    });
+
+  await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+    await draftRun(page, { ok: true, after: "I walk through it.", notes: WORKING });
+    await goTab(page, "Log");
+    const got = await kept(page);
+    ok("a draft refine's working lands under What the model said outside the rewrite",
+      !!got && /simile is doing no work/.test(got.text), got);
+    ok("read as prose, with its tags off, the same as a reply's",
+      !!got && !/[<>]/.test(got.text), got && got.text);
+    ok("and the card says which refine it came from",
+      !!got && /From the refine of your draft at/.test(got.said),
+      got && got.said.slice(0, 90));
+  });
+
+  // The working is worth most on the refine that was refused, so it is kept
+  // whether the rewrite was saved or not.
+  await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+    await draftRun(page, { ok: false, why: "it read as a refusal", notes: WORKING });
+    await goTab(page, "Log");
+    const got = await kept(page);
+    ok("a draft refine that was turned down still keeps its working",
+      !!got && /simile is doing no work/.test(got.text), got);
+    ok("and says the rewrite was dropped, with the reason",
+      !!got && /whose rewrite was dropped: it read as a refusal/.test(got.said),
+      got && got.said.slice(0, 120));
+  });
+
+  // A reply refine keeps saying it was a reply, so the two are told apart.
+  await inTab(browser, {}, async (page) => {
+    await page.evaluate((w) => {
+      window.__fromBackend({ type: "refine_notes", chatId: "c1", messageId: "m1", notes: w });
+    }, WORKING);
+    await goTab(page, "Log");
+    const got = await kept(page);
+    ok("a reply's working says it came from a reply",
+      !!got && /From the refine of a reply at/.test(got.said), got && got.said.slice(0, 90));
+  });
+}
+
+
+console.log("\nthe button and its menu do not say the same thing twice");
+{
+  // A tap refines the latest reply. Everything else the button can do is behind
+  // a hold, and nothing behind the hold repeats the tap: a second way to reach
+  // something already in reach costs a line in a menu that has to be read on a
+  // phone.
+  const openMenu = async (page) => {
+    await page.evaluate(() => {
+      document.querySelector("#float .arf-float").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle(page);
+    return page.evaluate(() => ((window.__menu || {}).items || []).map((i) => i.key));
+  };
+  const landOne = (page) =>
+    page.evaluate(() => {
+      window.__fromBackend({
+        type: "refined", chatId: "c1", messageId: "m1", canUndo: true,
+        before: "She let out a breath she did not know she was holding.",
+        after: "She breathed out.",
+      });
+    });
+
+  // A tap refines and only refines, so everything else the button can do is in
+  // the menu behind it, and nothing in there repeats the tap.
+  await inTab(browser, { saved: { widgetOn: true } }, async (page) => {
+    await landOne(page);
+    await settle(page);
+    const keys = await openMenu(page);
+    ok("the way back is in the menu", keys.indexOf("undo") >= 0, keys.join(","));
+    ok("and refining the latest reply is not, since that is the tap",
+      keys.indexOf("now") < 0, keys.join(","));
+    ok("while refining the whole chat is, since no tap does that",
+      keys.indexOf("all") >= 0, keys.join(","));
+  });
+
+  // The face of the button. A refine that has landed used to turn it into an
+  // arrow, which put a control nobody asked for over the chat and took the
+  // extension's own mark off the screen.
+  await inTab(browser, { saved: { widgetOn: true } }, async (page) => {
+    await landOne(page);
+    await settle(page);
+    const face = await page.evaluate(() => {
+      const b = document.querySelector("#float .arf-float");
+      const eye = b.querySelector(".arf-eye");
+      return { eye: eye ? eye.getAttribute("class") : null, title: b.title };
+    });
+    ok("a refine that has landed leaves the button as it was",
+      !!face.eye && /arf-eye-shut/.test(face.eye), face);
+    ok("and a tap still says it refines", /Refine the latest reply/.test(face.title), face.title);
+  });
+}
+
+
+console.log("\nthe widget, while your draft is being refined");
+{
+  // The button follows the same running state the panel does. Turned on by the
+  // backend's first progress message and turned off by nothing, it would begin
+  // turning as the answer arrived and go on for a minute and a half after it
+  // landed.
+  const face = (page) =>
+    page.evaluate(() => {
+      const b = document.querySelector("#float .arf-float");
+      const eye = b && b.querySelector(".arf-eye");
+      return b && {
+        working: b.classList.contains("arf-working"),
+        eye: eye ? eye.getAttribute("class") : null,
+        title: b.title,
+      };
+    });
+
+  await inTab(
+    browser,
+    { saved: { inputRefine: true, widgetOn: true } },
+    async (page) => {
+      await page.evaluate(() => window.__makeComposer("i walk through it, suddenly"));
+      ok("the button is not turning before anything is asked",
+        !(await face(page)).working);
+
+      // The button waits for a chat, like every button beside it.
+      await page.evaluate(() => (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" })));
+      await settle(page);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-draft]').click());
+      await settle(page);
+      const mid = await face(page);
+      ok("it turns from the moment the draft is sent, not when the answer lands",
+        mid.working && /arf-eye-read/.test(mid.eye || ""), mid);
+      ok("and says a tap would stop it", /stop it/i.test(mid.title), mid.title);
+
+      const id = await page.evaluate(
+        () => window.__sent.filter((x) => x.type === "try_refine").pop().requestId);
+      await page.evaluate((i) => {
+        window.__fromBackend({ type: "refine_ack", requestId: i });
+        window.__fromBackend({ type: "refine_progress", stage: "asking" });
+      }, id);
+      await settle(page);
+      ok("still turning while the model works", (await face(page)).working);
+
+      await page.evaluate((i) => {
+        window.__fromBackend({ type: "try_result", requestId: i, ok: true,
+                              after: "I walk through it." });
+      }, id);
+      await settle(page);
+      const done = await face(page);
+      ok("and stops the moment the answer lands", !done.working, done);
+
+      // The button goes back to its own mark rather than becoming an arrow.
+      // The way back is in the menu behind it. A refine ending blinks the eye
+      // before shutting it, so this waits that out: mid-blink is still the eye,
+      // and settling shut is the thing worth holding it to.
+      ok("the eye is still the mark the moment the refine lands",
+        /arf-eye-(done|shut)/.test(done.eye || ""), done.eye);
+      await page.evaluate(() => new Promise((r) => setTimeout(r, 1100)));
+      const rested = await face(page);
+      ok("and it shuts again rather than becoming another mark",
+        /arf-eye-shut/.test(rested.eye || ""), rested.eye);
+      ok("and stops offering to put anything back",
+        !/put the last refine back/i.test(done.title), done.title);
+
+      const keys = await page.evaluate(() => {
+        document.querySelector("#float .arf-float").dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+        return ((window.__menu || {}).items || []).map((i) => i.key);
+      });
+      ok("while the menu offers the draft back", keys.indexOf("undo") >= 0, keys.join(","));
+      await page.evaluate(() => {
+        window.__menuPick = "undo";
+        document.querySelector("#float .arf-float").dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+      });
+      await settle(page);
+      ok("and taking it puts your draft back",
+        await page.evaluate(() =>
+          document.querySelector('[data-component="InputArea"] textarea').value
+            === "i walk through it, suddenly"));
+    },
+  );
+
+  // Typing over the refine is newer writing than the refine it would undo, so
+  // the way back stands down rather than throwing it away.
+  await inTab(
+    browser,
+    { saved: { inputRefine: true, widgetOn: true } },
+    async (page) => {
+      await page.evaluate(() => window.__makeComposer("i walk through it, suddenly"));
+      // The button waits for a chat, like every button beside it.
+      await page.evaluate(() => (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" })));
+      await settle(page);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-draft]').click());
+      await settle(page);
+      const id = await page.evaluate(
+        () => window.__sent.filter((x) => x.type === "try_refine").pop().requestId);
+      await page.evaluate((i) => {
+        window.__fromBackend({ type: "try_result", requestId: i, ok: true,
+                              after: "I walk through it." });
+      }, id);
+      await settle(page);
+      const menuKeys = async () =>
+        page.evaluate(() => {
+          window.__menuPick = null;
+          document.querySelector("#float .arf-float").dispatchEvent(
+            new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+          );
+          return ((window.__menu || {}).items || []).map((i) => i.key);
+        });
+      ok("the way back is offered while the box still holds the rewrite",
+        (await menuKeys()).indexOf("undo") >= 0);
+
+      await page.evaluate(() => {
+        const box = document.querySelector('[data-component="InputArea"] textarea');
+        box.value = "I walk through it, and the cold hits me.";
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await settle(page);
+      ok("and goes once you have typed over it",
+        (await menuKeys()).indexOf("undo") < 0);
+    },
+  );
+}
+
+
+console.log("\nthe live line, for a draft as for a reply");
+{
+  // The Log's Right now line and the clock beside it are driven by the one
+  // running state. A draft refine reached that state late and left it set, so
+  // this walks the whole of one and watches the line the reader watches.
+  const line = (page) =>
+    page.evaluate(() => {
+      const dot = document.querySelector("#drawer .arf-dot");
+      return dot && dot.parentElement ? dot.parentElement.textContent.trim() : "";
+    });
+  const secs = (t) => {
+    const m = /(\d+)s/.exec(t || "");
+    return m ? Number(m[1]) : null;
+  };
+
+  await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+    await goTab(page, "Log");
+    await page.evaluate(() => window.__makeComposer("i walk through it, suddenly"));
+    const idle = await line(page);
+    ok("the line is not claiming a refine before one is asked for",
+      !/Refining|Thinking|Writing/.test(idle), idle);
+
+    // The button waits for a chat, like every button beside it.
+    await page.evaluate(() => (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" })));
+    await settle(page);
+    await page.evaluate(() => document.querySelector('#drawer [data-arf-draft]').click());
+    await settle(page);
+    ok("it says a refine is running the moment the draft is sent",
+      /Refining/.test(await line(page)), await line(page));
+
+    const id = await page.evaluate(
+      () => window.__sent.filter((x) => x.type === "try_refine").pop().requestId);
+
+    // The stages a draft goes through are the ones a reply goes through, and
+    // the line names each rather than saying busy for the whole of it.
+    await page.evaluate((i) => {
+      window.__fromBackend({ type: "refine_ack", requestId: i });
+      window.__fromBackend({ type: "refine_progress", stage: "thinking" });
+    }, id);
+    await settle(page);
+    ok("and names the stage as it changes", /Thinking/.test(await line(page)), await line(page));
+
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "refine_progress", stage: "writing", chars: 128 });
+    });
+    await settle(page);
+    const writing = await line(page);
+    ok("counting what has come back while it streams",
+      /Writing/.test(writing) && /128/.test(writing), writing);
+
+    // The clock is the part that has to move on its own. A line that has not
+    // changed in ten seconds reads exactly like a hang. Read once it has
+    // started, since it says nothing for the first second on purpose.
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 1300)));
+    const first = secs(await line(page));
+    await page.evaluate(() => new Promise((r) => setTimeout(r, 2200)));
+    const later = secs(await line(page));
+    ok("with a clock that climbs on its own",
+      first !== null && later !== null && later > first, first + " then " + later);
+
+    // Switching away and back must not restart the count, the same as a reply.
+    await goTab(page, "Prompt");
+    await goTab(page, "Log");
+    const back = secs(await line(page));
+    ok("and keeps the count across a tab switch", back !== null && back >= later, back);
+
+    await page.evaluate((i) => {
+      window.__fromBackend({ type: "try_result", requestId: i, ok: true,
+                            after: "I walk through it." });
+    }, id);
+    await settle(page);
+    const done = await line(page);
+    ok("and stops saying it is refining when the answer lands",
+      !/Refining|Thinking|Writing/.test(done), done);
+  });
+
+  // Two refines cannot run at once, because there is one running state between
+  // them: a second one ending would clear the line out from under the first
+  // while that one was still going.
+  await inTab(browser, { saved: { inputRefine: true, widgetOn: true } }, async (page) => {
+    await page.evaluate(() => window.__makeComposer("i walk through it, suddenly"));
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "active_chat", requestId:
+        window.__sent.filter((m) => m.type === "active_chat").pop().requestId,
+        chatId: "c1", character: "Wren", hasCharacter: true, resolved: true, found: true });
+    });
+    await settle(page);
+    // A reply refine, running.
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "refine_progress", stage: "writing", chars: 40 });
+    });
+    await settle(page);
+    ok("a reply refine is running", /Writing/.test(await line(page)), await line(page));
+
+    // The draft, asked for from the widget's menu, which stays reachable.
+    const before = await page.evaluate(
+      () => window.__sent.filter((x) => x.type === "try_refine").length);
+    await page.evaluate(() => {
+      window.__menuPick = "draft";
+      document.querySelector("#float .arf-float").dispatchEvent(
+        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+      );
+    });
+    await settle(page);
+    const after = await page.evaluate(
+      () => window.__sent.filter((x) => x.type === "try_refine").length);
+    ok("a draft refine is turned away while one is running", after === before, after);
+    ok("and the running one still says so", /Writing/.test(await line(page)), await line(page));
+  });
+}
+
+
+console.log("\nthe prompt on screen is the prompt that runs");
+{
+  // An untouched prompt is stored as nothing, so that a later change to the
+  // built-in one reaches anybody who never edited theirs. What was sent was that
+  // nothing, and the backend filled the gap with a copy of its own, which is
+  // shorter than the one the panel draws. So the blocks under Prompt were not
+  // the blocks that ran, on the install where somebody is most likely to be
+  // reading them.
+  const settingsSent = (page) =>
+    page.evaluate(() => {
+      const m = window.__sent.filter((x) => x.type === "set_settings").pop();
+      return m ? m.settings : null;
+    });
+  const shown = (page, which) =>
+    page.evaluate(async (w) => {
+      const tabs = [...document.querySelectorAll("#drawer .arf-tab, #drawer [role=tab]")];
+      const t = tabs.find((x) => (x.textContent || "").trim() === "Prompt");
+      if (t) t.click();
+      await new Promise((r) => requestAnimationFrame(r));
+      if (w === "yours") {
+        const pick = [...document.querySelectorAll("#drawer button, #drawer [role=tab]")]
+          .find((b) => /For your messages/.test(b.textContent || ""));
+        if (pick) pick.click();
+        await new Promise((r) => requestAnimationFrame(r));
+      }
+      return [...document.querySelectorAll("#drawer [data-arf-block]")].length;
+    }, which);
+
+  await inTab(browser, {}, async (page) => {
+    const sent = await settingsSent(page);
+    ok("a fresh install sends a prompt rather than nothing",
+      !!sent && Array.isArray(sent.blocks) && sent.blocks.length > 0,
+      sent && sent.blocks && sent.blocks.length);
+    ok("and a prompt for your own messages too",
+      !!sent && Array.isArray(sent.userBlocks) && sent.userBlocks.length > 0,
+      sent && sent.userBlocks && sent.userBlocks.length);
+    // The two are different prompts. Sending the reply one for both is the
+    // fault this is here to catch.
+    ok("and they are not the same prompt",
+      JSON.stringify(sent.blocks) !== JSON.stringify(sent.userBlocks));
+
+    // What is sent is what is drawn.
+    const drawn = await shown(page, "replies");
+    ok("as many blocks as the panel draws", sent.blocks.length === drawn,
+      sent.blocks.length + " sent, " + drawn + " drawn");
+  });
+
+  // A stored list holding nothing usable is a list of none. Counting it as some
+  // sent the backend a list it filtered down to nothing itself, and the two
+  // then fell back to different prompts.
+  await inTab(browser, { saved: { blocks: [{}, { name: "no id" }] } }, async (page) => {
+    const sent = await settingsSent(page);
+    ok("a stored prompt with nothing usable in it falls back like the panel does",
+      Array.isArray(sent.blocks) && sent.blocks.length > 1
+        && sent.blocks.every((b) => b && b.id),
+      sent.blocks);
+    const drawn = await shown(page, "replies");
+    ok("and the two still agree on how many blocks that is",
+      sent.blocks.length === drawn, sent.blocks.length + " sent, " + drawn + " drawn");
+  });
+
+  // Editing yours still sends yours.
+  await inTab(browser, { saved: { userBlocks: [
+    { id: "job", name: "Mine", on: true, role: "system", text: "Leave my hand alone. {{message}}" },
+  ] } }, async (page) => {
+    const sent = await settingsSent(page);
+    ok("a prompt you wrote is sent as you wrote it",
+      sent.userBlocks.length === 1 && /Leave my hand alone/.test(sent.userBlocks[0].text),
+      sent.userBlocks);
+  });
+}
+
+
+console.log("\nlists with headings on them");
+{
+  // A dropdown of the built-in prompts and however many of your own is a
+  // column nobody reads. A heading is a real optgroup rather than an entry that
+  // does nothing: the browser draws it grayed and refuses to select it, which
+  // is what makes it a heading.
+  const shape = (page, field) =>
+    page.evaluate((f) => {
+      const sel = document.querySelector('#drawer [data-arf-field="' + f + '"]');
+      if (!sel) return null;
+      return {
+        heads: [...sel.querySelectorAll("optgroup")].map((g) => g.label),
+        loose: [...sel.children].filter((c) => c.tagName === "OPTION").map((o) => o.textContent),
+        under: [...sel.querySelectorAll("optgroup")].map((g) => ({
+          head: g.label,
+          items: [...g.children].map((o) => o.textContent),
+        })),
+        all: [...sel.querySelectorAll("option")].length,
+      };
+    }, field);
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const got = await shape(page, "presetPick");
+    // One heading, for the list being edited. Each built-in preset carries one
+    // prompt and not the other, so offering both invited loading the one that
+    // changes the prompt you are not looking at.
+    ok("the presets are under a heading", got.heads.length === 1, got && got.heads);
+    ok("naming the list being edited", got.heads[0] === "For replies", got.heads);
+    ok("with its two under it", got.under.every((g) => g.items.length === 2), got.under);
+    // The heading says which prompt it is for, so the entry does not repeat it.
+    ok("and the entries under them do not repeat the heading",
+      got.under.every((g) => g.items.every((t) => !/your writing/i.test(t))), got.under);
+    ok("with only the placeholder left loose", got.loose.length === 1, got.loose);
+
+    // A heading cannot be chosen, which is the whole reason to use one rather
+    // than an entry that looks like a heading and does nothing when tapped.
+    const picked = await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      const head = sel.querySelector("optgroup").label;
+      const before = sel.value;
+      sel.value = head;
+      const after = sel.value;
+      sel.value = before;
+      return { head: head, took: after === head, options: [...sel.options].map((o) => o.text) };
+    });
+    ok("because a heading is not something that can be chosen", !picked.took, picked.head);
+    ok("and is not one of the entries either",
+      picked.options.indexOf(picked.head) < 0, picked.head);
+  });
+
+  // Saving one of your own puts it under a heading of its own rather than in
+  // among the built-in ones.
+  await inTab(browser, { saved: { } }, async (page) => {
+    await goTab(page, "Prompt");
+    await page.evaluate(() => {
+      const name = document.querySelector('#drawer [data-arf-field="presetName"]');
+      name.value = "Mine";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="new"]').click();
+    });
+    await settle(page);
+    const got = await shape(page, "presetPick");
+    ok("your own go under a heading of their own", got.heads.indexOf("Yours") >= 0, got.heads);
+    ok("and not in among the ones built in",
+      (got.under.find((g) => g.head === "Yours") || {}).items.join() === "Mine", got.under);
+  });
+
+  // The connection picker groups by whoever serves the model, and only when
+  // there is more than one of them to tell apart.
+  const withConnections = async (page, list) => {
+    await page.evaluate((l) => {
+      window.__fromBackend({ type: "connections", list: l });
+    }, list);
+    await settle(page);
+    await goTab(page, "Model");
+  };
+
+  await inTab(browser, {}, async (page) => {
+    await withConnections(page, [
+      { id: "a1", name: "Fast", provider: "OpenAI", model: "gpt-4o", isDefault: false },
+      { id: "a2", name: "Careful", provider: "OpenAI", model: "o3", isDefault: false },
+      { id: "b1", name: "Local", provider: "Ollama", model: "qwen", isDefault: false },
+    ]);
+    const got = await shape(page, "connectionId");
+    ok("connections are grouped by provider",
+      got.heads.indexOf("OpenAI") >= 0 && got.heads.indexOf("Ollama") >= 0, got.heads);
+    ok("with two under the one that has two",
+      (got.under.find((g) => g.head === "OpenAI") || {}).items.length === 2, got.under);
+    ok("and the chat's own model left above the headings",
+      got.loose.length === 1 && /chatting with/.test(got.loose[0]), got.loose);
+  });
+
+  // One provider is one heading, which names nothing the list does not already
+  // say, so it is not drawn.
+  await inTab(browser, {}, async (page) => {
+    await withConnections(page, [
+      { id: "a1", name: "Fast", provider: "OpenAI", model: "gpt-4o", isDefault: false },
+      { id: "a2", name: "Careful", provider: "OpenAI", model: "o3", isDefault: false },
+    ]);
+    const got = await shape(page, "connectionId");
+    ok("one provider gets no heading at all", got.heads.length === 0, got.heads);
+    ok("and every connection is still there", got.all === 3, got.all);
+  });
+
+  // One connection is the one the chat uses, so it is one choice, named.
+  await inTab(browser, {}, async (page) => {
+    await withConnections(page, [
+      { id: "s1", name: "Shelf", provider: "OpenAI", model: "gpt-4o", isDefault: true },
+    ]);
+    const got = await shape(page, "connectionId");
+    ok("one connection: a single choice", got.all === 1, JSON.stringify(got));
+    ok("and it names the connection", got.loose.length === 1 && /chatting with \(Shelf\)/.test(got.loose[0]), got.loose);
+  });
+
+  // Picked by name before, it stays listed, so the box does not show nothing.
+  await inTab(browser, { saved: { connectionId: "s1" } }, async (page) => {
+    await withConnections(page, [
+      { id: "s1", name: "Shelf", provider: "OpenAI", model: "gpt-4o", isDefault: true },
+    ]);
+    const got = await shape(page, "connectionId");
+    const value = await page.evaluate(() => document.querySelector('#drawer [data-arf-field="connectionId"]').value);
+    ok("one connection picked by name is still listed and shown", got.all === 2 && value === "s1", JSON.stringify({ got, value }));
+  });
+}
+
+
+console.log("\nnothing is thrown away on one tap");
+{
+  // A block holds whatever you wrote in it and a preset holds a whole prompt.
+  // Neither comes back, so neither goes on a single press: the host is asked to
+  // put the question up, the same dialog the reset uses.
+  //
+  // The drawer is given a scroll box of its own here, which is the layout where
+  // the host's dialog costs nothing. Where the page carries the scroll instead
+  // the question is asked in the panel, and that is checked at the end of this
+  // block.
+  const BOXED = "#drawer{height:100vh;overflow-y:auto;box-sizing:border-box}";
+  const asked = (page) => page.evaluate(() => window.__confirms || []);
+  const blocks = (page) =>
+    page.evaluate(() => document.querySelectorAll("#drawer [data-arf-block]").length);
+
+  await inTab(browser, { css: BOXED }, async (page) => {
+    await goTab(page, "Prompt");
+    const had = await blocks(page);
+    await page.evaluate(() => {
+      window.__confirmSay = false;
+      document.querySelector('#drawer [data-arf-block] [aria-label^="Delete"]').click();
+    });
+    await settle(page);
+    const said = await asked(page);
+    ok("deleting a block asks first", said.length === 1, said);
+    ok("in the host's own dialog, named for what it is doing",
+      said[0] && /delete/i.test(said[0].title) && said[0].variant === "danger", said[0]);
+    ok("and says which block, since there are several",
+      said[0] && said[0].message.length > 20, said[0] && said[0].message);
+    ok("saying no keeps the block", (await blocks(page)) === had, { had: had });
+
+    const closing = await page.evaluate(async () => {
+      window.__confirmSay = true;
+      const block = document.querySelector("#drawer [data-arf-block]");
+      block.querySelector('[aria-label^="Delete"]').click();
+      // The answer comes back from the dialog a moment later.
+      await new Promise((r) => setTimeout(r, 0));
+      const tf = getComputedStyle(block).transitionTimingFunction;
+      const first = String(tf || "").split(",")[0].trim();
+      const named = { ease: [0.25, 0.1], "ease-in": [0.42, 0], "ease-out": [0, 0], "ease-in-out": [0.42, 0], linear: [0, 0] };
+      const m = /^cubic-bezier\(([^,]+),([^,]+)/.exec(String(tf || "").replace(/\s/g, ""));
+      const p = m ? [Number(m[1]), Number(m[2])] : named[first];
+      // A first control point along the time axis with no rise is a curve
+      // that starts at a standstill.
+      return { curve: tf, moving: /[1-9]/.test(getComputedStyle(block).transitionDuration), rest: !p || (p[0] > 0 && p[1] === 0) };
+    });
+    // Its space closes over a few frames, and starts on the first one. A
+    // curve that eases in holds still and then jumps, which on a phone reads
+    // as the block sticking.
+    ok("a deleted block's space closes, starting straight away", closing.moving && !closing.rest, JSON.stringify(closing));
+    // The block's space is let down before it goes, so this is past that.
+    await page.waitForTimeout(400);
+    await settle(page);
+    ok("and saying yes removes it", (await blocks(page)) === had - 1, { had: had });
+  });
+
+  // The same for a preset, which is a whole prompt rather than one block of it.
+  await inTab(browser, { css: BOXED }, async (page) => {
+    await goTab(page, "Prompt");
+    await page.evaluate(() => {
+      const n = document.querySelector('#drawer [data-arf-field="presetName"]');
+      n.value = "Mine";
+      n.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="new"]').click();
+    });
+    await settle(page);
+    const mine = () =>
+      page.evaluate(() =>
+        [...document.querySelectorAll('#drawer [data-arf-field="presetPick"] option')]
+          .some((o) => o.textContent === "Mine"));
+    ok("the preset is there to begin with", await mine());
+
+    await page.evaluate(() => {
+      window.__confirms = [];
+      window.__confirmSay = false;
+      document.querySelector('#drawer [data-arf-preset="delete"]').click();
+    });
+    await settle(page);
+    ok("deleting a preset asks first", (await asked(page)).length === 1);
+    ok("and saying no keeps it", await mine());
+
+    await page.evaluate(() => {
+      window.__confirmSay = true;
+      document.querySelector('#drawer [data-arf-preset="delete"]').click();
+    });
+    await settle(page);
+    ok("saying yes removes it", !(await mine()));
+  });
+
+  // A host with no dialog of its own is not a reason to delete on one tap. The
+  // button arms itself and says so, and the second press does it.
+  await inTab(browser, { css: BOXED, noConfirm: true }, async (page) => {
+    await goTab(page, "Prompt");
+    const had = await blocks(page);
+    await page.evaluate(() =>
+      document.querySelector('#drawer [data-arf-block] [aria-label^="Delete"]').click());
+    await settle(page);
+    ok("with no dialog to put up, one press deletes nothing",
+      (await blocks(page)) === had, { had: had });
+    ok("and it says what a second press would do",
+      await page.evaluate(() =>
+        (window.__toasts || []).some((t) => /press delete again/i.test((t && t.text) || String(t)))),
+      await page.evaluate(() => window.__toasts));
+
+    await page.evaluate(() =>
+      document.querySelector('#drawer [data-arf-block] [aria-label^="Delete"]').click());
+    await page.waitForTimeout(400);
+    await settle(page);
+    ok("and the second press does", (await blocks(page)) === had - 1, { had: had });
+  });
+
+  // Where the page carries the panel's scroll, the question is asked in the panel
+  // rather than in the host's dialog.
+  //
+  // A dialog stops the page behind it scrolling, and the way that is done is to
+  // stop the page scrolling at all, which sets its scroll to nought. So on that
+  // layout, and that is the phone, pressing Delete threw the reader from
+  // wherever they were to the top for as long as the question was up, and back
+  // again on the way out. Measured at 1476 pixels each way. Putting them back
+  // afterwards fixed half of it and the round trip was still a jump.
+  //
+  // The check above runs with the drawer scrolling inside itself, where a lock
+  // on the page changes nothing and the dialog costs nothing, which is exactly
+  // why this went unseen.
+  await inTab(
+    browser,
+    // The page as a host lays it out for a full-height drawer: the document is
+    // the fixed-height box and the drawer grows inside it, so the page is what
+    // carries the scroll. That is also what makes a body lock throw the scroll
+    // away rather than merely freeze it.
+    { css: "html,body{height:100%}#drawer{height:auto;overflow:visible}" },
+    async (page) => {
+    await goTab(page, "Prompt");
+    const where = await page.evaluate(async () => {
+      const page$ = document.scrollingElement || document.documentElement;
+      const b = document.querySelectorAll("#drawer [data-arf-block]")[3];
+      page$.scrollTop = b.getBoundingClientRect().top + page$.scrollTop - 300;
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const before = page$.scrollTop;
+      window.__confirms = [];
+      window.__confirmLocks = true;
+      window.__confirmSay = true;
+      document.querySelector('#drawer [data-arf-block] [aria-label^="Delete"]').click();
+      await new Promise((r) => setTimeout(r, 60));
+      const during = page$.scrollTop;
+      await new Promise((r) => setTimeout(r, 500));
+      return {
+        before: Math.round(before),
+        during: Math.round(during),
+        after: Math.round(page$.scrollTop),
+        confirms: (window.__confirms || []).length,
+        gone: document.querySelectorAll("#drawer [data-arf-block]").length,
+      };
+    });
+    ok(
+      "the page really was scrolled, or this check proves nothing",
+      where.before > 200,
+      JSON.stringify(where),
+    );
+    ok(
+      "nothing is thrown away, and nothing moved while it was asked",
+      Math.abs(where.after - where.before) < 8 && Math.abs(where.during - where.before) < 8,
+      JSON.stringify(where),
+    );
+    ok(
+      "and it asked in the panel rather than in a dialog",
+      where.confirms === 0,
+      JSON.stringify(where),
+    );
+  },
+  );
+}
+
+// ---- deleting the lowest block from the bottom of the list ----
+console.log("\nthe space a deleted block leaves");
+{
+  // A block removed makes the panel shorter by its own height, and a reader at
+  // the end of the list is then past the end of it, so the page is pulled back
+  // by exactly that much. Where the scroll is put cannot avoid it: the place
+  // they were looking at is not there any more. Measured before the space was
+  // let down, the panel moved 226 pixels between two frames while the block's
+  // own position in the panel did not change at all.
+  //
+  // The page is made the scroller here, since a panel in a box of its own has
+  // the same problem in the box.
+  await inTab(
+    browser,
+    { css: "html,body{height:100%}#drawer{height:auto;overflow:visible}", viewport: { width: 420, height: 800 } },
+    async (page) => {
+      await goTab(page, "Prompt");
+      const out = await page.evaluate(async () => {
+        const page$ = document.scrollingElement || document.documentElement;
+        const press = (n) => {
+          n.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+          n.click();
+        };
+        const bs = [...document.querySelectorAll("#drawer [data-arf-block]")];
+        const target = bs[bs.length - 1];
+        const aboveId = bs[bs.length - 2].getAttribute("data-arf-block");
+        const id = target.getAttribute("data-arf-block");
+        page$.scrollTop = page$.scrollHeight - page$.clientHeight;
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const tall = Math.round(target.getBoundingClientRect().height);
+        const seen = [];
+        let n = 0;
+        const tick = () => {
+          const a = document.querySelector('#drawer [data-arf-block="' + aboveId + '"]');
+          if (a) seen.push(Math.round(a.getBoundingClientRect().top));
+          if (++n < 60) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+        press([...target.querySelectorAll("button")].find((x) => x.textContent.trim() === "Delete"));
+        await new Promise((r) => setTimeout(r, 120));
+        const again = [...document.querySelectorAll('#drawer [data-arf-block="' + id + '"] button')]
+          .find((x) => x.textContent.trim() === "Delete");
+        if (again) press(again);
+        await new Promise((r) => setTimeout(r, 1400));
+        let worst = 0;
+        let moved = 0;
+        for (let i = 1; i < seen.length; i++) {
+          const step = Math.abs(seen[i] - seen[i - 1]);
+          worst = Math.max(worst, step);
+          moved += step;
+        }
+        return {
+          tall,
+          worst,
+          moved,
+          gone: !document.querySelector('#drawer [data-arf-block="' + id + '"]'),
+        };
+      });
+      ok("the block is gone", out.gone, JSON.stringify(out));
+      ok(
+        "and the panel really did have to move, or this check proves nothing",
+        out.moved > 100,
+        JSON.stringify(out),
+      );
+      ok(
+        "the space it leaves closes over several frames rather than one",
+        out.worst < out.tall / 3,
+        "worst step " + out.worst + " of a block " + out.tall + " tall",
+      );
+    },
+  );
+}
+
+// ---- a block's footer ----
+console.log("\na block's footer");
+{
+  // Delete sat under the row and the "holds the turn" pill stood between it and
+  // the role picker, which read as the pill being what the button belonged to.
+  await inTab(browser, { viewport: { width: 420, height: 900 } }, async (page) => {
+    await goTab(page, "Prompt");
+    const out = await page.evaluate(() => {
+      const rows = [];
+      for (const b of document.querySelectorAll("#drawer [data-arf-block]")) {
+        const del = [...b.querySelectorAll("button")].find((x) => x.textContent.trim() === "Delete");
+        const sel = b.querySelector("select");
+        if (!del || !sel) continue;
+        const pill = [...b.querySelectorAll(".arf-pill")].find((p) =>
+          /holds the turn/.test(p.textContent || ""),
+        );
+        const d = del.getBoundingClientRect();
+        const s = sel.getBoundingClientRect();
+        rows.push({
+          onTheRoleRow: Math.abs(d.top - s.top) < 8,
+          fromTheEdge: Math.round(b.getBoundingClientRect().right - d.right),
+          pillBelow: pill ? pill.getBoundingClientRect().top > s.bottom - 2 : null,
+        });
+      }
+      return rows;
+    });
+    ok("every block has a role picker and a Delete", out.length >= 8, out.length);
+    ok(
+      "Delete sits on the role row rather than under it",
+      out.every((r) => r.onTheRoleRow),
+      JSON.stringify(out.filter((r) => !r.onTheRoleRow).slice(0, 2)),
+    );
+    ok(
+      "and at the far edge of the block rather than up against the picker",
+      out.every((r) => r.fromTheEdge < 24),
+      JSON.stringify(out.map((r) => r.fromTheEdge).slice(0, 4)),
+    );
+    const marked = out.filter((r) => r.pillBelow !== null);
+    ok("one block is marked as holding the turn", marked.length === 1, marked.length);
+    ok("and that mark sits under the row, out of the way of both", marked.every((r) => r.pillBelow), JSON.stringify(marked));
+  });
+}
+
+// ---- a description fades and slides in ----
+console.log("\na description fades and slides in");
+{
+  // 4px from the row it belongs to, with the fade, the same as Auto Retry's.
+  // With Reduce motion on, it appears at once.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const reduceMotion of [false, true]) {
+      await inTab(browser, { viewport, touch, saved: { enabled: true, reduceMotion } }, async (page) => {
+        await goTab(page, "Limits");
+        await settle(page);
+        const q = page.locator("#drawer .arf-q").first();
+        await q.scrollIntoViewIfNeeded();
+        if (touch) await q.tap();
+        else await q.click();
+        const got = await page.evaluate(async () => {
+          const el = document.querySelector(".arf-hint[data-arf-open]");
+          if (!el) return null;
+          const moving = el.getAnimations().map((a) => a.transitionProperty).sort();
+          await new Promise((r) => setTimeout(r, 300));
+          return { moving, rest: getComputedStyle(el).transform, opacity: getComputedStyle(el).opacity };
+        });
+        if (!reduceMotion) ok(label + ": the description fades and slides", !!got && got.moving.join() === "opacity,transform", JSON.stringify(got));
+        else ok(label + ": with Reduce motion on, it appears at once", !!got && got.moving.length === 0, JSON.stringify(got));
+        ok(label + ": and comes to rest in its own place, fully shown", !!got && got.rest === "none" && got.opacity === "1", JSON.stringify(got));
+      });
+    }
+  }
+
+  // The slide follows the side it opens on. Over the row, it rises 4px into
+  // place as it fades in and sinks 4px as it fades out, so it moves away from
+  // the row and back. Under the row it is the other way round. With Reduce
+  // motion it does neither. At rest it is 6px from its row either way.
+  for (const [zoom, reduceMotion] of [[1, false], [1.25, false], [0.85, false], [1, true]]) {
+    await inTab(browser, { css: zoom === 1 ? "" : "body{zoom:" + zoom + "}", viewport: { width: 390, height: 900 }, touch: true, saved: { enabled: true, reduceMotion } }, async (page) => {
+      await goTab(page, "Limits");
+      await settle(page);
+      const got = await page.evaluate(async () => {
+        const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const ty = (n) => new DOMMatrix(getComputedStyle(n).transform).m42;
+        const q = document.querySelector("#drawer .arf-q");
+        const row = q.closest("[data-arf-row]");
+        const run = async () => {
+          await frame();
+          q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+          q.click();
+          const pop = document.querySelector('[role="tooltip"]');
+          if (!pop) return null;
+          await wait(40);
+          const opening = ty(pop);
+          await wait(220);
+          const tr = pop.getBoundingClientRect(), rr = row.getBoundingClientRect();
+          const above = tr.bottom <= rr.top + 1;
+          const gap = Math.round(above ? rr.top - tr.bottom : tr.top - rr.bottom);
+          pop.click();
+          await wait(60);
+          const closing = ty(pop);
+          await wait(300);
+          return { above, opening, gap, closing, gone: !pop.isConnected };
+        };
+        row.scrollIntoView({ block: "center" });
+        const over = await run();
+        // The drawer moved up until the row is 30px from the top of the
+        // screen, where there is no room above it.
+        const drawer = document.getElementById("drawer");
+        drawer.style.position = "relative";
+        // The move is written in CSS pixels and the row is read in screen
+        // pixels, which differ under a zoom.
+        const z = drawer.offsetWidth > 0 ? drawer.getBoundingClientRect().width / drawer.offsetWidth : 1;
+        drawer.style.top = Math.round(-(row.getBoundingClientRect().top - 30) / z) + "px";
+        if (row.getBoundingClientRect().top > 40) return { over, under: null, missed: Math.round(row.getBoundingClientRect().top) };
+        const under = await run();
+        return { over, under, rowTop: Math.round(row.getBoundingClientRect().top) };
+      });
+      const o = got && got.over, u = got && got.under;
+      const what = reduceMotion ? "with Reduce motion" : "with motion at zoom " + zoom;
+      if (!reduceMotion) {
+        ok(what + ": over the row, it rises into place as it fades in",
+          !!o && o.above && o.opening > 0.2 && o.opening < 4.01, JSON.stringify(got));
+        ok(what + ": and sinks back toward the row as it fades out", !!o && o.closing > 0.2, JSON.stringify(got));
+        ok(what + ": under the row, it drops into place and lifts back as it goes",
+          !!u && !u.above && u.opening < -0.2 && u.closing < -0.2, JSON.stringify(got));
+      } else {
+        ok("with Reduce motion it does not move at all",
+          !!o && !!u && o.opening === 0 && o.closing === 0 && u.opening === 0 && u.closing === 0, JSON.stringify(got));
+      }
+      ok(what + ": at rest it is 6px from its row, over it or under it",
+        !!o && !!u && Math.abs(o.gap - 6) <= 1 && Math.abs(u.gap - 6) <= 1, JSON.stringify(got));
+      ok(what + ": each one is gone after it fades", !!o && !!u && o.gone && u.gone, JSON.stringify(got));
+    });
+  }
+}
+
+// ---- teardown leaves the page as it found it ----
+console.log("\nteardown");
+{
+  // The panel hangs three things off the page rather than off its own root: the
+  // stylesheet, the card that comes up when a refine lands, and a setting's
+  // description. None of them goes when the drawer is emptied, so teardown is
+  // the only thing that can take them away, and an update in the extensions
+  // panel is a teardown and a fresh setup in place.
+  await inTab(browser, { viewport: { width: 420, height: 900 }, touch: true }, async (page) => {
+    await goTab(page, "Limits");
+    const left = await page.evaluate(async () => {
+      const frame = () =>
+        new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const q = document.querySelector("#drawer .arf-q");
+      q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      q.click();
+      await frame();
+      const opened = document.querySelectorAll(".arf-hint").length;
+      // Torn down with a description open and another one mid-fade, which is
+      // the state a timer is holding rather than a listener.
+      const q2 = [...document.querySelectorAll("#drawer .arf-q")][1];
+      q2.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      q2.click();
+      await frame();
+      window.__teardown();
+      // Read straight away rather than after the fade. Everything here is taken
+      // down by the teardown itself, and waiting out the fade would pass just as
+      // well on a teardown that left the work to a timer still running after it.
+      await frame();
+      return {
+        opened: opened,
+        hints: document.querySelectorAll(".arf-hint").length,
+        styles: document.querySelectorAll("style[data-arf-style]").length,
+        cards: document.querySelectorAll(".arf-pop, .arf-shade").length,
+      };
+    });
+    ok("a description was open when it was torn down", left.opened === 1, left);
+    ok("and nothing is left on the page after it", left.hints === 0, left);
+    ok("nor the stylesheet", left.styles === 0, left);
+    ok("nor a card over the chat", left.cards === 0, left);
+  });
+}
+
+// ---- saving a model setup, which is the preset card's twin ----
+console.log("\nmodel setups");
+{
+  // The presets card holds a whole prompt under a name; this one holds a
+  // connection, the thinking settings and the samplers under a name. They are
+  // built the same way and sit one tab apart, and every check written so far was
+  // for the first of them.
+  const named = (page) =>
+    page.evaluate(() =>
+      [...document.querySelectorAll('#drawer [data-arf-field="setupPick"] option')]
+        .map((o) => o.textContent)
+        .filter((t) => t !== "Pick a setup" && t !== "Nothing saved yet"),
+    );
+  const type = (page, key, value) =>
+    page.evaluate(
+      ({ key, value }) => {
+        const n = document.querySelector('#drawer [data-arf-field="' + key + '"]');
+        n.value = value;
+        n.dispatchEvent(new Event("input", { bubbles: true }));
+      },
+      { key, value },
+    );
+  // A number box settles on change rather than on every keystroke, so a value
+  // half typed never lands as a setting.
+  const typeNum = (page, key, value) =>
+    page.evaluate(
+      ({ key, value }) => {
+        const n = document.querySelector('#drawer [data-arf-field="' + key + '"]');
+        n.value = value;
+        n.dispatchEvent(new Event("change", { bubbles: true }));
+      },
+      { key, value },
+    );
+  const press = (page, what) =>
+    page.evaluate((w) => document.querySelector('#drawer [data-arf-setup="' + w + '"]').click(), what);
+  const said = (page) =>
+    page.evaluate(() => {
+      const card = [...document.querySelectorAll("#drawer [data-arf-card]")].find(
+        (c) => c.getAttribute("data-arf-card") === "Saved model setups",
+      );
+      return card ? (card.textContent || "") : "";
+    });
+
+  // With a scroll box of its own, which is where the host's dialog is used.
+  await inTab(
+    browser,
+    { css: "#drawer{height:100vh;overflow-y:auto;box-sizing:border-box}" },
+    async (page) => {
+    await goTab(page, "Model");
+    ok("there are no setups to begin with", (await named(page)).length === 0);
+
+    // Saving with nothing typed says so rather than saving something unnamed.
+    await press(page, "new");
+    await settle(page);
+    ok("saving without a name asks for one", /give it a name first/i.test(await said(page)), await said(page));
+
+    await type(page, "setupName", "Cheap");
+    await press(page, "new");
+    await settle(page);
+    ok("and with a name it saves", (await named(page)).indexOf("Cheap") >= 0, await named(page));
+
+    // The same name twice is the one mistake this card makes possible.
+    await type(page, "setupName", "Cheap");
+    await press(page, "new");
+    await settle(page);
+    ok("the same name twice is refused", /already a setup/i.test(await said(page)), await said(page));
+    ok("and nothing was saved over it", (await named(page)).length === 1, await named(page));
+
+    await type(page, "setupName", "Cheaper");
+    await press(page, "rename");
+    await settle(page);
+    const after = await named(page);
+    ok("renaming keeps one setup, under the new name", after.length === 1 && after[0] === "Cheaper", after);
+
+    // Renaming to the name it already has changes nothing, and says so rather
+    // than reporting a rename that did not happen.
+    await type(page, "setupName", "Cheaper");
+    await press(page, "rename");
+    await settle(page);
+    ok("renaming to its own name is refused", /already its name/i.test(await said(page)), await said(page));
+    ok("and it keeps that name", (await named(page)).join() === "Cheaper", await named(page));
+
+    // Update with nothing changed since the save, and Put it back with nothing
+    // to undo, change nothing. Each says so, the way a rename to the same name
+    // does, rather than reporting a save or an undo that did not happen.
+    await press(page, "update");
+    await settle(page);
+    ok("updating with nothing changed says it already holds these settings",
+      /Cheaper already holds these settings/i.test(await said(page)), await said(page));
+    await page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="thinkingMode"]');
+      sel.value = sel.value === "off" ? "inherit" : "off";
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle(page);
+    await press(page, "update");
+    await settle(page);
+    ok("and after a change, it updates", /Updated Cheaper/i.test(await said(page)), await said(page));
+    await press(page, "load");
+    await settle(page);
+    await press(page, "undo");
+    await settle(page);
+    ok("putting back a load that changed nothing says so",
+      /already what was here before/i.test(await said(page)), await said(page));
+
+    // Load and the three below it act on whatever the picker names, and saving
+    // a new one is what puts it there.
+    await press(page, "load");
+    await settle(page);
+    ok("loading it says what it did", /loaded|nothing in that setup/i.test(await said(page)), await said(page));
+
+    // Deleting throws work away, so it asks first, the same as a preset.
+    await page.evaluate(() => {
+      window.__confirms = [];
+      window.__confirmSay = false;
+    });
+    await press(page, "delete");
+    await settle(page);
+    ok("deleting a setup asks first", (await page.evaluate(() => window.__confirms.length)) === 1);
+    ok("and saying no keeps it", (await named(page)).length === 1, await named(page));
+
+    await page.evaluate(() => {
+      window.__confirmSay = true;
+    });
+    await press(page, "delete");
+    await settle(page);
+    ok("saying yes removes it", (await named(page)).length === 0, await named(page));
+    },
+  );
+
+  // The prices are the model's, so they travel with the setup that names it.
+  // Left out, moving from a cheap model to a careful one priced the new one at
+  // the old one's rates and said nothing, which is the one wrong number here
+  // that reads as a right one.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Model");
+    await typeNum(page, "costIn", "0.075");
+    await typeNum(page, "costOut", "0.3");
+    await type(page, "setupName", "The cheap one");
+    await press(page, "new");
+    await settle(page);
+
+    await typeNum(page, "costIn", "15");
+    await typeNum(page, "costOut", "75");
+    await press(page, "load");
+    await settle(page);
+    const back = await page.evaluate(() => {
+      const saved = JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1"));
+      return { in: saved.costIn, out: saved.costOut };
+    });
+    ok(
+      "a setup puts its own prices back on the panel",
+      back.in === 0.075 && back.out === 0.3,
+      JSON.stringify(back),
+    );
+  });
+
+  // One saved before the prices existed names no price at all. Zeroing them
+  // would be worse than leaving them: a cost line disappearing reads as
+  // the extension deciding not to show one.
+  await inTab(
+    browser,
+    {
+      setups: [
+        {
+          name: "From before",
+          at: 1,
+          settings: { connectionId: "", thinkingMode: "off", timeoutSecs: 60, samplers: {} },
+        },
+      ],
+    },
+    async (page) => {
+      await goTab(page, "Model");
+      await typeNum(page, "costIn", "15");
+      await typeNum(page, "costOut", "75");
+      await page.evaluate(() => {
+        const sel = document.querySelector('#drawer [data-arf-field="setupPick"]');
+        sel.value = "From before";
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await settle(page);
+      await press(page, "load");
+      await settle(page);
+      const kept = await page.evaluate(() => {
+        const saved = JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1"));
+        return { in: saved.costIn, out: saved.costOut };
+      });
+      ok(
+        "an older setup with no prices in it leaves yours alone",
+        kept.in === 15 && kept.out === 75,
+        JSON.stringify(kept),
+      );
+    },
+  );
+}
+
+// ---- a setting's description sits behind a "?" ----
+console.log("\ndescriptions behind a ?");
+{
+  // A description under every row makes each one two rows tall whether or not
+  // you need the second, and scrolling past the ones you know is the whole cost
+  // of finding the one you do not.
+  const TABS = ["Prompt", "Context", "Model", "Limits", "Log", "Setup"];
+
+  await inTab(browser, {}, async (page) => {
+    let hints = 0;
+    for (const t of TABS) {
+      await goTab(page, t);
+      hints += await page.evaluate(() => document.querySelectorAll("#drawer .arf-q").length);
+    }
+    ok("the settings carry a ? rather than a line each", hints >= 30, "found " + hints);
+    // Nothing is left carrying a description under it. A row that still drew one
+    // would be the one row on the panel behaving differently, which is worse
+    // than either answer applied everywhere.
+    const under = await page.evaluate(() => {
+      const out = [];
+      for (const row of document.querySelectorAll("#drawer [data-arf-row]")) {
+        if (!row.querySelector(".arf-q")) continue;
+        for (const n of row.querySelectorAll(".arf-note"))
+          out.push((n.textContent || "").trim().slice(0, 30));
+      }
+      return out;
+    });
+    ok("and none of them draws one under the row as well", under.length === 0, under.slice(0, 3));
+  });
+
+  // A description opens where it can be read, without pushing the panel around
+  // or covering the setting it is describing. Checked on every row of every tab,
+  // since which side it opens on depends on where the row happens to sit.
+  for (const [label, css, viewport] of [
+    ["phone", "", { width: 380, height: 720 }],
+    ["desktop", "", { width: 420, height: 1000 }],
+    ["UI Scale 0.8", "body{zoom:0.8}", { width: 420, height: 900 }],
+    ["UI Scale 1.5", "body{zoom:1.5}", { width: 420, height: 900 }],
+    ["larger host text", "#drawer{font-size:19px}", { width: 420, height: 900 }],
+    // A panel narrower than the screen, which is what the tab is on a phone. The
+    // cap used to be room on the screen, so a description came out wider than
+    // the panel holding it and hung off the side: on screen, and nowhere near
+    // the setting it belonged to.
+    ["narrow panel on a phone", "#drawer{width:290px}", { width: 420, height: 900 }],
+  ]) {
+    await inTab(browser, { css: css, viewport: viewport, touch: true }, async (page) => {
+      let checked = 0;
+      const covering = [];
+      let offscreen = 0;
+      let moved = 0;
+      const wider = [];
+      const outside = [];
+      let above = 0;
+      let drawn = 0;
+      const belowWithRoom = [];
+      for (const t of TABS) {
+        await goTab(page, t);
+        const r = await page.evaluate(async () => {
+          const frame = () =>
+            new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const over = (a, b) =>
+            !(a.bottom <= b.top || a.top >= b.bottom || a.right <= b.left || a.left >= b.right);
+          const qs = [...document.querySelectorAll("#drawer .arf-q")];
+          const out = { n: 0, covering: [], offscreen: 0, moved: 0, wider: [], outside: [], above: 0, drawn: 0, belowWithRoom: [] };
+          for (const q of qs) {
+            q.scrollIntoView({ block: "center" });
+            await frame();
+            const row = q.closest("[data-arf-row]");
+            const was = row.getBoundingClientRect().top;
+            q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+            q.click();
+            await frame();
+            out.n++;
+            const pop = document.querySelector('[role="tooltip"]');
+            if (!pop) {
+              out.covering.push("nothing opened");
+              continue;
+            }
+            // Nothing below it may move: the description is parented to the page,
+            // so opening one must not reflow the panel under the finger.
+            out.moved = Math.max(out.moved, Math.abs(Math.round(row.getBoundingClientRect().top - was)));
+            // Where it comes to rest. Read a frame after it opens, it is still
+            // partway through its 4px slide.
+            const raw = pop.getBoundingClientRect();
+            const shift = new DOMMatrix(getComputedStyle(pop).transform).m42 *
+              (pop.offsetWidth > 0 ? raw.width / pop.offsetWidth : 1);
+            const pr = { left: raw.left, right: raw.right, width: raw.width, height: raw.height,
+              top: raw.top - shift, bottom: raw.bottom - shift };
+            if (getComputedStyle(pop).display !== "none") {
+              const rr = row.getBoundingClientRect();
+              if (over(pr, rr)) out.covering.push((row.textContent || "").trim().slice(0, 28));
+              // Above whenever it fits there. The 18 is the gap over the row
+              // and the margin at the screen's edge.
+              if (rr.height > 0) {
+                out.drawn++;
+                if (pr.bottom <= rr.top + 1) out.above++;
+                else if (rr.top - 18 >= pr.height) out.belowWithRoom.push((row.textContent || "").trim().slice(0, 28));
+              }
+              if (pr.left < -1 || pr.right > innerWidth + 1 || pr.top < -1 || pr.bottom > innerHeight + 1)
+                out.offscreen++;
+              // No wider than the setting it describes, and inside the panel it
+              // opened from. Being on screen is not enough: the panel is
+              // narrower than the screen, so a description can clear the screen
+              // edge and still sit half off the panel.
+              //
+              // Only rows that are actually drawn. A row inside a shut section
+              // has no box at all, and there is nothing for a description to be
+              // sized to, which is also why the real thing falls back to the
+              // screen there.
+              const dr = document.getElementById("drawer").getBoundingClientRect();
+              if (rr.width > 0) {
+                if (pr.width > rr.width + 1)
+                  out.wider.push(Math.round(pr.width) + " over " + Math.round(rr.width));
+                if (pr.left < dr.left - 1 || pr.right > dr.right + 1)
+                  out.outside.push(
+                    Math.round(pr.left) + ".." + Math.round(pr.right) + " in " + Math.round(dr.left) + ".." + Math.round(dr.right),
+                  );
+              }
+            }
+            pop.click();
+            await frame();
+          }
+          return out;
+        });
+        checked += r.n;
+        covering.push(...r.covering);
+        offscreen += r.offscreen;
+        moved = Math.max(moved, r.moved);
+        wider.push(...r.wider);
+        outside.push(...r.outside);
+        above += r.above;
+        drawn += r.drawn;
+        belowWithRoom.push(...r.belowWithRoom);
+      }
+      ok(label + ": none of " + checked + " descriptions cover their row", covering.length === 0, covering.slice(0, 4));
+      ok(label + ": none open off the screen", offscreen === 0, "off screen " + offscreen);
+      ok(label + ": opening one moves nothing", moved === 0, "moved " + moved);
+      ok(label + ": none are wider than their row", wider.length === 0, wider.slice(0, 4));
+      ok(label + ": none hang off the panel", outside.length === 0, outside.slice(0, 4));
+      ok(label + ": each opens above its row when it fits there (" + above + " of " + drawn + " above)",
+        belowWithRoom.length === 0 && above > drawn / 2, belowWithRoom.slice(0, 4));
+    });
+  }
+
+  await inTab(browser, { viewport: { width: 420, height: 900 }, touch: true }, async (page) => {
+    await goTab(page, "Limits");
+    const r = await page.evaluate(async () => {
+      const frame = () =>
+        new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const open = (q) => {
+        q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+        q.click();
+      };
+      // What is open. A box on its way out keeps its class while it fades but
+      // stops being a tooltip, which is what it is: not something to announce,
+      // and not something a press should find and treat as already open.
+      const up = () => document.querySelectorAll('[role="tooltip"]').length;
+      const qs = [...document.querySelectorAll("#drawer .arf-q")];
+      open(qs[0]);
+      // Straight after the press, before the fade has run.
+      const early = document.querySelector('[role="tooltip"]');
+      const faded = !!early && Number(getComputedStyle(early).opacity) < 1;
+      await frame();
+      await new Promise((r) => setTimeout(r, 200));
+      const first = up();
+      const pop = document.querySelector('[role="tooltip"]');
+      const bg = pop && getComputedStyle(pop).backgroundColor;
+      const parts = bg && bg.match(/[\d.]+/g);
+      const opaque = !!parts && (parts[3] === undefined || Number(parts[3]) === 1);
+      // The description is parented to the page, not to the panel, or the panel's
+      // own scroll box would clip it at the edge.
+      const outside = !!pop && !document.getElementById("drawer").contains(pop);
+      open(qs[1]);
+      await frame();
+      const second = up();
+      open(qs[1]);
+      await frame();
+      await new Promise((r) => setTimeout(r, 200));
+      const retap = up();
+      open(qs[0]);
+      await frame();
+      document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      await frame();
+      await new Promise((r) => setTimeout(r, 200));
+      const elsewhere = up();
+      open(qs[0]);
+      await frame();
+      document.getElementById("drawer").dispatchEvent(new Event("scroll", { bubbles: true }));
+      await frame();
+      await new Promise((r) => setTimeout(r, 200));
+      const scrolled = up();
+      open(qs[0]);
+      await frame();
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await frame();
+      await new Promise((r) => setTimeout(r, 200));
+      const escaped = up();
+      return { first, faded, opaque, outside, second, retap, elsewhere, scrolled, escaped };
+    });
+    ok("a press opens the description", r.first === 1, r);
+    ok("and it fades in rather than appearing", r.faded, r);
+    ok("and it is opaque, since it sits over the rows below", r.opaque, r);
+    ok("and hangs off the page, so the panel cannot clip it", r.outside, r);
+    ok("only one is ever open", r.second === 1, r);
+    ok("a second press closes it", r.retap === 0, r);
+    ok("a press anywhere else closes it", r.elsewhere === 0, r);
+    ok("scrolling closes it, since the row it points at has moved", r.scrolled === 0, r);
+    ok("and so does Escape", r.escaped === 0, r);
+  });
+
+  // The press that closes a description does only that. Closing happens on the
+  // way down and the click that follows lands on whatever was under the finger,
+  // so dismissing one by tapping the panel also flipped whichever tick it
+  // landed on.
+  await inTab(browser, { viewport: { width: 420, height: 900 }, touch: true }, async (page) => {
+    await goTab(page, "Limits");
+    const r = await page.evaluate(async () => {
+      const frame = () =>
+        new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      // A tick that is nowhere near the "?" being pressed, so the press that
+      // closes the description is a press on this and nothing else.
+      const tick = [...document.querySelectorAll('#drawer input[type="checkbox"]')].pop();
+      const q = document.querySelector("#drawer .arf-q");
+      const was = tick.checked;
+      q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      q.click();
+      await frame();
+      const opened = document.querySelectorAll('[role="tooltip"]').length;
+      // A finger landing on the tick, the whole gesture, the way a browser
+      // sends it: down, then the click.
+      tick.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      tick.click();
+      await frame();
+      await new Promise((r) => setTimeout(r, 220));
+      const after = tick.checked;
+      const stillOpen = document.querySelectorAll('[role="tooltip"]').length;
+      // And the next press works normally, or the guard has outstayed the
+      // gesture it was armed for.
+      tick.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      tick.click();
+      await frame();
+      return { opened, was, after, stillOpen, then: tick.checked };
+    });
+    ok("a description was open to close", r.opened === 1, r);
+    ok("the press that closes it does not flip the setting under it", r.after === r.was, r);
+    ok("and it did close", r.stillOpen === 0, r);
+    ok("while the press after it works normally", r.then !== r.was, r);
+  });
+
+  // What each part of a tick row answers to.
+  //
+  // Only the switch flips the switch. The words beside it name it, for a screen
+  // reader, but do not answer a press: a stray tap on a setting's name used to
+  // change the setting. The "?" opens the description and does nothing else.
+  await inTab(browser, { viewport: { width: 420, height: 900 }, touch: true }, async (page) => {
+    // Every tick row on every tab, read rather than pressed. Pressing one
+    // rebuilds the panel a moment later, so a loop that presses its way down a
+    // list it collected first ends up measuring rows that have been thrown away.
+    let rows = 0;
+    const wrong = [];
+    for (const t of ["Prompt", "Context", "Model", "Limits", "Log", "Setup"]) {
+      await goTab(page, t);
+      const r = await page.evaluate(() => {
+        const out = { n: 0, wrong: [] };
+        for (const row of document.querySelectorAll("#drawer [data-arf-row]")) {
+          const tick = row.querySelector('input[type="checkbox"]');
+          if (!tick || !row.querySelector(".arf-q")) continue;
+          out.n++;
+          const words = row.querySelector(".arf-lab");
+          const name = ((words && words.textContent) || row.getAttribute("data-arf-row") || "").trim().slice(0, 26);
+          if (!words) out.wrong.push("no words: " + name);
+          else if (words.tagName === "LABEL") out.wrong.push("the words are a label, so pressable: " + name);
+          else if (!words.id || tick.getAttribute("aria-labelledby") !== words.id)
+            out.wrong.push("the words do not name the switch: " + name);
+        }
+        return out;
+      });
+      rows += r.n;
+      wrong.push(...r.wrong);
+    }
+    ok("there are tick rows with a ? to check", rows >= 10, "found " + rows);
+    ok(
+      "on all " + rows + ", the words name the switch without being pressable",
+      wrong.length === 0,
+      wrong.slice(0, 4).join(" | "),
+    );
+  });
+
+  // And the two presses, on one row at a time, looked up again after each one
+  // since the press rebuilds the panel underneath it.
+  await inTab(browser, { viewport: { width: 420, height: 900 }, touch: true }, async (page) => {
+    await goTab(page, "Limits");
+    const keys = await page.evaluate(() =>
+      [...document.querySelectorAll("#drawer [data-arf-row]")]
+        .filter((r) => r.querySelector(".arf-q") && r.querySelector('input[type="checkbox"]') && !r.hidden)
+        .map((r) => r.getAttribute("data-arf-row"))
+        .slice(0, 6),
+    );
+    ok("there are rows to press", keys.length >= 4, keys);
+    const bad = [];
+    for (const key of keys) {
+      const r = await page.evaluate(async (key) => {
+        const frame = () =>
+          new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const press = (n) => {
+          n.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+          n.click();
+        };
+        const find = () => document.querySelector('#drawer [data-arf-row="' + key + '"]');
+        const out = [];
+        let row = find();
+        let tick = row.querySelector('input[type="checkbox"]');
+        const was = tick.checked;
+        row.scrollIntoView({ block: "center" });
+        await frame();
+        press(row.querySelector(".arf-lab"));
+        // Past any rebuild a press could set off, so what is read next is the
+        // panel as it ends up rather than the one there when it started.
+        await new Promise((r) => setTimeout(r, 400));
+        row = find();
+        tick = row.querySelector('input[type="checkbox"]');
+        if (tick.checked !== was) out.push("the words flipped it: " + key);
+        if (document.querySelector('[role="tooltip"]'))
+          out.push("the words opened the description: " + key);
+        const now = tick.checked;
+        press(row.querySelector(".arf-q"));
+        await new Promise((r) => setTimeout(r, 300));
+        row = find();
+        tick = row.querySelector('input[type="checkbox"]');
+        if (tick.checked !== now) out.push("the ? flipped it: " + key);
+        if (!document.querySelector('[role="tooltip"]')) out.push("the ? opened nothing: " + key);
+        const pop = document.querySelector('[role="tooltip"]');
+        if (pop) press(pop);
+        await new Promise((r) => setTimeout(r, 250));
+        return out;
+      }, key);
+      bad.push(...r);
+    }
+    ok(
+      "pressing the words leaves the switch alone, pressing the ? opens the description",
+      bad.length === 0,
+      bad.slice(0, 4).join(" | "),
+    );
+  });
+
+  // A gesture that closes a description without ever producing a click, which
+  // is what a drag or a scroll is. The guard must not still be sitting there
+  // waiting to eat the next real press.
+  await inTab(browser, { viewport: { width: 420, height: 900 }, touch: true }, async (page) => {
+    await goTab(page, "Limits");
+    const r = await page.evaluate(async () => {
+      const frame = () =>
+        new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const tick = [...document.querySelectorAll('#drawer input[type="checkbox"]')].pop();
+      const q = document.querySelector("#drawer .arf-q");
+      q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      q.click();
+      await frame();
+      // A finger going down on the panel and dragging away. No click follows a
+      // drag, so nothing arrives to spend the guard on.
+      document.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      await frame();
+      await new Promise((r) => setTimeout(r, 220));
+      const closed = document.querySelectorAll('[role="tooltip"]').length === 0;
+      const was = tick.checked;
+      // And now a real press, well inside the window the guard would have sat in.
+      tick.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      tick.click();
+      await frame();
+      return { closed, was, then: tick.checked };
+    });
+    ok("a drag closes the description", r.closed, r);
+    ok("and the press after a drag is not eaten", r.then !== r.was, r);
+  });
+
+  // The search reads the panel as it is drawn, and a description is no longer
+  // drawn. A setting you can only describe is exactly the one you are searching
+  // for, so losing this would be most of what the search is for.
+  await inTab(browser, {}, async (page) => {
+    const hit = await page.evaluate(async () => {
+      // A phrase that appears in one description and nowhere else on the panel,
+      // so a search that finds it can only have read the description.
+      const q = document.querySelector('#drawer input[type="search"]');
+      const say = (v) => {
+        q.value = v;
+        q.dispatchEvent(new Event("input", { bubbles: true }));
+      };
+      const wait = () =>
+        new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      say("three in five");
+      await wait();
+      const body = document.getElementById("drawer").textContent || "";
+      const none = /nothing matched/i.test(body);
+      const rows = document.querySelectorAll("#drawer [data-arf-row]").length;
+      say("");
+      await wait();
+      return { none: none, rows: rows };
+    });
+    ok("a setting is still findable by its description", !hit.none, hit);
+    ok("and the search narrows to it rather than showing everything", hit.rows > 0 && hit.rows < 20, hit);
+  });
+}
+
+console.log("\nthe preset menu shows one list at a time");
+{
+  // Every built-in preset carries one list and not the other, so loading a "for
+  // your messages" one while editing replies changes the prompt you are not
+  // looking at and leaves the one you are looking at alone. The menu offered
+  // both, under headings, which is a mistake it was inviting.
+  const menu = (page) =>
+    page.evaluate(() => {
+      const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      if (!sel) return null;
+      return [...sel.querySelectorAll("optgroup")].map((g) => ({
+        head: g.label,
+        of: [...g.querySelectorAll("option")].map((o) => o.textContent.trim()),
+      }));
+    });
+  const switchTo = (page, id) =>
+    page.evaluate((want) => {
+      const b = document.querySelector('#drawer [data-arf-editing="' + want + '"]');
+      b && b.click();
+    }, id);
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const forReplies = await menu(page);
+    ok(
+      "on the replies list, only its own two are offered",
+      forReplies && forReplies.length === 1 && forReplies[0].head === "For replies" && forReplies[0].of.length === 2,
+      JSON.stringify(forReplies),
+    );
+
+    await switchTo(page, "userBlocks");
+    await settle(page);
+    const forYours = await menu(page);
+    ok(
+      "and on your own messages, only theirs",
+      forYours && forYours.length === 1 && forYours[0].head === "For your messages" && forYours[0].of.length === 2,
+      JSON.stringify(forYours),
+    );
+  });
+
+  // One of yours can carry either list, or both, and you are the one who saved
+  // it, so it is offered whichever tab you are on.
+  await inTab(
+    browser,
+    { presets: [{ name: "Mine", at: 1, settings: { blocks: [] } }] },
+    async (page) => {
+      await goTab(page, "Prompt");
+      const onReplies = await menu(page);
+      await switchTo(page, "userBlocks");
+      await settle(page);
+      const onYours = await menu(page);
+      const hasMine = (m) => !!m && m.some((g) => g.head === "Yours" && g.of.indexOf("Mine") >= 0);
+      ok("one of your own shows on the replies list", hasMine(onReplies), JSON.stringify(onReplies));
+      ok("and on your own messages too", hasMine(onYours), JSON.stringify(onYours));
+    },
+  );
+}
+
+console.log("\nimporting the same file twice");
+{
+  // People re-import. Adding a second copy under a "(copy)" name is not what
+  // they asked for, and with a cap on the list it pushes their own oldest
+  // preset out to make room for a duplicate of one they already had.
+  const file = JSON.stringify({
+    extension: "auto-refine",
+    presets: [
+      {
+        name: "Mine",
+        at: 1,
+        settings: { blocks: [{ id: "a", name: "One", on: true, role: "system", text: "<p>{{message}}</p>" }] },
+      },
+    ],
+  });
+  const load = (page, text) =>
+    page.evaluate(async (t) => {
+      const input = document.querySelector('#drawer [data-arf-file="import"]');
+      const dt = new DataTransfer();
+      dt.items.add(new File([t], "setup.json", { type: "application/json" }));
+      input.files = dt.files;
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 120));
+      return document.querySelector("#drawer .arf-body").textContent;
+    }, text);
+  const names = (page) =>
+    page.evaluate(() =>
+      (JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1") || "[]") || []).map((x) => x.name),
+    );
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    const first = await load(page, file);
+    ok("the first import brings the preset in", /1 preset/.test(first), first.slice(0, 160));
+    ok("and it is there under its own name", (await names(page)).join() === "Mine", JSON.stringify(await names(page)));
+
+    const again = await load(page, file);
+    ok(
+      "the same file again changes nothing",
+      /already here/.test(again),
+      again.slice(0, 200),
+    );
+    ok(
+      "and leaves one preset rather than a copy of it",
+      (await names(page)).join() === "Mine",
+      JSON.stringify(await names(page)),
+    );
+
+    // One name, one preset. A file is nearly always your own setup coming back
+    // from another device, and two of everything with no way to tell which is
+    // current is worse than the newer one winning.
+    const changed = file.replace('"One"', '"Two"');
+    const third = await load(page, changed);
+    const after = await names(page);
+    ok("a changed one under the same name replaces it", after.join() === "Mine", JSON.stringify(after));
+    ok("and the panel says it replaced rather than added", /replaced/.test(third), third.slice(0, 200));
+    const held = await page.evaluate(
+      () => JSON.parse(localStorage.getItem("lv-auto-refine:presets:v1"))[0].settings.blocks[0].name,
+    );
+    ok("with the newer contents in it", held === "Two", String(held));
+  });
+}
+
+console.log("\nprices as a provider writes them");
+{
+  // A price list reads $5.00/M or $0.075/M. Both halves of that were refused:
+  // the box rounded every number to a whole one, and asked a phone for the
+  // keypad with no decimal point on it.
+  const box = (page) =>
+    page.evaluate(() => {
+      const n = document.querySelector('#drawer [data-arf-field="costIn"]');
+      return n ? { step: n.step, mode: n.inputMode, type: n.type } : null;
+    });
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Model");
+    const b = await box(page);
+    ok("a price box takes decimals", b && b.step === "any", JSON.stringify(b));
+    ok("and asks for a keypad with a point on it", b && b.mode === "decimal", JSON.stringify(b));
+
+    // 0.075 is the cheapest row in a real price list, and it was becoming 0.
+    const kept = await page.evaluate(async () => {
+      const n = document.querySelector('#drawer [data-arf-field="costIn"]');
+      n.value = "0.075";
+      n.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 40));
+      return JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")).costIn;
+    });
+    ok("a fraction of a unit survives being typed", kept === 0.075, String(kept));
+
+    // Pasted straight off the provider's page.
+    const pasted = await page.evaluate(async () => {
+      const n = document.querySelector('#drawer [data-arf-field="costOut"]');
+      const dt = new DataTransfer();
+      dt.setData("text", "$3.75/M");
+      n.dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 40));
+      return JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")).costOut;
+    });
+    ok("a price pasted as the provider writes it is understood", pasted === 3.75, String(pasted));
+  });
+
+  // A setting that was always a whole number stays one, keypad included.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Context");
+    const whole = await page.evaluate(async () => {
+      const n = document.querySelector('#drawer [data-arf-field="contextMessages"]');
+      if (!n) return null;
+      const shape = { step: n.step, mode: n.inputMode };
+      n.value = "4.6";
+      n.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 40));
+      shape.kept = JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")).contextMessages;
+      return shape;
+    });
+    ok("a whole number still asks for whole numbers", whole && whole.step === "1", JSON.stringify(whole));
+    ok("with the plain keypad", whole && whole.mode === "numeric", JSON.stringify(whole));
+    ok("and is still rounded to one", whole && whole.kept === 5, JSON.stringify(whole));
+  });
+}
+
+console.log("\nthe macro list");
+{
+  // The longest names are the focused group macros. Each row stays inside the
+  // card at a phone width and a laptop width, with nothing to scroll sideways.
+  for (const [label, viewport, touch] of [["phone", { width: 360, height: 800 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch }, async (page) => {
+      await goTab(page, "Prompt");
+      // The list sits in a fold. Every fold on the tab is opened, twice over
+      // for one inside another.
+      for (let i = 0; i < 2; i++) {
+        await page.evaluate(() => {
+          for (const h of document.querySelectorAll('#drawer [aria-expanded="false"]')) h.click();
+        });
+        await settle(page);
+        await page.waitForTimeout(300);
+      }
+      const fit = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll('#drawer [data-arf-row^="macro:"]')].filter((r) => r.getClientRects().length > 0 && r.getBoundingClientRect().height > 0);
+        const out = rows.filter((r) => {
+          const box = r.getBoundingClientRect();
+          return [...r.querySelectorAll("*")].some((c) => c.getBoundingClientRect().right > box.right + 1);
+        }).map((r) => r.getAttribute("data-arf-row"));
+        const tag = document.querySelector('#drawer [data-arf-row="macro:{{charGroupFocusedDescription}}"] button');
+        return {
+          rows: rows.length,
+          out,
+          sideways: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+          tall: tag ? Math.round(tag.getBoundingClientRect().height) : 0,
+        };
+      });
+      ok(label + ": every macro row stays inside the card", fit.rows > 0 && fit.out.length === 0, JSON.stringify(fit));
+      ok(label + ": nothing scrolls sideways", !fit.sideways, JSON.stringify(fit));
+      if (touch) ok(label + ": the longest macro is tall enough to tap", fit.tall >= 32, JSON.stringify(fit));
+    });
+  }
+
+  // A list you scan for a name you half remember. The meanings sit behind the
+  // same ? every other row uses, so ten paragraphs do not stand between you and
+  // the name you came for.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    await page.evaluate(() => {
+      const f = [...document.querySelectorAll("#drawer summary")].find((x) =>
+        /The list/.test(x.textContent),
+      );
+      f && f.click();
+    });
+    await settle(page);
+    const out = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll('#drawer [data-arf-row^="macro:"]')];
+      return {
+        n: rows.length,
+        withQ: rows.filter((r) => r.querySelector(".arf-q")).length,
+        prose: rows.filter((r) => r.querySelector(".arf-note")).length,
+        copyLabels: rows.filter((r) => /^Copy \{\{/.test(r.querySelector("button").getAttribute("aria-label") || "")).length,
+      };
+    });
+    // Counted against the panel's own list rather than a number written here,
+    // which is what went stale the moment a macro was added.
+    ok("every macro is listed", out.n === MACROS.length, JSON.stringify(out));
+    ok("each one carries a ?", out.withQ === out.n, JSON.stringify(out));
+    ok("and none spells its meaning out under the row", out.prose === 0, JSON.stringify(out));
+    ok("the tag itself still copies", out.copyLabels === out.n, JSON.stringify(out));
+    const listed = await page.evaluate(() => ({
+      desc: !!document.querySelector('#drawer [data-arf-row="macro:{{charGroupFocusedDescription}}"]'),
+      pers: !!document.querySelector('#drawer [data-arf-row="macro:{{charGroupFocusedPersonality}}"]'),
+      says: /any Lumiverse macro works/.test(document.getElementById("drawer").textContent),
+      note: /This list is not every macro/.test(document.getElementById("drawer").textContent),
+    }));
+    ok("the focused group description and personality are listed", listed.desc && listed.pers, JSON.stringify(listed));
+    ok("and the card says a macro that is not listed still works", listed.says && listed.note, JSON.stringify(listed));
+
+    // The longest description of the lot, which is the reason for the change.
+    const opened = await page.evaluate(async () => {
+      const row = document.querySelector('#drawer [data-arf-row="macro:{{protect_notes}}"]');
+      const q = row && row.querySelector(".arf-q");
+      if (!q) return null;
+      q.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }));
+      q.click();
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const pop = document.querySelector('[role="tooltip"]');
+      return pop ? pop.textContent.trim().slice(0, 60) : null;
+    });
+    ok(
+      "and pressing one opens its meaning",
+      !!opened && /protection is on/.test(opened),
+      String(opened),
+    );
+
+    // A description behind a ? is not among the children the search walks, so
+    // moving these out of the rows would have taken them out of the search
+    // with them. A macro whose name you cannot remember is exactly the one you
+    // go looking for by what it does.
+    const found = await page.evaluate(async () => {
+      const box = document.querySelector('#drawer input[type="search"]');
+      if (!box) return null;
+      box.value = "lorebook entries this chat";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 60));
+      return document.querySelector("#drawer").textContent;
+    });
+    ok(
+      "a macro is still findable by what it does",
+      !!found && /\{\{lore\}\}/.test(found),
+      String(found).slice(0, 200),
+    );
+  });
+}
+
+console.log("\nsaying the built-in prompts have changed");
+{
+  // The mark is a fingerprint of the four as they stand, so a saved one that
+  // does not match means they moved since the reader last took one. A made-up
+  // mark stands in for "you were here two versions ago".
+  const OLD = "notthemark";
+  const seen = (page) =>
+    page.evaluate(() => {
+      const n = document.querySelector("#drawer [data-arf-builtinmoved]");
+      return n ? n.textContent.trim() : null;
+    });
+
+  // Nothing saved at all is a fresh install, which is already on these.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    ok("a fresh install is told nothing", (await seen(page)) === null);
+    const stamped = await page.evaluate(() => {
+      const raw = localStorage.getItem("lv-auto-refine:settings:v1");
+      return raw ? !!JSON.parse(raw).builtInSeen : false;
+    });
+    ok("and is stamped as having seen them", stamped);
+  });
+
+  // Somebody who took one, back when they were different.
+  await inTab(browser, { saved: { builtInSeen: OLD } }, async (page) => {
+    await goTab(page, "Prompt");
+    const said = await seen(page);
+    ok("somebody who took one before is told", !!said, String(said));
+    ok("and told their own prompt is untouched", /Yours is untouched/.test(said || ""), String(said));
+
+    const after = await page.evaluate(async () => {
+      document.querySelector('#drawer [data-arf-builtinmoved="dismiss"]').click();
+      await new Promise((r) => setTimeout(r, 120));
+      const raw = localStorage.getItem("lv-auto-refine:settings:v1");
+      return {
+        gone: !document.querySelector("#drawer [data-arf-builtinmoved]"),
+        stamped: raw ? JSON.parse(raw).builtInSeen : null,
+      };
+    });
+    ok("saying got it takes the line away", after.gone, JSON.stringify(after));
+    ok("and it stays away, because the mark was written down", after.stamped && after.stamped !== OLD, JSON.stringify(after));
+  });
+
+  // The same reader, upgrading from a version that wrote this under its old
+  // name. Losing it would swallow the one line saying the prompts changed, and
+  // nothing on screen would say anything was missing.
+  await inTab(browser, { saved: { shippedSeen: OLD } }, async (page) => {
+    await goTab(page, "Prompt");
+    const said = await seen(page);
+    ok("a stamp written under the old name is still read", !!said, String(said));
+    const moved = await page.evaluate(() => {
+      const raw = localStorage.getItem("lv-auto-refine:settings:v1");
+      const held = raw ? JSON.parse(raw) : {};
+      return { now: held.builtInSeen || null, old: held.shippedSeen || null };
+    });
+    ok("and carried across to the name this version uses", moved.now === OLD, JSON.stringify(moved));
+    ok("with the old name dropped rather than left behind", moved.old === null, JSON.stringify(moved));
+  });
+
+  // Loading one of the four is the other way to be up to date.
+  await inTab(browser, { saved: { builtInSeen: OLD } }, async (page) => {
+    await goTab(page, "Prompt");
+    const out = await page.evaluate(async () => {
+      const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      const builtIn = Array.from(sel.options).find((o) => /A judge/.test(o.textContent));
+      sel.value = builtIn.value;
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 60));
+      document.querySelector('#drawer [data-arf-preset="load"]').click();
+      await new Promise((r) => setTimeout(r, 200));
+      const raw = localStorage.getItem("lv-auto-refine:settings:v1");
+      return {
+        picked: builtIn.textContent.trim(),
+        stamped: raw ? JSON.parse(raw).builtInSeen : null,
+        line: !!document.querySelector("#drawer [data-arf-builtinmoved]"),
+      };
+    });
+    ok("the built-in prompt really was the one loaded", /A judge/.test(out.picked), JSON.stringify(out));
+    ok("loading one marks them as seen", out.stamped && out.stamped !== OLD, JSON.stringify(out));
+    ok("so the line goes with it", !out.line, JSON.stringify(out));
+  });
+}
+
+console.log("\na built-in prompt shows names and roles as text, and its boxes do not light up");
+{
+  // On a built-in prompt nothing can be typed, so each block's name and role
+  // are plain text rather than grayed boxes, and a tapped text box takes no glow. On a
+  // prompt of your own, both stay as they are. Read from what is drawn.
+  // Checked at a phone width and a laptop width.
+  // Pixels that visibly differ. Two shots of an unchanged box are not always
+  // the same bytes, and a text cursor is a few pixels, while a glow around
+  // the border changes hundreds.
+  const changed = (a, b) => {
+    const x = decodePixels(a), y = decodePixels(b);
+    if (!x || !y || x.length !== y.length) return Infinity;
+    let n = 0;
+    for (let k = 0; k < x.length; k++)
+      if (Math.abs(x[k].r - y[k].r) + Math.abs(x[k].g - y[k].g) + Math.abs(x[k].b - y[k].b) > 24) n++;
+    return n;
+  };
+  // Where the two shots differ, for the report when the check fails: how
+  // many pixels, the box around them, and the first one's color in each.
+  const whereChanged = (a, b) => {
+    const x = decodePixels(a), y = decodePixels(b);
+    if (!x || !y || x.length !== y.length) return "the shots are not the same size";
+    const w = a.readUInt32BE(16);
+    let n = 0, x0 = Infinity, y0 = Infinity, x1 = -1, y1 = -1, first = null;
+    for (let k = 0; k < x.length; k++) {
+      if (Math.abs(x[k].r - y[k].r) + Math.abs(x[k].g - y[k].g) + Math.abs(x[k].b - y[k].b) <= 24) continue;
+      n++;
+      const px = k % w, py = Math.floor(k / w);
+      x0 = Math.min(x0, px); y0 = Math.min(y0, py); x1 = Math.max(x1, px); y1 = Math.max(y1, py);
+      if (!first) first = { at: [px, py], from: x[k], to: y[k] };
+    }
+    return { n, box: n ? [x0, y0, x1, y1] : null, of: [w, x.length / w], first };
+  };
+  const same = (a, b) => changed(a, b) <= 30;
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const [what, saved] of [["built-in", { presetPick: "The line edit" }], ["your own", {}]]) {
+      const say = label + ", " + what + ": ";
+      await inTab(browser, { viewport, touch, saved }, async (page) => {
+        await goTab(page, "Prompt");
+        await settle(page);
+        const names = await page.evaluate(() => ({
+          boxes: document.querySelectorAll('#drawer [data-arf-block] input[data-arf-field^="blockname:"]').length,
+          text: [...document.querySelectorAll("#drawer [data-arf-blockname]")].map((n) => n.textContent.trim()),
+          blocks: document.querySelectorAll("#drawer [data-arf-block]").length,
+          rolePickers: document.querySelectorAll('#drawer [data-arf-block] select[aria-label^="Role for"]').length,
+          roleText: [...document.querySelectorAll("#drawer [data-arf-blockrole]")].map((n) => n.textContent.trim()),
+          sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+          drawer: document.getElementById("drawer").textContent,
+        }));
+        if (what === "built-in") {
+          // The note under the picker says to save a copy first, since the
+          // built-in prompt itself cannot be changed.
+          ok(say + "the note says to save a copy before changing it", /cannot be changed\. To change it, put a name in the box above and press Save as new/.test(names.drawer) && !/however you like/.test(names.drawer), "");
+          ok(say + "no name box, and every block's name is shown as text", names.boxes === 0 && names.text.length === names.blocks && names.text.every((t) => t.length > 0), JSON.stringify(names));
+          ok(say + "no role picker, and every block's role is shown as text", names.rolePickers === 0 && names.roleText.length === names.blocks && names.roleText.every((t) => /^(System|User|Assistant)$/i.test(t)), JSON.stringify(names));
+        } else {
+          ok(say + "every block has its name box", names.boxes === names.blocks && names.text.length === 0, JSON.stringify(names));
+          ok(say + "every block has its role picker", names.rolePickers === names.blocks && names.roleText.length === 0, JSON.stringify(names));
+        }
+        ok(say + "nothing runs off the side", !names.sideways, "");
+        // Open the first block, then compare the box and the space around it
+        // before and after it is tapped.
+        await page.evaluate(() => {
+          const row = document.querySelector("#drawer [data-arf-block]");
+          const fold = row.querySelector(".arf-blockfold");
+          if (fold.getAttribute("aria-expanded") === "false") fold.click();
+        });
+        await page.waitForTimeout(500);
+        const area = await page.evaluate(() => {
+          const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+          // The letters are hidden for the shots. Chrome can draw them with
+          // colored subpixel edges before a tap and plain gray ones after it,
+          // which changes thousands of pixels and is not a glow. The box, its
+          // border and any ring around it are what this compares.
+          ta.style.setProperty("color", "transparent", "important");
+          ta.scrollIntoView({ block: "center" });
+          const r = ta.getBoundingClientRect();
+          return { x: Math.max(0, r.left - 12), y: Math.max(0, r.top - 12), width: r.width + 24, height: Math.min(r.height + 24, 300) };
+        });
+        await page.mouse.move(2, 2);
+        await page.waitForTimeout(300);
+        const before = await page.screenshot({ clip: area });
+        if (touch) await page.tap('#drawer [data-arf-field^="blocktext:"]');
+        else await page.click('#drawer [data-arf-field^="blocktext:"]');
+        await page.mouse.move(2, 2);
+        await page.waitForTimeout(400);
+        const after = await page.screenshot({ clip: area });
+        const focused = await page.evaluate(() => document.activeElement === document.querySelector('#drawer [data-arf-field^="blocktext:"]'));
+        if (what === "built-in") ok(say + "the tapped box is drawn the same as before, with no glow", focused && same(before, after), JSON.stringify({ focused, changed: same(before, after) ? null : whereChanged(before, after) }));
+        else ok(say + "the tapped box lights up, since it can be typed in", focused && !same(before, after), "focused " + focused);
+      });
+    }
+  }
+}
+
+console.log("\na built-in prompt cannot be typed into");
+{
+  // A built-in prompt cannot be written over, so editing its blocks would be
+  // typing into something the panel is about to refuse to save. The fields say
+  // so before the typing rather than after it.
+  //
+  // A fresh install is not in this state. The picker starts on nothing and is
+  // only ever set by picking, so somebody who has never opened the list can
+  // type into every block.
+  const look = (page) =>
+    page.evaluate(() => {
+      const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+      const row = ta ? ta.closest("[data-arf-block]") : null;
+      const sw = row ? row.querySelector('input[type="checkbox"]') : null;
+      const add = [...document.querySelectorAll("#drawer button")].find(
+        (b) => (b.textContent || "").trim() === "Add a block",
+      );
+      return {
+        said: !!document.querySelector("#drawer [data-arf-promptlocked]"),
+        text: document.querySelector("#drawer [data-arf-promptlocked]")?.textContent || "",
+        readOnly: ta ? !!ta.readOnly : null,
+        // Chromium draws no cursor in a read-only box, so a screenshot cannot
+        // show one, but Safari on a phone does. This reads the color it would
+        // be drawn in.
+        noCaret: (() => { const c = ta ? getComputedStyle(ta).caretColor : ""; return c === "transparent" || /^rgba\(\d+, \d+, \d+, 0\)$/.test(c) ? true : c; })(),
+        switchOff: sw ? !!sw.disabled : null,
+        addOff: add ? !!add.disabled : null,
+      };
+    });
+
+  // A box for a list saves a list. It used to save the text of the box, which
+  // the backend read as no list at all, so passes typed here never ran.
+  await inTab(browser, { saved: { passMode: "many" } }, async (page) => {
+    await goTab(page, "Limits");
+    const sent = await page.evaluate(async () => {
+      const area = document.querySelector('#drawer textarea[data-arf-field="passNames"]');
+      area.value = "A judge\n\n  A judge that thinks  ";
+      area.dispatchEvent(new Event("input", { bubbles: true }));
+      area.dispatchEvent(new Event("blur"));
+      await new Promise((r) => setTimeout(r, 400));
+      const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+      return last && last.settings ? { names: last.settings.passNames, passes: (last.settings.passes || []).length } : null;
+    });
+    ok("the passes typed into the box are saved as a list",
+      !!sent && JSON.stringify(sent.names) === JSON.stringify(["A judge", "A judge that thinks"]), JSON.stringify(sent));
+    ok("and both of them go to the backend to run", !!sent && sent.passes === 2, JSON.stringify(sent));
+  });
+
+  // A pass whose preset names a model setup runs on it, with the switch on.
+  // The panel resolves the setup and sends its values with the pass. Off, or
+  // for a preset with no setup, the pass is sent with no model and runs on the
+  // Model tab. Checked at a phone width and a laptop width.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(
+      browser,
+      {
+        viewport,
+        touch,
+        saved: { passMode: "many", passNames: ["Quick", "A judge"], costOut: 0.7 },
+        presets: [{
+          name: "Quick",
+          at: 1,
+          settings: { blocks: [{ id: "t", name: "Turn", on: true, role: "user", text: "Fix typos.\n{{message}}" }] },
+          setup: "Small",
+        }],
+        setups: [{
+          name: "Small",
+          at: 1,
+          // No output price, as a setup saved before prices existed has none.
+          settings: { connectionId: "conn-small", thinkingMode: "off", thinkingEffort: "medium", timeoutSecs: 60, samplers: { temperature: 0.2 }, costIn: 0.1 },
+        }],
+      },
+      async (page) => {
+        await goTab(page, "Limits");
+        const out = await page.evaluate(async () => {
+          const passesNow = () => {
+            const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+            return (last && last.settings && last.settings.passes) || [];
+          };
+          const box = document.querySelector('#drawer [data-arf-field="passOwnModel"]');
+          if (!box) return { err: "no switch" };
+          const r = box.getBoundingClientRect();
+          const drawer = document.getElementById("drawer").getBoundingClientRect();
+          const before = passesNow().map((p) => p.model || null);
+          box.click();
+          await new Promise((res) => setTimeout(res, 400));
+          const after = passesNow().map((p) => p.model || null);
+          return {
+            inside: r.right <= drawer.right + 1 && r.left >= drawer.left - 1,
+            before,
+            after,
+          };
+        });
+        ok(label + ": the switch for a model per pass is there, inside the panel",
+          !out.err && out.inside, JSON.stringify(out));
+        ok(label + ": off, no pass is sent with a model of its own",
+          !out.err && out.before.length === 2 && out.before.every((m) => m === null), JSON.stringify(out.before));
+        ok(label + ": on, the pass whose preset names a setup is sent with that setup",
+          !out.err && out.after[0] && out.after[0].setup === "Small" && out.after[0].connectionId === "conn-small" &&
+            out.after[0].thinkingMode === "off" && out.after[0].costIn === 0.1,
+          JSON.stringify(out.after));
+        ok(label + ": a value the setup does not hold is taken from the Model tab",
+          !out.err && out.after[0] && out.after[0].costOut === 0.7, JSON.stringify(out.after));
+        ok(label + ": and a built-in prompt, which names none, is sent without one",
+          !out.err && out.after[1] === null, JSON.stringify(out.after));
+      },
+    );
+  }
+
+  // A pass that will not run is named under the box, with the reason: a name
+  // no preset has, a preset with no {{message}} block, or one past the sixth.
+  // The line goes again once the list is fixed. Phone and laptop.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    const mine = (name, text) => ({ name, at: 1, settings: { blocks: [{ id: "t", name: "Turn", on: true, role: "user", text }] } });
+    const seven = ["One", "Two", "Three", "Four", "Five", "Six", "Seven"];
+    await inTab(
+      browser,
+      {
+        viewport,
+        touch,
+        saved: { passMode: "many", passNames: seven.concat(["Nowhere", "Bare"]) },
+        presets: seven.map((n) => mine(n, "Tidy this.\n{{message}}")).concat([mine("Bare", "Tidy this.")]),
+      },
+      async (page) => {
+        await goTab(page, "Limits");
+        const out = await page.evaluate(async () => {
+          const note = () => document.querySelector('#drawer [data-arf-passnote="passNames"]');
+          const shown = (n) => !!n && n.style.display !== "none" && n.getBoundingClientRect().height > 0;
+          const first = note();
+          const drawer = document.getElementById("drawer").getBoundingClientRect();
+          const r = first ? first.getBoundingClientRect() : null;
+          const before = { text: first ? first.textContent : null, shown: shown(first),
+            inside: !!r && r.left >= drawer.left - 1 && r.right <= drawer.right + 1 };
+          const area = document.querySelector('#drawer textarea[data-arf-field="passNames"]');
+          area.value = "Nowhere\nBare";
+          area.dispatchEvent(new Event("input", { bubbles: true }));
+          await new Promise((res) => setTimeout(res, 600));
+          const none = { text: note() ? note().textContent : null, shown: shown(note()) };
+          area.value = "One\nTwo";
+          area.dispatchEvent(new Event("input", { bubbles: true }));
+          await new Promise((res) => setTimeout(res, 600));
+          const after = { shown: shown(note()) };
+          return { before, none, after, sideways: document.documentElement.scrollWidth > innerWidth + 1 };
+        });
+        const t = String(out.before.text || "");
+        ok(label + ": a name no preset has is named as skipped", /No preset is called Nowhere, so it is skipped\./.test(t), t);
+        ok(label + ": so is a preset with no {{message}} block", /Bare has no block with \{\{message\}\}, so it is skipped\./.test(t), t);
+        ok(label + ": and a pass past the sixth", /Only six passes run\. Seven is skipped\./.test(t), t);
+        ok(label + ": the line is shown inside the panel", out.before.shown && out.before.inside && !out.sideways, JSON.stringify(out));
+        ok(label + ": while some passes run, it does not say none do", !/No pass runs/.test(t), t);
+        ok(label + ": with every name skipped, it says replies run once",
+          out.none.shown && /No pass runs, so replies run once, with your prompt for replies\./.test(String(out.none.text)), JSON.stringify(out.none));
+        ok(label + ": and goes once the list is fixed", out.after.shown === false, JSON.stringify(out.after));
+      },
+    );
+  }
+
+  // The passes for your own messages. Each name runs that preset's prompt for
+  // your messages, a built-in prompt for your messages runs as it is, and a
+  // built-in prompt for replies is skipped and named under the box. The line
+  // and what is sent come from one lookup, so they agree. Phone and laptop.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(
+      browser,
+      {
+        viewport,
+        touch,
+        saved: { passMode: "many", passNamesYours: ["Tidy", "A line judge", "A judge", "Nowhere"] },
+        presets: [{
+          name: "Tidy",
+          at: 1,
+          settings: {
+            blocks: [{ id: "r", name: "Reply", on: true, role: "user", text: "FOR REPLIES {{message}}" }],
+            userBlocks: [{ id: "u", name: "Yours", on: true, role: "user", text: "FOR YOUR MESSAGES {{message}}" }],
+          },
+        }],
+      },
+      async (page) => {
+        await goTab(page, "Limits");
+        const out = await page.evaluate(async () => {
+          const area = document.querySelector('#drawer textarea[data-arf-field="passNamesYours"]');
+          const note = document.querySelector('#drawer [data-arf-passnote="passNamesYours"]');
+          // A change sends the settings, so the last send is what runs.
+          area.dispatchEvent(new Event("blur"));
+          await new Promise((res) => setTimeout(res, 400));
+          const last = window.__sent.filter((m) => m.type === "set_settings").pop();
+          const sent = (last && last.settings && last.settings.passesYours) || [];
+          const drawer = document.getElementById("drawer").getBoundingClientRect();
+          const r = area.getBoundingClientRect();
+          return {
+            names: sent.map((p) => p.name),
+            first: sent[0] ? sent[0].blocks.map((b) => b.text).join(" ") : "",
+            replies: ((last && last.settings && last.settings.passes) || []).length,
+            note: note ? note.textContent : null,
+            inside: r.left >= drawer.left - 1 && r.right <= drawer.right + 1,
+            sideways: document.documentElement.scrollWidth > innerWidth + 1,
+          };
+        });
+        ok(label + ": the passes for your messages are sent in order, skipping the ones that cannot run",
+          JSON.stringify(out.names) === JSON.stringify(["Tidy", "A line judge"]), JSON.stringify(out));
+        ok(label + ": a preset's pass runs its prompt for your messages, not for replies",
+          /FOR YOUR MESSAGES/.test(out.first) && !/FOR REPLIES/.test(out.first), out.first);
+        ok(label + ": and it leaves the passes for replies empty", out.replies === 0, String(out.replies));
+        ok(label + ": a built-in prompt for replies is named as skipped",
+          /A judge is a prompt for replies, so it is skipped here\./.test(String(out.note)), String(out.note));
+        ok(label + ": and so is a name no preset has", /No preset is called Nowhere/.test(String(out.note)), String(out.note));
+        const none = await page.evaluate(async () => {
+          const area = document.querySelector('#drawer textarea[data-arf-field="passNamesYours"]');
+          area.value = "A judge\nNowhere";
+          area.dispatchEvent(new Event("input", { bubbles: true }));
+          await new Promise((res) => setTimeout(res, 600));
+          const note = document.querySelector('#drawer [data-arf-passnote="passNamesYours"]');
+          return note ? note.textContent : null;
+        });
+        ok(label + ": with every name skipped, it says your messages run once",
+          /No pass runs, so your messages run once, with your prompt for them\./.test(String(none)), String(none));
+        ok(label + ": the box fits the panel", out.inside && !out.sideways, JSON.stringify(out));
+      },
+    );
+  }
+
+  await inTab(browser, { saved: { passMode: "many", passNames: "A judge\nMine" } }, async (page) => {
+    await goTab(page, "Limits");
+    const shown = await page.evaluate(() => document.querySelector('#drawer textarea[data-arf-field="passNames"]').value);
+    ok("passes already saved as text are read back as a list", shown === "A judge\nMine", JSON.stringify(shown));
+  });
+
+  // The four were renamed. A pick and a pass saved under the old names follow
+  // the rename rather than leaving the picker empty and the pass skipped.
+  await inTab(
+    browser,
+    { saved: { presetPick: "The line edit", passMode: "many", passNames: ["The line edit", "Mine"] } },
+    async (page) => {
+      await goTab(page, "Prompt");
+      const pick = await page.evaluate(() => document.querySelector('#drawer [data-arf-field="presetPick"]').value);
+      ok("a pick saved under an old built-in name follows the rename", pick === "A judge", JSON.stringify(pick));
+      await goTab(page, "Limits");
+      const passes = await page.evaluate(() => document.querySelector('#drawer textarea[data-arf-field="passNames"]').value);
+      ok("and so does a pass named after one, leaving your own names alone",
+        passes === "A judge\nMine", JSON.stringify(passes));
+    },
+  );
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const fresh = await look(page);
+    ok("a fresh install can type into its blocks", fresh.readOnly === false, JSON.stringify(fresh));
+    ok("and is told nothing about a locked prompt", !fresh.said, JSON.stringify(fresh));
+
+    const picked = await page.evaluate(async () => {
+      const pick = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      const one = [...pick.options].find((o) => /^A judge$/.test(o.textContent.trim()));
+      pick.value = one.value;
+      pick.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 250));
+      return true;
+    });
+    ok("one of the built-in prompts was picked", picked, "");
+    // The lock has to survive the panel being taken down and built again.
+    // Lumiverse does that on its own terms: changing drawer tab does it, and so
+    // does leaving it alone for a while. The picker used to live in memory, so
+    // it came back empty and took the lock with it, and the boxes went back to
+    // taking typing over a prompt that cannot be written over.
+    {
+      const before = await look(page);
+      await page.evaluate(() => {
+        try { window.__teardown && window.__teardown(); } catch (_) {}
+        document.getElementById("drawer").innerHTML = "";
+        window.__handlers = {};
+        window.__teardown = window.__setup({
+          events: { on: (n, f) => { (window.__handlers[n] = window.__handlers[n] || []).push(f); return () => {}; } },
+          ui: { registerDrawerTab: () => ({ root: document.getElementById("drawer"), setBadge: () => {}, activate: () => {}, destroy: () => {} }) },
+          messaging: { send: () => {}, onMessage: () => () => {} },
+        });
+      });
+      await page.waitForTimeout(700);
+      await goTab(page, "Prompt");
+      const after = await look(page);
+      const pick = await page.evaluate(
+        () => document.querySelector('#drawer [data-arf-field="presetPick"]').value,
+      );
+      ok("the lock is on before the panel is taken down", before.readOnly === true, JSON.stringify(before));
+      ok("and still on when Lumiverse builds it again", after.readOnly === true, JSON.stringify(after));
+      ok("a locked block shows no typing cursor", after.noCaret === true, JSON.stringify(after));
+      ok("with the note still saying why", after.said === true, JSON.stringify(after));
+      ok("and the picker still naming the prompt", pick === "A judge", JSON.stringify(pick));
+    }
+    const held = await look(page);
+    ok("the blocks stop taking typing", held.readOnly === true, JSON.stringify(held));
+    // The switch is the one control that stays live. Turning a block on or off
+    // chooses which parts go to the model; it does not rewrite a word of what
+    // they say, and what they say is the thing that cannot be written over.
+    // Locking it put the parts that come switched off out of reach: What Has
+    // Happened is one of them, so wanting your memories in the prompt meant
+    // saving a copy under your own name to reach a switch sitting right there.
+    ok("but the switch beside each one stays live", held.switchOff === false, JSON.stringify(held));
+    ok("and so does adding another", held.addOff === true, JSON.stringify(held));
+    ok("a line says why", held.said, JSON.stringify(held));
+    ok("and says Save as new is the way round it", /Save as new/.test(held.text), held.text.slice(0, 200));
+  });
+
+  // Saving it under a name of your own hands the copy back, open for editing.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const out = await page.evaluate(async () => {
+      const pick = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      const one = [...pick.options].find((o) => /^A judge$/.test(o.textContent.trim()));
+      pick.value = one.value;
+      pick.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 250));
+      const name = document.querySelector('#drawer [data-arf-field="presetName"]');
+      name.value = "Mine, off the judge";
+      name.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector('#drawer [data-arf-preset="new"]').click();
+      await new Promise((r) => setTimeout(r, 300));
+      const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+      return {
+        readOnly: ta ? !!ta.readOnly : null,
+        said: !!document.querySelector("#drawer [data-arf-promptlocked]"),
+      };
+    });
+    ok("the copy opens for editing", out.readOnly === false, JSON.stringify(out));
+    ok("and the line about it goes", !out.said, JSON.stringify(out));
+  });
+}
+
+console.log("\nwhen the prompt stops matching the preset named in the box");
+{
+  // Loading a preset sets the picker and nothing cleared it, so editing a block
+  // afterwards left the box naming a preset the prompt no longer matched.
+  //
+  // A built-in prompt cannot be typed in, but the prompt can still change
+  // while its name is in the box, such as by an import. The check changes a
+  // block by script to stand for that. The panel has to say the prompt no
+  // longer matches the preset it names, and where to keep the change.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+    const out = await page.evaluate(async () => {
+      const seen = () => {
+        const n = document.querySelector("#drawer [data-arf-preset-drift]");
+        return n ? { kind: n.getAttribute("data-arf-preset-drift"), text: n.textContent } : null;
+      };
+      const pick = document.querySelector('#drawer [data-arf-field="presetPick"]');
+      const builtIn = Array.from(pick.options).find((o) => /^A judge$/.test(o.textContent.trim()));
+      pick.value = builtIn.value;
+      pick.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 250));
+      const afterLoading = seen();
+      const box = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+      if (box) {
+        box.focus();
+        box.value = box.value + "\nOne more line of my own.";
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        // Leaving the box is what redraws the card, which the panel already
+        // relies on elsewhere: an edit can take {{message}} out of the whole
+        // prompt, and the warning for that lands on blur too.
+        box.blur();
+        box.dispatchEvent(new Event("blur", { bubbles: true }));
+      }
+      await new Promise((r) => setTimeout(r, 350));
+      return { afterLoading: afterLoading, afterEditing: seen(), edited: !!box };
+    });
+    // The half that kept getting this wrong: a preset that has only just loaded
+    // matches itself, and saying otherwise would put the line on screen for
+    // everybody the moment they picked anything.
+    ok("a freshly loaded preset says nothing", out.afterLoading === null, JSON.stringify(out.afterLoading));
+    ok("there was a block to edit", out.edited, JSON.stringify(out));
+    ok("editing one says the prompt has changed", !!out.afterEditing, JSON.stringify(out.afterEditing));
+    ok(
+      "and on a built-in one it says to keep it under a name of your own",
+      !!out.afterEditing && out.afterEditing.kind === "built-in" && /Save as new/.test(out.afterEditing.text),
+      JSON.stringify(out.afterEditing),
+    );
+  });
+}
+
+console.log("\nwhen a default moves under somebody who was on it");
+{
+  // The line only reaches a reader still holding the old value, because that is
+  // who was following the default. Anybody who set their own is told nothing:
+  // their setup did not change, and a line about a default they are not on is
+  // a line to dismiss for no reason.
+  //
+  // These rows are made up for the check, and go in after the rows the table
+  // already holds. One is a text read only with two models, and one is a
+  // switch.
+  const OLD = "`reply` mentions the weather twice.\n`reply` names a color that is not in the scene.";
+  const CHECKS_ROW = { key: "judgeChecks", was: OLD, label: "What the second model checks", why: "A made-up reason.", needs: { key: "judgeMode", is: "two" } };
+  const TOAST_ROW = { key: "toast", was: true, label: "Lumiverse notification when a refine finishes", why: "Another made-up reason." };
+  const ROWS = [CHECKS_ROW, TOAST_ROW];
+  const seen = (page) =>
+    page.evaluate(() => {
+      const n = document.querySelector("#drawer [data-arf-moveddefault]");
+      return n ? n.textContent : null;
+    });
+  const stored = (page) =>
+    page.evaluate(() => {
+      const raw = localStorage.getItem("lv-auto-refine:settings:v1");
+      return {
+        now: raw ? JSON.parse(raw).judgeChecks : null,
+        toast: raw ? JSON.parse(raw).toast : null,
+        line: !!document.querySelector("#drawer [data-arf-moveddefault]"),
+      };
+    });
+  const press = (page, which) =>
+    page.evaluate(async (which) => {
+      document.querySelector('#drawer [data-arf-moveddefault="' + which + '"]').click();
+      await new Promise((r) => setTimeout(r, 200));
+    }, which);
+  // The account's answer to the panel's first ask.
+  const account = (page, settings) =>
+    page.evaluate(async (settings) => {
+      const id = window.__sent.filter((m) => m.type === "load_settings").pop().requestId;
+      window.__fromBackend({ type: "loaded_settings", requestId: id, settings });
+      await new Promise((r) => setTimeout(r, 100));
+    }, settings);
+  // A switch pressed the way a reader presses it, on whichever tab holds it.
+  const flip = async (page, key) => {
+    for (const tab of await page.evaluate(() => Array.from(document.querySelectorAll("#drawer .arf-tab")).map((t) => t.textContent.trim()))) {
+      await goTab(page, tab);
+      const done = await page.evaluate((k) => {
+        const box = document.querySelector('#drawer [data-arf-field="' + k + '"]');
+        if (!box || !box.offsetParent) return false;
+        box.click();
+        return true;
+      }, key);
+      if (done) return true;
+    }
+    return false;
+  };
+
+  ok("the made-up old list is not the built-in one", OLD !== STOCK_DEFAULTS.judgeChecks, "");
+  ok("and the switch's old value is not its default", STOCK_DEFAULTS.toast !== true, "");
+
+  // Two models, and still on the old list.
+  await inTab(browser, { moved: ROWS, saved: { judgeMode: "two", judgeChecks: OLD } }, async (page) => {
+    const said = await seen(page);
+    ok("somebody on the old default is told", !!said, JSON.stringify(said));
+    ok("and the line names the setting", !!said && /What the second model checks/.test(said), JSON.stringify(said));
+    await press(page, "take");
+    const after = await stored(page);
+    ok("taking it moves them to the new one", after.now === STOCK_DEFAULTS.judgeChecks, JSON.stringify(after));
+  });
+
+  // The same list with a space at the end of a line and an empty line after
+  // it, which a box that was clicked into can hold. Still the list they had.
+  await inTab(browser, { moved: ROWS, saved: { judgeMode: "two", judgeChecks: OLD.replace("\n", "  \n") + "\n\n" } }, async (page) => {
+    ok("spaces and empty lines do not hide the line", !!(await seen(page)), "");
+  });
+
+  // The checks are only read with two models.
+  await inTab(browser, { moved: ROWS, saved: { judgeMode: "one", judgeChecks: OLD } }, async (page) => {
+    ok("somebody on one model is left alone", (await seen(page)) === null, "");
+  });
+
+  // Wrote their own, so nothing of theirs moved.
+  await inTab(browser, { moved: ROWS, saved: { judgeMode: "two", judgeChecks: "`reply` repeats itself." } }, async (page) => {
+    ok("somebody who chose their own is left alone", (await seen(page)) === null, "");
+  });
+
+  // Already on the new one.
+  await inTab(browser, { moved: ROWS, saved: { judgeMode: "two" } }, async (page) => {
+    ok("and so is somebody already on the new one", (await seen(page)) === null, "");
+  });
+
+  // A switch that moved names itself to somebody still on it.
+  await inTab(browser, { moved: ROWS, saved: { toast: true } }, async (page) => {
+    const said = await seen(page);
+    ok("somebody on the old switch value is told, by its name", !!said && said.indexOf(TOAST_ROW.label) >= 0, JSON.stringify(said));
+  });
+
+  // A new install: nothing in this browser and nothing on the account. It
+  // started after the move, so it was never on the old value, even once the
+  // reader turns the switch on themselves.
+  await inTab(browser, { moved: ROWS }, async (page) => {
+    await account(page, {});
+    const flipped = await flip(page, "toast");
+    ok("the check found the switch to press", flipped, "");
+    await settle(page);
+    // The line is drawn with a tab, so another tab is opened, as a reader
+    // moving on would.
+    const tabs = await page.evaluate(() => Array.from(document.querySelectorAll("#drawer .arf-tab")).map((t) => t.textContent.trim()));
+    for (const t of tabs.slice(0, 2)) await goTab(page, t);
+    const after = await stored(page);
+    ok("the switch is on", after.toast === true, JSON.stringify(after));
+    ok("a new install that picks the old value is not told it was on it", (await seen(page)) === null, JSON.stringify(await seen(page)));
+  });
+
+  // The same install, opened again: what it was marked with went to the
+  // account with the change, and comes back from there.
+  await inTab(browser, { moved: ROWS }, async (page) => {
+    await account(page, {});
+    await flip(page, "toast");
+    await settle(page);
+    const up = await page.evaluate(() => window.__sent.filter((m) => m.type === "set_settings").pop());
+    ok("the mark goes to the account with the change", !!up && !!up.settings && !!up.settings.movedSeen, JSON.stringify(up && up.settings && up.settings.movedSeen));
+    const keep = up && up.settings;
+    await inTab(browser, { moved: ROWS }, async (again) => {
+      await account(again, keep);
+      ok("and on another device it is still not told", (await seen(again)) === null, JSON.stringify(await seen(again)));
+    });
+  });
+
+  // An account from before the move, opened in a new browser. It has
+  // settings, so it is not a new install, and it is told.
+  await inTab(browser, { moved: ROWS }, async (page) => {
+    await account(page, { toast: true });
+    await settle(page);
+    ok("an older account opened in a new browser is told", !!(await seen(page)), "");
+  });
+
+  // Each row is answered on its own. A row added after somebody answered
+  // another is still told, and the one answered is not asked about again.
+  await inTab(browser, { moved: [TOAST_ROW], saved: { toast: true, judgeMode: "two", judgeChecks: OLD } }, async (page) => {
+    await press(page, "keep");
+    const kept = await page.evaluate(() => JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")));
+    await inTab(browser, { moved: ROWS, saved: kept }, async (later) => {
+      const said = await seen(later);
+      ok("a row added later is told", !!said && said.indexOf(CHECKS_ROW.label) >= 0, JSON.stringify(said));
+      ok("and the row already answered is not", !!said && said.indexOf(TOAST_ROW.label) < 0, JSON.stringify(said));
+    });
+  });
+
+  // The line is 30 by default.
+  ok("judgeOver is 30 by default", STOCK_DEFAULTS.judgeOver === 30, String(STOCK_DEFAULTS.judgeOver));
+
+  // The real row for the swipe list, which moved after 1.53.2. Somebody with
+  // the swipe switch on and the old list is told, and Take it puts in the new
+  // list. With the switch off, the list does nothing, so nobody is told.
+  const OLD_SWIPE =
+    '[aria-label="Next swipe"], [data-action="swipe-right"], [data-testid="swipe-right"], ' +
+    'button[aria-label*="next swipe" i], button[aria-label*="swipe right" i], button[title*="swipe" i]';
+  await inTab(browser, { saved: { asSwipe: true, swipeSelector: OLD_SWIPE } }, async (page) => {
+    const said = await seen(page);
+    ok("the old swipe list is told about, by its name", !!said && said.indexOf("Your next / swipe button") >= 0, JSON.stringify(said));
+    await press(page, "take");
+    const now = await page.evaluate(() => JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1")).swipeSelector);
+    ok("and Take it puts in the list that finds the swipe box", /^\[data-component="SwipeControls"\] button:last-of-type/.test(now) && now.indexOf("swipe-right") < 0, now);
+  });
+  await inTab(browser, { saved: { asSwipe: false, swipeSelector: OLD_SWIPE } }, async (page) => {
+    ok("with the swipe switch off, the old list is not told about", (await seen(page)) === null, JSON.stringify(await seen(page)));
+  });
+
+  // Keep mine puts it away without changing the setting.
+  await inTab(browser, { moved: ROWS, saved: { judgeMode: "two", judgeChecks: OLD } }, async (page) => {
+    await press(page, "keep");
+    const after = await stored(page);
+    ok("keeping yours leaves the setting alone", after.now === OLD, JSON.stringify(after));
+    ok("and still takes the line away", !after.line, JSON.stringify(after));
+  });
+}
+
+console.log("\npick it for me in the drawer");
+{
+  // Pointer events sent the way a phone or a mouse sends them. A phone holding
+  // a text box starts its own text selection and takes the press away with a
+  // pointercancel, and only reports the finger lifting with touchend.
+  const press = (page, sel, kind) =>
+    page.evaluate(
+      ({ sel, kind }) => {
+        const t = document.querySelector(sel);
+        if (!t) throw new Error("nothing at " + sel);
+        const r = t.getBoundingClientRect();
+        const at = { bubbles: true, cancelable: true, composed: true, clientX: r.left + 4, clientY: r.top + 4 };
+        const type = kind === "mouse" ? "mouse" : "touch";
+        t.dispatchEvent(new PointerEvent("pointerdown", { ...at, pointerType: type, isPrimary: true }));
+        if (kind === "phone") t.dispatchEvent(new PointerEvent("pointercancel", { ...at, pointerType: type, isPrimary: true }));
+      },
+      { sel, kind },
+    );
+  const lift = (page, sel, kind) =>
+    page.evaluate(
+      ({ sel, kind }) => {
+        const t = document.querySelector(sel);
+        if (kind === "mouse") t.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, pointerType: "mouse" }));
+        else t.dispatchEvent(new Event("touchend", { bubbles: true }));
+      },
+      { sel, kind },
+    );
+  const state = (page) =>
+    page.evaluate(() => {
+      const bar = document.querySelector(".arf-pickbar");
+      const r = bar ? bar.getBoundingClientRect() : null;
+      const no = bar ? bar.querySelector("[data-arf-pickbar-cancel]") : null;
+      const box = document.querySelector('#drawer [data-arf-field="inputSelector"]');
+      const swipe = document.querySelector('#drawer [data-arf-field="swipeSelector"]');
+      const said = [...document.querySelectorAll("#drawer .arf-note")].map((n) => n.textContent).join(" | ");
+      return {
+        bar: !!bar,
+        on: !!bar && bar.hasAttribute("data-arf-on"),
+        text: bar ? bar.textContent : "",
+        rect: r ? { left: r.left, right: r.right, top: r.top, bottom: r.bottom } : null,
+        cancelH: no ? no.getBoundingClientRect().height : 0,
+        wide: document.documentElement.scrollWidth > window.innerWidth,
+        picking: document.documentElement.classList.contains("arf-picking"),
+        input: box ? box.value : null,
+        swipe: swipe ? swipe.value : null,
+        said,
+        activated: window.__activated || 0,
+        asks: window.__sent.filter((m) => m && m.type === "close_drawer"),
+      };
+    });
+
+  // The input box on a phone, in Lumiverse's own markup.
+  await inTab(browser, { viewport: { width: 360, height: 760 }, touch: true, saved: { inputRefine: true } }, async (page, errors) => {
+    await goTab(page, "Setup");
+    await page.evaluate(() => {
+      window.__makeComposer("");
+      document.querySelector("#drawer [data-arf-pickinput]").click();
+    });
+    await page.waitForTimeout(300);
+    const up = await state(page);
+    ok("a phone: the drawer is asked to close", up.asks.length === 1 && !!up.asks[0].requestId, JSON.stringify(up.asks));
+    ok("a phone: a bar at the top says what to hold", up.on && /hold the chat input box/i.test(up.text), up.text);
+    ok("a phone: the bar fits the screen", !!up.rect && up.rect.left >= 0 && up.rect.right <= 360 && !up.wide, JSON.stringify(up.rect));
+    ok("a phone: its Cancel is big enough to tap", up.cancelH >= 32, up.cancelH);
+
+    // A tap is a tap.
+    const BOX = 'textarea[name="chat-message"]';
+    await press(page, BOX, "phone");
+    await lift(page, BOX, "phone");
+    await page.waitForTimeout(800);
+    const tapped = await state(page);
+    ok("a phone: a quick tap on the box picks nothing", tapped.bar && tapped.picking && tapped.activated === 0, JSON.stringify(tapped).slice(0, 300));
+
+    // A hold that the phone takes away with its own text selection.
+    await press(page, BOX, "phone");
+    await page.waitForTimeout(800);
+    const held = await state(page);
+    ok("a phone: holding the box picks it by its name", held.input === BOX, JSON.stringify(held.input));
+    ok("a phone: and the bar goes", !held.picking && !held.on, JSON.stringify(held).slice(0, 300));
+    ok("a phone: and the tab opens again", held.activated === 1, held.activated);
+    ok("a phone: and the card says what was picked", held.said.indexOf("Set to " + BOX) >= 0, held.said.slice(0, 300));
+    await lift(page, BOX, "phone");
+    ok("a phone: no console errors", errors.length === 0, errors.join("\n"));
+  });
+
+  // The next arrow on a laptop, held on the icon inside it, in a language
+  // that is not English.
+  await inTab(browser, { viewport: { width: 1280, height: 800 }, saved: { asSwipe: true } }, async (page, errors) => {
+    // The swipe switch and the box under it are on Limits.
+    await goTab(page, "Limits");
+    await page.evaluate(() => {
+      const box = document.createElement("div");
+      box.setAttribute("data-component", "SwipeControls");
+      box.innerHTML =
+        '<button aria-label="Deslizar anterior"><svg width="16" height="16"><path d="M0 0h16v16z"/></svg></button>' +
+        "<span>2/3</span>" +
+        '<button aria-label="Deslizar siguiente"><svg width="16" height="16"><path id="next-icon" d="M0 0h16v16z"/></svg></button>';
+      document.body.appendChild(box);
+      document.querySelector("#drawer [data-arf-pickswipe]").click();
+    });
+    await page.waitForTimeout(300);
+    const up = await state(page);
+    ok("a laptop: the bar names the arrow and Esc", /next \/ swipe arrow/.test(up.text) && /Esc/.test(up.text), up.text);
+    await press(page, "#next-icon", "mouse");
+    await page.waitForTimeout(800);
+    await lift(page, "#next-icon", "mouse");
+    const held = await state(page);
+    ok("a laptop: holding the icon picks the arrow around it", held.swipe === 'button[aria-label="Deslizar siguiente"]', JSON.stringify(held.swipe));
+    ok("a laptop: and the tab opens again", held.activated === 1, held.activated);
+
+    // Esc stops it, and the tab opens again saying so.
+    // A real press, right after the last pick: pointer down, up, then the click.
+    await page.click("#drawer [data-arf-pickswipe]");
+    await page.waitForTimeout(300);
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(400);
+    const esc = await state(page);
+    ok("a laptop: Esc stops picking", !esc.picking && !esc.bar, JSON.stringify(esc).slice(0, 300));
+    ok("a laptop: and the card says it was canceled", /Picking canceled/.test(esc.said), esc.said.slice(0, 300));
+    ok("a laptop: and nothing changed", esc.swipe === held.swipe, esc.swipe);
+    ok("a laptop: no console errors", errors.length === 0, errors.join("\n"));
+  });
+
+  // The bar does not move: there at once, and gone at once. Read from what
+  // is drawn.
+  await inTab(browser, { viewport: { width: 1280, height: 800 }, saved: { inputRefine: true } }, async (page) => {
+    await goTab(page, "Setup");
+    const moves = await page.evaluate(async () => {
+      const drawn = () => {
+        const bar = document.querySelector(".arf-pickbar");
+        if (!bar) return null;
+        const cs = getComputedStyle(bar);
+        const m = new DOMMatrixReadOnly(cs.transform === "none" ? undefined : cs.transform);
+        return { opacity: Number(cs.opacity), y: m.m42, moving: bar.getAnimations().length };
+      };
+      document.querySelector("#drawer [data-arf-pickinput]").click();
+      const first = drawn();
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const settled = drawn();
+      document.querySelector("[data-arf-pickbar-cancel]").click();
+      return { first, settled, gone: !document.querySelector(".arf-pickbar") };
+    });
+    ok("the bar is there at once, with no fade or slide", !!moves.first && moves.first.opacity === 1 && moves.first.y === 0 && moves.first.moving === 0, JSON.stringify(moves));
+    ok("and stays still", !!moves.settled && moves.settled.opacity === 1 && moves.settled.y === 0 && moves.settled.moving === 0, JSON.stringify(moves));
+    ok("Cancel takes it away at once, with no fade", moves.gone, JSON.stringify(moves));
+  });
+
+  // What it will not take, and a Lumiverse that cannot close the drawer.
+  await inTab(browser, { viewport: { width: 1280, height: 800 }, saved: { inputRefine: true } }, async (page, errors) => {
+    await goTab(page, "Setup");
+    const before = (await state(page)).input;
+    await page.evaluate(() => {
+      const other = document.createElement("div");
+      other.setAttribute("data-spindle-ext", "someone-else");
+      other.innerHTML = '<textarea name="their-box" style="width:200px;height:40px"></textarea>';
+      document.body.appendChild(other);
+      const plain = document.createElement("div");
+      plain.id = "plain";
+      plain.style.cssText = "width:200px;height:40px";
+      document.body.appendChild(plain);
+      document.querySelector("#drawer [data-arf-pickinput]").click();
+    });
+    await page.waitForTimeout(300);
+    const ask = (await state(page)).asks[0];
+    await page.evaluate((id) => window.__fromBackend({ type: "close_drawer", requestId: id, ok: false }), ask.requestId);
+    const told = await state(page);
+    ok("no drawer close: the bar asks to close it first", /Close this panel first/.test(told.text), told.text);
+
+    await press(page, 'textarea[name="their-box"]', "mouse");
+    await page.waitForTimeout(800);
+    await lift(page, 'textarea[name="their-box"]', "mouse");
+    const theirs = await state(page);
+    ok("another extension's box is not taken", theirs.input === before && /another extension/.test(theirs.said), theirs.said.slice(0, 300));
+
+    // A real press, right after the last pick: pointer down, up, then the click.
+    await page.click("#drawer [data-arf-pickinput]");
+    await page.waitForTimeout(300);
+    await press(page, "#plain", "mouse");
+    await page.waitForTimeout(800);
+    await lift(page, "#plain", "mouse");
+    const plain = await state(page);
+    ok("something that is not a text box is not taken for the input box", plain.input === before && /not a text box/.test(plain.said), plain.said.slice(0, 300));
+
+    // Switched off while it is up, nothing of it is left on the page.
+    // A real press, right after the last pick: pointer down, up, then the click.
+    await page.click("#drawer [data-arf-pickinput]");
+    await page.waitForTimeout(300);
+    await page.evaluate(() => window.__teardown());
+    await page.waitForTimeout(300);
+    const gone = await page.evaluate(() => ({
+      bar: !!document.querySelector(".arf-pickbar"),
+      picking: document.documentElement.classList.contains("arf-picking"),
+    }));
+    ok("teardown takes the bar and the picking mode away", !gone.bar && !gone.picking, JSON.stringify(gone));
+    ok("no console errors", errors.length === 0, errors.join("\n"));
+  });
+}
+
+console.log("\nwhere the input box is");
+{
+  // The one card that reads Lumiverse's own layout. A release that moves the
+  // box breaks refining a draft and nothing else, so the reader has to be able
+  // to see what is being tried and put their own selector in front of it.
+  // It hangs under Refining the draft in your input box, the same as the
+  // next / swipe button hangs under Add the refine as a swipe, and only shows
+  // while that switch is on. Checked on a phone and a laptop.
+  for (const [where, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch }, async (page) => {
+      await goTab(page, "Setup");
+      const look = () =>
+        page.evaluate(() => {
+          const child = document.querySelector("#drawer [data-arf-inputchild]");
+          const above = child ? child.previousElementSibling : null;
+          return {
+            card: !!document.querySelector('#drawer [data-arf-card="Where the input box is"]'),
+            under: !!(above && above.querySelector('[data-arf-field="inputRefine"]')),
+            shown: !!child && child.getClientRects().length > 0 && getComputedStyle(child).display !== "none",
+            wide: child ? Math.round(child.scrollWidth - child.clientWidth) : -1,
+          };
+        });
+      const off = await look();
+      const sw = await page.$('#drawer [data-arf-field="inputRefine"]');
+      if (touch) await sw.tap();
+      else await sw.click();
+      await page.waitForTimeout(700);
+      const on = await look();
+      ok(where + ": it is no longer a card of its own", !off.card, JSON.stringify(off));
+      ok(where + ": it sits straight under Refining the draft in your input box", off.under, JSON.stringify(off));
+      ok(where + ": hidden while that switch is off", !off.shown, JSON.stringify(off));
+      ok(where + ": shown once it is switched on", on.shown, JSON.stringify(on));
+      ok(where + ": nothing in it runs off the side", on.wide <= 0, JSON.stringify(on));
+    });
+  }
+
+  await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+    await goTab(page, "Setup");
+    const seen = await page.evaluate(() => {
+      const list = document.querySelector("#drawer [data-arf-inputlist]");
+      return {
+        test: !!document.querySelector("#drawer [data-arf-testinput]"),
+        reset: !!document.querySelector("#drawer [data-arf-resetinput]"),
+        lines: list ? list.querySelectorAll("[data-arf-pick]").length : 0,
+        marked: list ? list.querySelectorAll('[data-arf-pick="on"]').length : 0,
+        text: list ? list.textContent : "",
+      };
+    });
+    ok("with a Test button", seen.test, JSON.stringify(seen).slice(0, 200));
+    ok("with a way back to the built-in list", seen.reset, JSON.stringify(seen).slice(0, 200));
+    // Every selector, not a count of them: the reader needs to compare what is
+    // being tried against their own page.
+    ok("every built-in selector is listed", seen.lines === 5, JSON.stringify(seen).slice(0, 200));
+    // Nothing on this page is a chat box, and the card says so rather than
+    // highlighting a line that is doing nothing.
+    ok("with nothing on the page, no line is marked", seen.marked === 0, JSON.stringify(seen).slice(0, 200));
+    ok("and the card says as much", /finds a box on this page/.test(seen.text), seen.text.slice(0, 200));
+  });
+
+  // With a box on the page, one line carries the mark: the first that finds it.
+  // The old card put a state after every line, which is what made it read as a
+  // wall of text.
+  await inTab(browser, {}, async (page) => {
+    await page.evaluate(() => window.__makeComposer(""));
+    await goTab(page, "Setup");
+    const seen = await page.evaluate(() => {
+      const list = document.querySelector("#drawer [data-arf-inputlist]");
+      const lines = Array.from(list.querySelectorAll("[data-arf-pick]"));
+      return {
+        lines: lines.length,
+        marked: lines.filter((n) => n.getAttribute("data-arf-pick") === "on").length,
+        first: lines.findIndex((n) => n.getAttribute("data-arf-pick") === "on"),
+        text: list.textContent,
+      };
+    });
+    ok("one line is marked as the one in use", seen.marked === 1, JSON.stringify(seen).slice(0, 200));
+    ok("and it is the first one that finds the box", seen.first === 0, JSON.stringify(seen).slice(0, 200));
+    ok("and the rest are left plain", seen.lines === 5, JSON.stringify(seen).slice(0, 200));
+    ok("and the card points at the mark", /highlighted one is the one in use/.test(seen.text), seen.text.slice(0, 200));
+  });
+
+  // A selector the browser cannot read is a typo. Test answers for the box as a
+  // whole and reads a box with one bad selector and four good ones as valid, so
+  // without a mark on the line there is nowhere the typo shows at all.
+  await inTab(browser, { saved: { inputSelector: 'textarea[name="chat-message"], textarea[[[broken' } }, async (page) => {
+    await page.evaluate(() => window.__makeComposer(""));
+    await goTab(page, "Setup");
+    const seen = await page.evaluate(() => {
+      const list = document.querySelector("#drawer [data-arf-inputlist]");
+      const lines = Array.from(list.querySelectorAll("[data-arf-pick]"));
+      return {
+        states: lines.map((n) => n.getAttribute("data-arf-pick")),
+        badText: (lines.find((n) => n.getAttribute("data-arf-pick") === "bad") || {}).textContent || "",
+        text: list.textContent,
+      };
+    });
+    ok("an unreadable selector is marked on its own line", seen.states.indexOf("bad") >= 0, JSON.stringify(seen).slice(0, 200));
+    ok("and it is the broken one, not a good one", /broken/.test(seen.badText), seen.badText.slice(0, 90));
+    ok("and the card says what the mark means", /not a selector the browser can read/.test(seen.text), seen.text.slice(0, 220));
+    // The good selector still wins, so one typo does not stop refining a draft.
+    ok("the good selector is still the one in use", seen.states.indexOf("on") >= 0, JSON.stringify(seen).slice(0, 200));
+  });
+
+  // The mark follows the same rule the writer does. A selector matching only
+  // our own panel, or a box that cannot be typed into, is not in use, and the
+  // card saying it is would send somebody hunting for a bug that is not there.
+  await inTab(browser, {}, async (page) => {
+    await page.evaluate(() => {
+      const box = window.__makeComposer("");
+      box.readOnly = true;
+    });
+    await goTab(page, "Setup");
+    const seen = await page.evaluate(() => {
+      const list = document.querySelector("#drawer [data-arf-inputlist]");
+      return {
+        marked: list.querySelectorAll('[data-arf-pick="on"]').length,
+        text: list.textContent,
+      };
+    });
+    ok("a box that cannot be typed into is not called the one in use", seen.marked === 0, JSON.stringify(seen).slice(0, 200));
+  });
+
+  // The box holds the list itself rather than sitting blank behind a hidden
+  // one, so what is being tried can be read and edited in place.
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Setup");
+    const seen = await page.evaluate(() => {
+      const box = document.querySelector('#drawer [data-arf-field="inputSelector"]');
+      return { tag: box ? box.tagName : "", value: box ? box.value : "" };
+    });
+    ok("it is one line, not a stack of them", seen.tag === "INPUT", JSON.stringify(seen).slice(0, 120));
+    ok("and starts holding the built-in list", /chat-message/.test(seen.value), seen.value.slice(0, 90));
+  });
+
+  // What the reader writes goes in front of the built-in list, which stays
+  // behind it, as in Auto Retry. A single selector from Pick it for me would
+  // otherwise be all there is the day Lumiverse renames that box.
+  await inTab(browser, { saved: { inputSelector: "textarea.mine" } }, async (page) => {
+    await goTab(page, "Setup");
+    const seen = await page.evaluate(() => {
+      const list = document.querySelector("#drawer [data-arf-inputlist]");
+      const lines = list ? [...list.querySelectorAll("[data-arf-pick]")].map((l) => l.textContent) : [];
+      return { lines, count: list ? list.getAttribute("data-arf-mine") : "?" };
+    });
+    ok("what they wrote is tried first", seen.lines[0] === "textarea.mine", JSON.stringify(seen).slice(0, 200));
+    ok("and the built-in list is still tried after it", seen.count === "6" && seen.lines.some((l) => /chat-message/.test(l)), JSON.stringify(seen).slice(0, 200));
+  });
+
+  // Emptying the box is not an instruction to stop looking: it is what an
+  // install from before this setting existed carries.
+  await inTab(browser, { saved: { inputSelector: "" } }, async (page) => {
+    await goTab(page, "Setup");
+    const seen = await page.evaluate(() => {
+      const list = document.querySelector("#drawer [data-arf-inputlist]");
+      return { all: list ? list.textContent : "" };
+    });
+    ok("an empty box falls back to the built-in list", /chat-message/.test(seen.all), seen.all.slice(0, 160));
+    ok("and says that is what happened", /box is empty/.test(seen.all), seen.all.slice(0, 120));
+  });
+}
+
+console.log("\ntokens and what they cost");
+{
+  // The preview used to report messages and characters, which is two numbers
+  // nobody is billed in. The count comes down with the request from the side
+  // the tokenizer lives on, and the panel says which of a count and a guess it
+  // is holding.
+  const answer = (page, tokens) =>
+    page.evaluate((tok) => {
+      const id = window.__sent.filter((m) => m.type === "preview_prompt").pop().requestId;
+      window.__fromBackend({
+        type: "prompt_preview",
+        requestId: id,
+        ok: true,
+        real: true,
+        messages: [
+          { role: "system", content: "Rules go here." },
+          { role: "user", content: "The passage." },
+        ],
+        tokens: tok,
+        parameters: null,
+        connectionId: "",
+        reasoning: { source: "off" },
+      });
+    }, tokens);
+  const build = (page) =>
+    page.evaluate(() => {
+      Array.from(document.querySelectorAll("#drawer button"))
+        .find((b) => /Show me the request|Build it again/.test(b.textContent))
+        .click();
+    });
+  const body = (page) =>
+    page.evaluate(() => document.querySelector("#drawer .arf-body").textContent);
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Context");
+    await build(page);
+    await answer(page, { parts: [{ name: "The rules", tokens: 900 }, { name: "The passage", tokens: 100 }], total: 1000, counted: true });
+    await settle(page);
+    let shown = await body(page);
+    ok("the request is measured in tokens", /1,000 tokens/.test(shown), shown.slice(0, 200));
+    ok("and it says where those tokens go, block by block", /Where the tokens go/.test(shown) && /The rules/.test(shown));
+    ok("with a share for each", /90%/.test(shown) && /10%/.test(shown), shown.slice(0, 400));
+    ok("with the characters kept beside them", /characters/.test(shown));
+    ok(
+      "a counted total is not called roughly anything",
+      !/roughly 1,000 tokens/.test(shown),
+    );
+    ok(
+      "and no cost is worked out until prices are set",
+      !/^About /m.test(shown) && !/for this refine/.test(shown),
+    );
+
+    // One message answered from the estimate makes the whole total a guess, and
+    // the panel has to say so rather than let it read as measured.
+    await build(page);
+    await answer(page, { parts: [{ name: "The rules", tokens: 900 }, { name: "The passage", tokens: 100 }], total: 1000, counted: false });
+    await settle(page);
+    shown = await body(page);
+    ok("an estimated total says so in words", /roughly 1,000 tokens/.test(shown));
+  });
+
+  // With prices in, the same request is priced. 3 per million in and 15 out,
+  // with 1000 sent and a 100-token passage, is 0.003 + 0.0015, so 0.0045.
+  await inTab(browser, { saved: { costIn: 3, costOut: 15 } }, async (page) => {
+    await goTab(page, "Context");
+    await build(page);
+    await answer(page, { parts: [{ name: "The rules", tokens: 900 }, { name: "The passage", tokens: 100 }], total: 1000, counted: true, passage: 100 });
+    await settle(page);
+    const shown = await body(page);
+    ok("prices turn the count into money", /About 0\.0045 for this refine/.test(shown), shown.slice(0, 300));
+    ok("and into a figure worth reading, across a hundred", /0\.45 across a hundred replies/.test(shown));
+    ok("no currency is invented", !/[$£€]/.test(shown));
+  });
+
+  // One price left at 0 is a price nobody gave, not a cost of nothing, so the
+  // line has to say which half of the sum it covers.
+  await inTab(browser, { saved: { costIn: 3 } }, async (page) => {
+    await goTab(page, "Context");
+    await build(page);
+    await answer(page, { parts: [{ name: "The rules", tokens: 900 }, { name: "The passage", tokens: 100 }], total: 1000, counted: true, passage: 100 });
+    await settle(page);
+    const shown = await body(page);
+    ok(
+      "with one price missing, the line says which half it covers",
+      /Only what is sent is priced/.test(shown),
+      shown.slice(0, 300),
+    );
+    ok("and the figure is the sent side alone", /About 0\.003 for this refine/.test(shown));
+  });
+
+  // The passage is counted on its own, so moving the block that holds it does
+  // not move what the cost is worked out from. Here the passage is 200 tokens
+  // and sits first, with a 800-token rule block after it: at 3 in and 15 out
+  // that is 0.003 + 0.003, and reading the last message instead would give
+  // 0.003 + 0.012.
+  await inTab(browser, { saved: { costIn: 3, costOut: 15 } }, async (page) => {
+    await goTab(page, "Context");
+    await build(page);
+    await answer(page, { parts: [{ name: "The passage", tokens: 200 }, { name: "The rules", tokens: 800 }], total: 1000, counted: true, passage: 200 });
+    await settle(page);
+    const shown = await body(page);
+    ok(
+      "the cost follows the passage rather than whatever block is last",
+      /About 0\.006 for this refine/.test(shown),
+      shown.slice(0, 300),
+    );
+  });
+
+  // What one really used, which lands after the refine rather than with it.
+  await inTab(browser, { saved: { costIn: 3, costOut: 15 } }, async (page) => {
+    await goTab(page, "Log");
+    let shown = await body(page);
+    ok("nothing is claimed before a refine has run", !/Last refine used/.test(shown));
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "refine_used", at: Date.now(), sent: 2000, back: 500, counted: true });
+    });
+    await settle(page);
+    shown = await body(page);
+    ok("what the last refine used is reported", /2,000 tokens input/.test(shown) && /500 tokens output/.test(shown), shown.slice(0, 300));
+    ok("and what it cost", /about 0\.013/.test(shown));
+  });
+
+  await inTab(browser, {}, async (page) => {
+    await goTab(page, "Log");
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "refine_used", at: Date.now(), sent: 2000, back: 500, counted: true });
+    });
+    await settle(page);
+    const shown = await body(page);
+    ok("the tokens are reported with no prices set", /2,000 tokens input/.test(shown));
+    ok("and no cost is put beside them", !/Last refine cost/.test(shown));
+  });
+
+  // A refine allowed a second ask costs twice, and the backend adds the asks up
+  // before sending, so a later figure replaces the earlier one rather than the
+  // panel showing whichever ask happened to land last.
+  await inTab(browser, { saved: { costIn: 3, costOut: 15 } }, async (page) => {
+    await goTab(page, "Log");
+    await page.evaluate(() => {
+      window.__fromBackend({ type: "refine_used", at: Date.now(), sent: 2000, back: 500, counted: true });
+      window.__fromBackend({ type: "refine_used", at: Date.now(), sent: 4000, back: 1000, counted: true });
+    });
+    await settle(page);
+    const shown = await body(page);
+    ok(
+      "a refine that asked twice reports both asks",
+      /4,000 tokens input/.test(shown) && /1,000 tokens output/.test(shown),
+      shown.slice(0, 300),
+    );
+    ok("and is priced on the pair", /about 0\.027/.test(shown), shown.slice(0, 300));
+  });
+}
+
+// ---- every switch's children are already on the panel ----
+console.log("\nno switch rebuilds the panel to show its children");
+{
+  // The bug this exists to end, which was found four separate times by hand:
+  // a card that builds its children only while their switch is on. Flipping
+  // that switch then has to rebuild the card, so the rows appear and vanish
+  // between two frames while every other row on the panel fades. Worse, each
+  // one had to be noticed by eye.
+  //
+  // Every row is built either way and hidden, so flipping any switch can only
+  // change how many rows are showing, never how many exist. That is what this
+  // measures, across every switch on every tab.
+  const TABS = ["Prompt", "Context", "Model", "Limits", "Log", "Setup"];
+  await inTab(browser, {}, async (page) => {
+    const bad = [];
+    let flipped = 0;
+    for (const t of TABS) {
+      await goTab(page, t);
+      const keys = await page.evaluate(() =>
+        [...document.querySelectorAll("#drawer [data-arf-field]")]
+          .filter((el) => el.type === "checkbox")
+          .map((el) => el.getAttribute("data-arf-field")),
+      );
+      for (const k of keys) {
+        const out = await page.evaluate(async (key) => {
+          const count = () =>
+            document.querySelectorAll("#drawer [data-arf-row],#drawer [data-arf-hangs]").length;
+          // Past the settle. A switch hides and shows its rows on the spot, and
+          // the rebuild that catches the rest of the card up runs 260ms later:
+          // counting before that lands measures the panel as it was and passes
+          // whatever the cards do, which is what the first version of this check
+          // did. It reported nothing wrong with the bug it exists to catch.
+          const settled = () => new Promise((r) => setTimeout(r, 420));
+          const box = document.querySelector('#drawer [data-arf-field="' + key + '"]');
+          if (!box) return null;
+          await settled();
+          const before = count();
+          box.click();
+          await settled();
+          const after = count();
+          // Put it back, so the next key starts where this one did.
+          box.click();
+          await settled();
+          return { key, before, after, back: count() };
+        }, k);
+        if (!out) continue;
+        flipped++;
+        if (out.after !== out.before || out.back !== out.before) bad.push(out);
+        // The master switch takes the whole panel down and is meant to.
+        if (k === "enabled") bad.pop();
+      }
+    }
+    ok("there are switches to flip, or this proves nothing", flipped > 15, "flipped " + flipped);
+    ok(
+      "flipping one changes what is shown, never what exists",
+      bad.length === 0,
+      JSON.stringify(bad.slice(0, 4)),
+    );
+  });
+}
+
+console.log("\nrefining the part you selected");
+{
+  // The host's own message structure, with prose invented for this check. Only
+  // data-component and data-spindle-scope are read by the extension: the class
+  // names carry a build hash and another extension's attributes may not be there
+  // at all, so neither is something to hang a feature on.
+  const BUBBLE = `
+  <div class="_bubble_86318_171">
+    <div class="_header_86318_177">
+      <span data-spindle-mount="message_header" data-spindle-scope="message:msg-one:minimal:header" style="display:contents"></span>
+    </div>
+    <div class="_container_14i0r_1">
+      <button type="button" data-reasoning-toggle="true">Thought for 0s</button>
+      <div class="_bodyWrapper_14i0r_60"><div class="_body_14i0r_60" id="thinking">The model's own working, which is not the reply.</div></div>
+    </div>
+    <div data-component="MessageContent"><div><div><div class="_prose_1rr8k_181"><p id="p1">Wren set the crate down on the step and wiped both hands on her jeans.</p>
+    <p id="p2"><span class="_proseDialogue_1rr8k_222">"The lock's been changed."</span> She tried the handle twice anyway.</p>
+    </div></div></div><div data-spindle-ext="someone_else" id="card">New text from Ines: the van is out front.</div></div>
+    <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:minimal:footer" style="display:contents"></span>
+  </div>`;
+  // The card at the end of the reply is another extension's, put there the way
+  // Lumiverse wraps anything an extension injects. It is not the reply.
+
+  await inTab(browser, { saved: { widgetOn: true, enabled: true } }, async (page) => {
+    const out = await page.evaluate(async (html) => {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = html;
+      document.body.appendChild(wrap);
+      // A refine needs to know which chat it is in, which the panel learns from
+      // the host rather than from the page. Without this the action is refused
+      // with "waiting to be told which chat you are in", which is the right
+      // answer and not the thing being checked here.
+      for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+      for (const f of window.__handlers.CHARACTER_MESSAGE_RENDERED || []) f({ chatId: "c1", messageId: "msg-one" });
+      await new Promise((r) => setTimeout(r, 40));
+
+      const pickIn = (id, text) => {
+        const node = [...document.getElementById(id).childNodes].find(
+          (n) => n.nodeType === 3 && n.nodeValue.includes(text),
+        ) || document.getElementById(id).firstChild;
+        const at = node.nodeValue.indexOf(text);
+        const r = document.createRange();
+        r.setStart(node, at < 0 ? 0 : at);
+        r.setEnd(node, (at < 0 ? 0 : at) + text.length);
+        const sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(r);
+        document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      };
+      const clear = () => {
+        getSelection().removeAllRanges();
+        document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      };
+      const menu = async () => {
+        window.__menu = null;
+        const b = document.querySelector("#float button") || document.querySelector(".arf-float");
+        if (!b) return null;
+        b.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 20, clientY: 20 }));
+        await new Promise((r) => setTimeout(r, 620));
+        b.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+        await new Promise((r) => setTimeout(r, 40));
+        return window.__menu ? window.__menu.items.filter((i) => i.type !== "divider").map((i) => i.label) : null;
+      };
+
+      const noneAtFirst = await menu();
+      pickIn("p1", "wiped both hands on her jeans");
+      const afterPicking = await menu();
+      clear();
+      const afterClearing = await menu();
+      pickIn("thinking", "own working");
+      const afterPickingThinking = await menu();
+      pickIn("card", "the van is out front");
+      const afterPickingCard = await menu();
+      // A drag from the last sentence of the reply into the card.
+      {
+        const from = [...document.getElementById("p2").childNodes].find((n) => n.nodeType === 3 && n.nodeValue.includes("handle"));
+        const to = document.getElementById("card").firstChild;
+        const r = document.createRange();
+        r.setStart(from, from.nodeValue.indexOf("handle"));
+        r.setEnd(to, 10);
+        getSelection().removeAllRanges();
+        getSelection().addRange(r);
+        document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      }
+      const afterDragIntoCard = await menu();
+      clear();
+
+      // And the one that actually runs it.
+      window.__sent.length = 0;
+      pickIn("p1", "wiped both hands");
+      window.__menuPick = "part";
+      await menu();
+      await new Promise((r) => setTimeout(r, 60));
+      const fired = window.__sent.filter((m) => m && m.type === "refine_selection");
+      window.__menuPick = null;
+      return { noneAtFirst, afterPicking, afterClearing, afterPickingThinking, afterPickingCard, afterDragIntoCard, fired };
+    }, BUBBLE);
+
+    const has = (list) => !!list && list.some((t) => /part I selected/i.test(t));
+    ok("with nothing selected the menu does not offer it", !has(out.noneAtFirst), JSON.stringify(out.noneAtFirst));
+    ok("selecting part of a reply puts it in the menu", has(out.afterPicking), JSON.stringify(out.afterPicking));
+    ok("and putting the selection away takes it out again", !has(out.afterClearing), JSON.stringify(out.afterClearing));
+    // The host draws the model's working outside the message body, so a
+    // selection in it is not in a reply and there is nothing to offer.
+    ok("selecting the model's working offers nothing", !has(out.afterPickingThinking), JSON.stringify(out.afterPickingThinking));
+    ok("selecting another extension's card inside the reply offers nothing", !has(out.afterPickingCard), JSON.stringify(out.afterPickingCard));
+    ok("and neither does a drag from the reply into that card", !has(out.afterDragIntoCard), JSON.stringify(out.afterDragIntoCard));
+
+    const one = out.fired && out.fired[0];
+    ok("choosing it sends the refine", !!one, JSON.stringify(out.fired));
+    ok("carrying the host's own message id", !!one && one.messageId === "msg-one", JSON.stringify(one));
+    ok("what was picked", !!one && one.picked === "wiped both hands", JSON.stringify(one));
+    // The text in front of it, which is how the backend tells one run of an
+    // identical phrase from another.
+    ok("and the text ahead of it, for counting", !!one && one.ahead === "Wren set the crate down on the step and ", JSON.stringify(one));
+  });
+}
+
+console.log("\nthe buttons in Lumiverse's own slots");
+{
+  // Two messages as the host draws them, cut down to the parts this reads: the
+  // footer slot and the id the host writes into its scope. The prose is
+  // invented for this check.
+  const MESSAGES = `
+  <div id="wrap">
+    <div class="_bubble_86318_171">
+      <div data-component="MessageContent"><div class="_prose_1rr8k_181"><p>The lamp over the bench had been out for a week.</p></div></div>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:minimal:footer" style="display:contents"></span>
+    </div>
+    <div class="_bubble_86318_171">
+      <div data-component="MessageContent"><div class="_prose_1rr8k_181"><p>She left the crate where it was and went back inside.</p></div></div>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-two:minimal:footer" style="display:contents"></span>
+    </div>
+  </div>`;
+
+  // The bubble display mode. The host's own buttons in the pill carry no class
+  // at all: the pill styles the buttons in it, which is why a button put in it
+  // has to be bare rather than dressed by this extension. Its mount sits at the
+  // end of the pill and lays its children out as though it were not there.
+  const MESSAGES_BUBBLE = `
+  <div id="wrap">
+  <style>
+    ._actionsPill{display:flex;align-items:center;gap:2px;padding:3px}
+    ._actionsPill button{width:26px;height:26px;padding:0;background:none;border:0;
+      border-radius:6px;display:inline-flex;align-items:center;justify-content:center}
+  </style>
+    <div class="_bubble_86318_171" data-message-id="msg-one">
+      <div data-component="MessageContent"><div class="_prose_1rr8k_181"><p>The lamp over the bench had been out for a week.</p></div></div>
+      <div data-component="BubbleActions" class="_pill_yv4ev_2 _actionsPill">
+        <button type="button" title="Copy" aria-label="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2"></rect></svg></button>
+        <button type="button" title="Edit" aria-label="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 5 4 4"></path></svg></button>
+        <span data-spindle-mount="message_actions" data-spindle-scope="message:msg-one:actions" style="display:contents"></span>
+      </div>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:footer" style="display:contents"></span>
+    </div>
+    <div class="_bubble_86318_171" data-message-id="msg-two">
+      <div data-component="MessageContent"><div class="_prose_1rr8k_181"><p>She left the crate where it was and went back inside.</p></div></div>
+      <div data-component="BubbleActions" class="_pill_yv4ev_2 _actionsPill">
+        <button type="button" title="Copy" aria-label="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2"></rect></svg></button>
+        <span data-spindle-mount="message_actions" data-spindle-scope="message:msg-two:actions" style="display:contents"></span>
+      </div>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-two:footer" style="display:contents"></span>
+    </div>
+  </div>`;
+
+  // The other display mode. Its row of actions carries nothing but hashed
+  // classes and the host leaves no mount inside it, so the row has to be found
+  // from a button that is in it and the buttons put in the row itself. Each of
+  // the host's own carries the classes that decide how it looks, which is what
+  // a button of this extension's has to be wearing to look like one of them.
+  const MESSAGES_MINIMAL = `
+  <div id="wrap">
+  <style>
+    ._actions_zwpor_1{display:flex;align-items:center;gap:2px}
+    ._btnIconSm_1jhj2_239{width:24px;height:24px;padding:4px;background:none;border:0;
+      border-radius:5px;display:inline-flex;align-items:center;justify-content:center}
+    ._btnGhost_1jhj2_218{color:rgba(255,255,255,.6)}
+    ._btnDangerGhost_1jhj2_247{color:#ef4444}
+  </style>
+    <div class="_bubble_86318_171" data-message-id="msg-one">
+      <div data-component="MessageContent"><div class="_prose_1rr8k_181"><p>The lamp over the bench had been out for a week.</p></div></div>
+      <div class="_actionsWrap_86318_304"><div class="_actions_zwpor_1">
+        <button type="button" class="_btn_1jhj2_166 _btnGhost_1jhj2_218 _btnIconSm_1jhj2_239" title="Edit" aria-label="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 5 4 4"></path></svg></button>
+        <button type="button" class="_btn_1jhj2_166 _btnGhost_1jhj2_218 _btnIconSm_1jhj2_239" title="Copy" aria-label="Copy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="14" height="14" x="8" y="8" rx="2"></rect></svg></button>
+        <button type="button" class="_btn_1jhj2_166 _btnDangerGhost_1jhj2_247 _btnIconSm_1jhj2_239" title="Delete" aria-label="Delete"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18"></path></svg></button>
+      </div></div>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:footer" style="display:contents"></span>
+    </div>
+    <div class="_bubble_86318_171" data-message-id="msg-two">
+      <div data-component="MessageContent"><div class="_prose_1rr8k_181"><p>She left the crate where it was and went back inside.</p></div></div>
+      <div class="_actionsWrap_86318_304"><div class="_actions_zwpor_1">
+        <button type="button" class="_btn_1jhj2_166 _btnGhost_1jhj2_218 _btnIconSm_1jhj2_239" title="Edit" aria-label="Edit"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m15 5 4 4"></path></svg></button>
+      </div></div>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-two:footer" style="display:contents"></span>
+    </div>
+  </div>`;
+
+  // What every run here needs on the page: the real input area, so the toolbar
+  // slot is the host's own rather than one invented to match the selector, and
+  // two messages with their footer slots.
+  const draw = async (page, html) =>
+    page.evaluate(async (markup) => {
+      window.__makeComposer("");
+      const wrap = document.createElement("div");
+      wrap.innerHTML = markup;
+      document.body.appendChild(wrap.firstElementChild);
+      // The panel refuses everything until it knows which chat it is in.
+      (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" }));
+      await new Promise((r) => setTimeout(r, 700));
+    }, html);
+
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(() => ({
+      // The aim, asserted before anything is measured: the host's own slots are
+      // on the page and empty is a real answer rather than a missing fixture.
+      barSlots: document.querySelectorAll('[data-spindle-mount="chat_actions"]').length,
+      msgSlots: document.querySelectorAll('[data-spindle-mount="message_footer"]').length,
+      bar: document.querySelectorAll('[data-arf-slot="bar"]').length,
+      msg: document.querySelectorAll('[data-arf-slot="message"]').length,
+      // Inside the slot the host left, not somewhere near it.
+      inBarSlot: !!document.querySelector('[data-spindle-mount="chat_actions"] [data-arf-slot="bar"]'),
+      onSecond: !!document.querySelector(
+        '[data-spindle-scope^="message:msg-two"] [data-arf-slot="message"]',
+      ),
+    }));
+    ok("the host's toolbar slot is on the page", out.barSlots === 1, JSON.stringify(out));
+    ok("and both message slots are", out.msgSlots === 2, JSON.stringify(out));
+    ok("one button goes in the toolbar slot", out.bar === 1 && out.inBarSlot, JSON.stringify(out));
+    ok("and one under each message", out.msg === 2 && out.onSecond, JSON.stringify(out));
+
+    // The one on the second message refines that message, not the latest.
+    const pressed = await page.evaluate(async () => {
+      window.__sent.length = 0;
+      document
+        .querySelector('[data-spindle-scope^="message:msg-two"] [data-arf-slot="message"]')
+        .click();
+      await new Promise((r) => setTimeout(r, 60));
+      return window.__sent.filter((m) => m && m.type === "refine_now");
+    });
+    ok("pressing the one on a message sends a refine", pressed.length === 1, JSON.stringify(pressed));
+    ok("for that message, by the host's own id", pressed[0] && pressed[0].messageId === "msg-two", JSON.stringify(pressed[0]));
+
+    // And it says a refine is running while one is.
+    const busy = await page.evaluate(
+      () => document.querySelectorAll('[data-arf-slot][aria-busy="true"]').length,
+    );
+    ok("every one of them shows that it is running", busy === 3, String(busy));
+
+    // Let it finish, then the toolbar one, which sends no id: the backend
+    // works out which reply is the latest, because it holds the messages.
+    const barSent = await page.evaluate(async () => {
+      const id = window.__sent.filter((m) => m.type === "refine_now").pop().requestId;
+      window.__fromBackend({ type: "refine_result", requestId: id, chatId: "c1", messageId: "msg-two", ok: false, why: "not this time" });
+      await new Promise((r) => setTimeout(r, 80));
+      window.__sent.length = 0;
+      document.querySelector('[data-arf-slot="bar"]').click();
+      await new Promise((r) => setTimeout(r, 60));
+      return window.__sent.filter((m) => m && m.type === "refine_now");
+    });
+    ok("pressing the one in the toolbar sends a refine", barSent.length === 1, JSON.stringify(barSent));
+    ok("with no message named, which means the latest", !!barSent[0] && !barSent[0].messageId, JSON.stringify(barSent[0]));
+  });
+
+  // Tapping a running refine calls it off. The spinner on these buttons was
+  // already saying it was working, and a reader who can see that expects the
+  // next tap to stop it.
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      document.querySelector('[data-arf-slot="bar"]').click();
+      await new Promise((r) => setTimeout(r, 60));
+      const started = window.__sent.filter((m) => m.type === "refine_now").length;
+      const label = document.querySelector('[data-arf-slot="bar"]').getAttribute("aria-label");
+      window.__sent.length = 0;
+      // The second tap, while that one is still running.
+      document.querySelector('[data-arf-slot="bar"]').click();
+      await new Promise((r) => setTimeout(r, 60));
+      return {
+        started: started,
+        label: label,
+        stops: window.__sent.filter((m) => m.type === "cancel_refine").length,
+        more: window.__sent.filter((m) => m.type === "refine_now").length,
+      };
+    });
+    ok("the first tap starts a refine", out.started === 1, JSON.stringify(out));
+    ok("and the button then names itself a stop", /stop/i.test(out.label || ""), JSON.stringify(out));
+    ok("the second tap stops it", out.stops === 1, JSON.stringify(out));
+    ok("rather than starting another", out.more === 0, JSON.stringify(out));
+  });
+
+  // The two that only make sense against a selection. They are on the message
+  // holding it and nowhere else, so neither is ever a button that does nothing.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const pick = (which, text) => {
+        const host = document.querySelector(
+          '[data-spindle-scope^="message:' + which + '"]',
+        ).parentElement.querySelector("p");
+        const node = host.firstChild;
+        const at = node.nodeValue.indexOf(text);
+        const r = document.createRange();
+        r.setStart(node, at);
+        r.setEnd(node, at + text.length);
+        const sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(r);
+        document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      };
+      const count = () => ({
+        part: document.querySelectorAll('[data-arf-slot="part"]').length,
+        snip: document.querySelectorAll('[data-arf-slot="snip"]').length,
+        // The button that refines the whole message, and whether it is drawn.
+        // Three marks sat in a row with a selection up, two of them eyes, and
+        // the one that ignored the selection looked like the one that used it.
+        whole: Array.from(document.querySelectorAll('[data-arf-slot="message"]')).filter(
+          (n) => getComputedStyle(n).display !== "none",
+        ).length,
+        onOne: !!document.querySelector(
+          '[data-spindle-scope^="message:msg-one"] [data-arf-slot="part"]',
+        ),
+        onTwo: !!document.querySelector(
+          '[data-spindle-scope^="message:msg-two"] [data-arf-slot="part"]',
+        ),
+      });
+      const before = count();
+      pick("msg-one", "The lamp");
+      await new Promise((r) => setTimeout(r, 400));
+      const after = count();
+      // Moving the selection to the other message moves the buttons with it.
+      pick("msg-two", "She left the crate");
+      await new Promise((r) => setTimeout(r, 400));
+      const moved = count();
+      getSelection().removeAllRanges();
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      const cleared = count();
+      return { before, after, moved, cleared };
+    });
+    ok("with nothing selected neither button is there", out.before.part === 0 && out.before.snip === 0, JSON.stringify(out.before));
+    ok("selecting part of a message puts both on it", out.after.part === 1 && out.after.snip === 1, JSON.stringify(out.after));
+    ok("on the message the selection is in", out.after.onOne && !out.after.onTwo, JSON.stringify(out.after));
+    ok("selecting in another message moves them", out.moved.onTwo && !out.moved.onOne, JSON.stringify(out.moved));
+    ok("and putting the selection away takes them off", out.cleared.part === 0 && out.cleared.snip === 0, JSON.stringify(out.cleared));
+    ok("with nothing selected, the whole-message button is on both", out.before.whole === 2,
+      JSON.stringify(out.before));
+    ok("the one on the message you selected in steps aside", out.after.whole === 1,
+      JSON.stringify(out.after));
+    ok("and comes back when the selection goes", out.cleared.whole === 2,
+      JSON.stringify(out.cleared));
+  });
+
+  // The row above the input box, where the host does leave a mount, but inside
+  // its own row rather than beside it. The mount holds only this extension's
+  // buttons, so the one to copy is one of the row's, and what it is copied for
+  // is the same thing: the app's stylesheet and anybody's own CSS reach these
+  // buttons because to a stylesheet they are the host's own.
+  await inTab(browser, { saved: { enabled: true, barButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const mount = document.querySelector('[data-spindle-mount="chat_actions"]');
+      const ours = mount.querySelector('[data-arf-slot="bar"]');
+      const row = mount.parentElement;
+      const theirs = Array.from(row.querySelectorAll("button")).filter(
+        (b) => !b.hasAttribute("data-arf-slot"),
+      );
+      const svg = (n) => n.querySelector("svg");
+      const numbers = (n) => ({
+        w: svg(n).getAttribute("width"),
+        h: svg(n).getAttribute("height"),
+        ink: svg(n).getAttribute("stroke-width"),
+      });
+      return {
+        count: theirs.length,
+        wears: ours.getAttribute("class"),
+        // The first of the host's, which is the plain one. The last in this row
+        // is a gear carrying a class of its own.
+        theirWears: theirs[0].getAttribute("class"),
+        gearWears: theirs[theirs.length - 1].getAttribute("class"),
+        mark: numbers(ours),
+        theirMark: numbers(theirs[0]),
+        box: Math.round(ours.getBoundingClientRect().height),
+        theirBox: theirs.map((n) => Math.round(n.getBoundingClientRect().height)),
+      };
+    });
+    ok("the host's row really has its own buttons to copy", out.count >= 8, JSON.stringify(out.count));
+    ok("ours wears exactly what the host's own buttons wear",
+      out.wears === out.theirWears, JSON.stringify({ ours: out.wears, theirs: out.theirWears }));
+    ok("copied from a plain one rather than from the gear",
+      out.gearWears !== out.theirWears && out.wears !== out.gearWears,
+      JSON.stringify({ ours: out.wears, gear: out.gearWears }));
+    ok("and its mark carries the host's own numbers",
+      JSON.stringify(out.mark) === JSON.stringify(out.theirMark),
+      JSON.stringify({ ours: out.mark, theirs: out.theirMark }));
+    ok("so the row does not grow around it",
+      out.theirBox.every((h) => Math.abs(h - out.box) <= 1),
+      JSON.stringify({ ours: out.box, theirs: out.theirBox }));
+  });
+
+  // Somebody's own CSS, written against the host's own class, reaches these
+  // buttons too. That is the thing hand-matching a look could never do, and the
+  // reason the classes are copied rather than approximated.
+  await inTab(
+    browser,
+    {
+      saved: { enabled: true, barButton: true },
+      css: "._actionBtn_1unc0_113{padding:11px !important;border-radius:14px !important}",
+    },
+    async (page) => {
+      await draw(page, MESSAGES);
+      const out = await page.evaluate(async () => {
+        const mount = document.querySelector('[data-spindle-mount="chat_actions"]');
+        const ours = mount.querySelector('[data-arf-slot="bar"]');
+        const theirs = mount.parentElement.querySelector("button:not([data-arf-slot])");
+        const read = (n) => {
+          const c = getComputedStyle(n);
+          return c.paddingTop + "/" + c.borderTopLeftRadius;
+        };
+        return { ours: read(ours), theirs: read(theirs) };
+      });
+      ok("a rule somebody wrote for the host's buttons lands on ours as well",
+        out.ours === out.theirs && out.ours === "11px/14px", JSON.stringify(out));
+    },
+  );
+
+  // The same thing in the toolbar, with the message buttons switched off, so
+  // the toolbar is carrying them on its own. Somebody who wants one button in
+  // the chat rather than one under every reply can still reach both of the
+  // actions that work on a selection.
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: false } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const pick = (text) => {
+        const host = document
+          .querySelector('[data-spindle-scope^="message:msg-one"]')
+          .parentElement.querySelector("p");
+        const node = host.firstChild;
+        const at = node.nodeValue.indexOf(text);
+        const r = document.createRange();
+        r.setStart(node, at);
+        r.setEnd(node, at + text.length);
+        const sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(r);
+        document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      };
+      const bar = '[data-spindle-mount="chat_actions"] ';
+      const count = () => ({
+        part: document.querySelectorAll(bar + '[data-arf-slot="bar-part"]').length,
+        snip: document.querySelectorAll(bar + '[data-arf-slot="bar-snip"]').length,
+        // The plain one, and whether it is drawn. It steps aside for the same
+        // reason the one under a message does: two eyes side by side, one of
+        // them ignoring the selection, is a guess rather than a choice.
+        whole: Array.from(document.querySelectorAll(bar + '[data-arf-slot="bar"]')).filter(
+          (n) => getComputedStyle(n).display !== "none",
+        ).length,
+        // Nothing appeared under the messages, which are switched off here.
+        under: document.querySelectorAll('[data-spindle-mount="message_footer"] [data-arf-slot]').length,
+      });
+      const before = count();
+      pick("The lamp");
+      await new Promise((r) => setTimeout(r, 400));
+      const after = count();
+      // The same two buttons, not two new ones drawn over the old ones every
+      // pass. Marked here and looked for again after several redraws: a button
+      // that is thrown away and rebuilt loses whatever its mark was in the
+      // middle of, and the host redraws this chrome constantly.
+      const marked = document.querySelector(bar + '[data-arf-slot="bar-part"]');
+      if (marked) marked.__kept = true;
+      const cutter = document.querySelector(bar + '[data-arf-slot="bar-snip"]');
+      if (cutter) cutter.__kept = true;
+      await new Promise((r) => setTimeout(r, 700));
+      const kept = {
+        part: !!(document.querySelector(bar + '[data-arf-slot="bar-part"]') || {}).__kept,
+        snip: !!(document.querySelector(bar + '[data-arf-slot="bar-snip"]') || {}).__kept,
+        // Its own label, not the one the plain button carries.
+        said: (document.querySelector(bar + '[data-arf-slot="bar-snip"]') || {}).getAttribute
+          ? document.querySelector(bar + '[data-arf-slot="bar-snip"]').getAttribute("aria-label")
+          : "",
+      };
+      window.__sent.length = 0;
+      document.querySelector(bar + '[data-arf-slot="bar-snip"]').click();
+      await new Promise((r) => setTimeout(r, 80));
+      const cut = window.__sent.filter((m) => m.type === "snip_selection");
+      getSelection().removeAllRanges();
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      const cleared = count();
+      return { before, after, cleared, cut, kept, one: cut[0] || null };
+    });
+    ok("with nothing selected the toolbar holds one button", out.before.whole === 1 && out.before.part === 0 && out.before.snip === 0,
+      JSON.stringify(out.before));
+    ok("selecting part of a reply puts both in the toolbar", out.after.part === 1 && out.after.snip === 1,
+      JSON.stringify(out.after));
+    ok("and the plain one steps aside there too", out.after.whole === 0, JSON.stringify(out.after));
+    ok("the toolbar pair survives the host's redraws", out.kept.part && out.kept.snip,
+      JSON.stringify(out.kept));
+    ok("and keeps the label for what it does", out.kept.said === "Take out what I selected",
+      JSON.stringify(out.kept));
+    ok("the toolbar scissors send a snip", out.cut.length === 1, JSON.stringify(out.cut));
+    ok("naming the message the selection was in", !!out.one && out.one.messageId === "msg-one",
+      JSON.stringify(out.one));
+    ok("putting the selection away takes both off", out.cleared.part === 0 && out.cleared.snip === 0,
+      JSON.stringify(out.cleared));
+    ok("and brings the plain one back", out.cleared.whole === 1, JSON.stringify(out.cleared));
+    ok("with the message buttons off, nothing is drawn under a reply", out.after.under === 0,
+      JSON.stringify(out.after));
+  });
+
+  // Dressed as one of the host's own buttons rather than styled to look like
+  // one. The classes it wears are read off the button beside it, so the app's
+  // stylesheet and anything somebody wrote themselves reach it the same way
+  // they reach the rest of the row. Those classes carry a build hash, so they
+  // could never have been written into the extension.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES_BUBBLE);
+    const out = await page.evaluate(async () => {
+      const pill = document.querySelector('[data-message-id="msg-one"] [data-component="BubbleActions"]');
+      const ours = pill.querySelector('[data-arf-slot="message"]');
+      const theirs = pill.querySelector("button:not([data-arf-slot])");
+      const svg = (n) => n.querySelector("svg");
+      return {
+        inPill: document.querySelectorAll(
+          '[data-component="BubbleActions"] [data-arf-slot="message"]',
+        ).length,
+        rows: document.querySelectorAll(".arf-slot-row").length,
+        // Nothing of this extension's own left on it.
+        wears: ours.getAttribute("class"),
+        theirWears: theirs.getAttribute("class"),
+        // The mark carries the host's own numbers, taken off its svg.
+        mark: {
+          w: svg(ours).getAttribute("width"),
+          h: svg(ours).getAttribute("height"),
+          ink: svg(ours).getAttribute("stroke-width"),
+        },
+        theirMark: {
+          w: svg(theirs).getAttribute("width"),
+          h: svg(theirs).getAttribute("height"),
+          ink: svg(theirs).getAttribute("stroke-width"),
+        },
+        // Which is the whole point: the pill's own rule for the buttons in it
+        // lands on this one, so it is the size the row makes its buttons.
+        box: Math.round(ours.getBoundingClientRect().width) + "x" +
+          Math.round(ours.getBoundingClientRect().height),
+        theirBox: Math.round(theirs.getBoundingClientRect().width) + "x" +
+          Math.round(theirs.getBoundingClientRect().height),
+      };
+    });
+    ok("the bubble's pill gets the button, on both messages", out.inPill === 2, JSON.stringify(out.inPill));
+    ok("with no row of this extension's own drawn", out.rows === 0, JSON.stringify(out.rows));
+    ok("it wears exactly what the host's own buttons wear",
+      out.wears === out.theirWears, JSON.stringify({ ours: out.wears, theirs: out.theirWears }));
+    ok("and its mark carries the host's own numbers",
+      JSON.stringify(out.mark) === JSON.stringify(out.theirMark),
+      JSON.stringify({ ours: out.mark, theirs: out.theirMark }));
+    ok("so the row's own rule sizes it exactly as it sizes the rest",
+      out.box === out.theirBox, JSON.stringify({ ours: out.box, theirs: out.theirBox }));
+  });
+
+  // The other display mode, where the host leaves no mount in the row at all.
+  // The row is found from a button that is in it, and the classes come off that
+  // button, which is the only way to wear a name carrying a build hash.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES_MINIMAL);
+    const out = await page.evaluate(async () => {
+      const row = document.querySelector('[data-message-id="msg-one"] ._actions_zwpor_1');
+      const ours = row.querySelector('[data-arf-slot="message"]');
+      const theirs = row.querySelector("button:not([data-arf-slot])");
+      return {
+        found: !!ours,
+        // In the row itself, since there is no mount in it to go in.
+        inRow: ours ? ours.parentElement === row : false,
+        // On both messages, and not left under them.
+        count: document.querySelectorAll('._actions_zwpor_1 [data-arf-slot="message"]').length,
+        rows: document.querySelectorAll(".arf-slot-row").length,
+        inFooter: document.querySelectorAll(
+          '[data-spindle-mount="message_footer"] [data-arf-slot]',
+        ).length,
+        wears: ours ? ours.getAttribute("class") : "",
+        // The first of the host's, not the last: the last is a delete and
+        // carries a warning color that has nothing to do with a refine.
+        theirWears: theirs.getAttribute("class"),
+        danger: /danger/i.test(ours ? ours.getAttribute("class") || "" : ""),
+        box: ours
+          ? Math.round(ours.getBoundingClientRect().width) + "x" +
+            Math.round(ours.getBoundingClientRect().height)
+          : "",
+        theirBox: Math.round(theirs.getBoundingClientRect().width) + "x" +
+          Math.round(theirs.getBoundingClientRect().height),
+      };
+    });
+    ok("a row with no mount in it still gets the button", out.found && out.inRow, JSON.stringify(out));
+    ok("on every message", out.count === 2, JSON.stringify(out.count));
+    ok("and nothing is left under them", out.inFooter === 0 && out.rows === 0, JSON.stringify(out));
+    ok("it wears the hashed classes the host's own buttons wear",
+      out.wears === out.theirWears, JSON.stringify({ ours: out.wears, theirs: out.theirWears }));
+    ok("copied from a plain one rather than from the delete", !out.danger, JSON.stringify(out.wears));
+    ok("so the host's own rules size it exactly as they size the rest",
+      out.box === out.theirBox, JSON.stringify({ ours: out.box, theirs: out.theirBox }));
+  });
+
+  // Changing display mode mid-chat. The host tears its row out and draws a
+  // different one, and the buttons have to follow it rather than stay in the
+  // row that went away or sit in both at once.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES_MINIMAL);
+    const out = await page.evaluate(async (bubble) => {
+      const where = () => ({
+        inMinimal: document.querySelectorAll('._actions_zwpor_1 [data-arf-slot]').length,
+        inPill: document.querySelectorAll(
+          '[data-component="BubbleActions"] [data-arf-slot]',
+        ).length,
+        rows: document.querySelectorAll(".arf-slot-row").length,
+        // Every one of ours on the page, so a button stranded anywhere at all
+        // shows up as more than the two that should exist.
+        all: document.querySelectorAll("[data-arf-slot]").length,
+      });
+      const before = where();
+      // The host swaps the whole list out for the other mode's markup.
+      const old = document.getElementById("wrap");
+      const next = document.createElement("div");
+      next.innerHTML = bubble;
+      old.replaceWith(next.firstElementChild);
+      await new Promise((r) => setTimeout(r, 700));
+      return { before, after: where() };
+    }, MESSAGES_BUBBLE);
+    ok("before the change they are in the row that mode draws",
+      out.before.inMinimal === 2 && out.before.inPill === 0, JSON.stringify(out.before));
+    ok("after it they are in the row the other mode draws",
+      out.after.inPill === 2 && out.after.inMinimal === 0, JSON.stringify(out.after));
+    ok("with none stranded anywhere and no row of ours left behind",
+      out.after.all === 2 && out.after.rows === 0, JSON.stringify(out.after));
+  });
+
+  // A selection puts the same two in the host's row, and takes the plain one
+  // out of it, exactly as it does in a row of this extension's own.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES_BUBBLE);
+    const out = await page.evaluate(async () => {
+      const pill = () =>
+        document.querySelector('[data-message-id="msg-one"] [data-component="BubbleActions"]');
+      const count = () => ({
+        part: pill().querySelectorAll('[data-arf-slot="part"]').length,
+        snip: pill().querySelectorAll('[data-arf-slot="snip"]').length,
+        whole: Array.from(pill().querySelectorAll('[data-arf-slot="message"]')).filter(
+          (n) => getComputedStyle(n).display !== "none",
+        ).length,
+        // The host's own are untouched by any of this.
+        theirs: pill().querySelectorAll("button:not([data-arf-slot])").length,
+      });
+      const before = count();
+      const host = document
+        .querySelector('[data-message-id="msg-one"] [data-component="MessageContent"] p');
+      const node = host.firstChild;
+      const at = node.nodeValue.indexOf("The lamp");
+      const r = document.createRange();
+      r.setStart(node, at);
+      r.setEnd(node, at + "The lamp".length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 400));
+      const after = count();
+      // Every one of ours on screen, measured against one of the host's.
+      const theirBox = (() => {
+        const n = pill().querySelector("button:not([data-arf-slot])");
+        const b = n.getBoundingClientRect();
+        return Math.round(b.width) + "x" + Math.round(b.height);
+      })();
+      const boxes = Array.from(pill().querySelectorAll("[data-arf-slot]"))
+        .filter((n) => getComputedStyle(n).display !== "none")
+        .map((n) => {
+          const b = n.getBoundingClientRect();
+          return Math.round(b.width) + "x" + Math.round(b.height);
+        });
+      getSelection().removeAllRanges();
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 400));
+      return { before, after, cleared: count(), boxes, theirBox };
+    });
+    ok("nothing selected, one button of this extension's in the pill",
+      out.before.whole === 1 && out.before.part === 0, JSON.stringify(out.before));
+    ok("a selection puts both of the others in it",
+      out.after.part === 1 && out.after.snip === 1, JSON.stringify(out.after));
+    ok("and the plain one steps aside in the pill", out.after.whole === 0, JSON.stringify(out.after));
+    ok("all three sized by the row, the same as the host's own",
+      out.boxes.length === 2 && out.boxes.every((b) => b === out.theirBox),
+      JSON.stringify({ ours: out.boxes, theirs: out.theirBox }));
+    ok("the host's own buttons are left alone throughout",
+      out.before.theirs === 2 && out.after.theirs === 2, JSON.stringify(out));
+    ok("putting the selection away leaves the pill as it was",
+      out.cleared.whole === 1 && out.cleared.part === 0, JSON.stringify(out.cleared));
+  });
+
+  // What the two of them send.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const host = document
+        .querySelector('[data-spindle-scope^="message:msg-one"]')
+        .parentElement.querySelector("p");
+      const node = host.firstChild;
+      const at = node.nodeValue.indexOf("had been out");
+      const r = document.createRange();
+      r.setStart(node, at);
+      r.setEnd(node, at + "had been out".length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      window.__sent.length = 0;
+      document.querySelector('[data-arf-slot="snip"]').click();
+      await new Promise((r) => setTimeout(r, 80));
+      const cut = window.__sent.filter((m) => m.type === "snip_selection");
+      // Anything that would cost a model call, sent alongside it.
+      const paid = window.__sent.filter(
+        (m) => m.type === "refine_selection" || m.type === "refine_now" || m.type === "refine_all",
+      ).length;
+      return { cut: cut, one: cut[0] || null, paid: paid };
+    });
+    ok("the scissors send a snip", out.cut.length === 1, JSON.stringify(out.cut));
+    ok("naming the host's own message id", !!out.one && out.one.messageId === "msg-one", JSON.stringify(out.one));
+    ok("and what was selected", !!out.one && out.one.picked === "had been out", JSON.stringify(out.one));
+    // The text in front of it, which is how the backend tells one run of an
+    // identical phrase from another.
+    ok("with the text ahead of it, for counting", !!out.one && /^The lamp over the bench $/.test(out.one.ahead || ""), JSON.stringify(out.one));
+    // No model call: a snip is a delete, and paying for one would be a surprise.
+    ok("and nothing that costs a model call goes with it", out.paid === 0, JSON.stringify(out));
+  });
+
+  // A snip is a write, and so is a refine, so the two cannot overlap.
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const host = document
+        .querySelector('[data-spindle-scope^="message:msg-one"]')
+        .parentElement.querySelector("p");
+      const node = host.firstChild;
+      const r = document.createRange();
+      r.setStart(node, 0);
+      r.setEnd(node, 8);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      // Start a refine, then try to snip while it runs.
+      document.querySelector('[data-arf-slot="bar"]').click();
+      await new Promise((r) => setTimeout(r, 60));
+      window.__sent.length = 0;
+      const snip = document.querySelector('[data-arf-slot="snip"]');
+      const dimmed = snip ? snip.getAttribute("aria-busy") : null;
+      if (snip) snip.click();
+      await new Promise((r) => setTimeout(r, 80));
+      return {
+        dimmed: dimmed,
+        sent: window.__sent.filter((m) => m.type === "snip_selection").length,
+      };
+    });
+    ok("while a refine runs the scissors say so", out.dimmed === "true", JSON.stringify(out));
+    ok("and pressing them sends nothing", out.sent === 0, JSON.stringify(out));
+  });
+
+  // Those two buttons follow what is selected on the page and nothing else. A
+  // snip that worked does not put the selection down by hand: while the old
+  // text is still on screen the selection is still real, and the host redrawing
+  // the message is what ends it. An earlier attempt to clear it here was undone
+  // by the next selectionchange, which is the DOM being right and the panel
+  // being wrong.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const host = document
+        .querySelector('[data-spindle-scope^="message:msg-one"]')
+        .parentElement.querySelector("p");
+      const node = host.firstChild;
+      const r = document.createRange();
+      r.setStart(node, 0);
+      r.setEnd(node, 8);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 400));
+      const up = document.querySelectorAll('[data-arf-slot="snip"]').length;
+      document.querySelector('[data-arf-slot="snip"]').click();
+      await new Promise((r2) => setTimeout(r2, 80));
+      const asked = window.__sent.filter((m) => m.type === "snip_selection").pop();
+      window.__fromBackend({ type: "snip_result", requestId: asked.requestId, chatId: "c1", messageId: "msg-one", ok: true, why: "" });
+      await new Promise((r2) => setTimeout(r2, 400));
+      const held = document.querySelectorAll('[data-arf-slot="snip"]').length;
+      // The host redraws the message it came out of, which is what really ends
+      // the selection.
+      getSelection().removeAllRanges();
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 400));
+      return {
+        up: up,
+        held: held,
+        afterRedraw: document.querySelectorAll('[data-arf-slot="snip"]').length,
+        part: document.querySelectorAll('[data-arf-slot="part"]').length,
+      };
+    });
+    ok("the scissors are up while the selection is", out.up === 1, JSON.stringify(out));
+    ok("and stay up while the same text is still selected", out.held === 1, JSON.stringify(out));
+    ok("going when the selection does", out.afterRedraw === 0, JSON.stringify(out));
+    ok("and taking the other one with them", out.part === 0, JSON.stringify(out));
+  });
+
+  // A backend that never answers must not leave the scissors dead for the rest
+  // of the session. The flag is the only thing stopping two snips at once, and
+  // nothing but the answer clears it.
+  await inTab(browser, { saved: { enabled: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const host = document
+        .querySelector('[data-spindle-scope^="message:msg-one"]')
+        .parentElement.querySelector("p");
+      const node = host.firstChild;
+      const r = document.createRange();
+      r.setStart(node, 0);
+      r.setEnd(node, 8);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 400));
+      window.__sent.length = 0;
+      // Pressed, and nothing is ever sent back.
+      document.querySelector('[data-arf-slot="snip"]').click();
+      await new Promise((r2) => setTimeout(r2, 80));
+      const first = window.__sent.filter((m) => m.type === "snip_selection").length;
+      // Still stuck a moment later, which is the point of the guard.
+      document.querySelector('[data-arf-slot="snip"]').click();
+      await new Promise((r2) => setTimeout(r2, 80));
+      const whileWaiting = window.__sent.filter((m) => m.type === "snip_selection").length;
+      // Past the five seconds the rest of the panel gives a silent backend.
+      await new Promise((r2) => setTimeout(r2, 5400));
+      document.querySelector('[data-arf-slot="snip"]').click();
+      await new Promise((r2) => setTimeout(r2, 80));
+      return {
+        first: first,
+        whileWaiting: whileWaiting,
+        afterGivingUp: window.__sent.filter((m) => m.type === "snip_selection").length,
+      };
+    });
+    ok("one press sends one snip", out.first === 1, JSON.stringify(out));
+    ok("and a second press while it waits sends nothing", out.whileWaiting === 1, JSON.stringify(out));
+    ok("but it gives up rather than staying dead", out.afterGivingUp === 2, JSON.stringify(out));
+  });
+
+  // Off is off. Nothing of this extension's goes near the chat for somebody who
+  // has not asked for it, which is the rule every other way in keeps.
+  await inTab(browser, { saved: { enabled: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(() => ({
+      slots: document.querySelectorAll('[data-spindle-mount="message_footer"]').length,
+      mine: document.querySelectorAll("[data-arf-slot]").length,
+      rows: document.querySelectorAll(".arf-slot-row").length,
+    }));
+    ok("with both off the slots are still there", out.slots === 2, JSON.stringify(out));
+    ok("and nothing is put in them", out.mine === 0 && out.rows === 0, JSON.stringify(out));
+  });
+
+  // Switching one off takes its button back off the page, rows and all.
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    await goTab(page, "Setup");
+    const out = await page.evaluate(async () => {
+      const before = document.querySelectorAll("[data-arf-slot]").length;
+      const box = document.querySelector('#drawer [data-arf-field="messageButton"]');
+      if (!box) return { noRow: true, before };
+      box.click();
+      await new Promise((r) => setTimeout(r, 700));
+      return {
+        before,
+        bar: document.querySelectorAll('[data-arf-slot="bar"]').length,
+        msg: document.querySelectorAll('[data-arf-slot="message"]').length,
+        rows: document.querySelectorAll(".arf-slot-row").length,
+      };
+    });
+    ok("the panel has a row for the message button", !out.noRow, JSON.stringify(out));
+    ok("all three are up before it is switched", out.before === 3, JSON.stringify(out));
+    ok("switching it off takes the message buttons away", out.msg === 0 && out.rows === 0, JSON.stringify(out));
+    ok("and leaves the toolbar one alone", out.bar === 1, JSON.stringify(out));
+  });
+
+  // A message opened for editing. The host swaps the reply for a box to type in
+  // and keeps the footer mount, so a button falling back to that mount used to
+  // end up on its own under the editor with nothing around it.
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const seat = document.querySelector('[data-spindle-scope="message:msg-one:minimal:footer"]');
+      const one = seat.parentElement;
+      const other = document
+        .querySelector('[data-spindle-scope="message:msg-two:minimal:footer"]')
+        .parentElement;
+      const body = one.querySelector('[data-component="MessageContent"]');
+      const was = body.innerHTML;
+      const before = one.querySelectorAll("[data-arf-slot]").length;
+      // The editor as Lumiverse lays it out: a box to type in and its own two
+      // buttons, with the host's mount on the row that holds them.
+      body.innerHTML =
+        '<div class="_editArea_kqzrw_2"><div><div class="_textareaWrapper_kqzrw_49">' +
+        '<textarea name="message-edit-content" aria-label="Message content" class="_editTextarea_kqzrw_8">' +
+        'The lamp over the bench had been out for a week.</textarea></div></div>' +
+        '<div class="_editActions_kqzrw_132" data-spindle-mount="message_edit_actions" ' +
+        'data-spindle-scope-key="message:msg-one:edit-actions">' +
+        '<button type="button" class="_editCancelBtn_kqzrw_138">Cancel</button>' +
+        '<button type="button" class="_editSaveBtn_kqzrw_148">Save</button></div></div>';
+      await new Promise((r) => setTimeout(r, 700));
+      const during = {
+        mine: one.querySelectorAll("[data-arf-slot]").length,
+        rows: one.querySelectorAll(".arf-slot-row").length,
+        other: other.querySelectorAll("[data-arf-slot]").length,
+      };
+      body.innerHTML = was;
+      // Well under the settle the watcher otherwise waits out. The host puts
+      // its own buttons back with the row, so one of ours arriving after that
+      // settle is a button popping in beside controls already sitting there.
+      await new Promise((r) => setTimeout(r, 60));
+      const straightAway = one.querySelectorAll("[data-arf-slot]").length;
+      await new Promise((r) => setTimeout(r, 700));
+      return {
+        before,
+        during,
+        straightAway,
+        after: one.querySelectorAll("[data-arf-slot]").length,
+      };
+    });
+    ok("a message carries its button to begin with", out.before === 1, JSON.stringify(out));
+    ok(
+      "opening it for editing takes the button off it",
+      out.during.mine === 0 && out.during.rows === 0,
+      JSON.stringify(out),
+    );
+    ok("and leaves the message beside it alone", out.during.other === 1, JSON.stringify(out));
+    ok("closing the editor puts it back", out.after === 1, JSON.stringify(out));
+    ok(
+      "and puts it back at once, rather than after the settle",
+      out.straightAway === 1,
+      JSON.stringify(out),
+    );
+  });
+
+  // The same message in the mode that draws a row of its own, in case the host
+  // leaves that row up while the editor is open.
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES_MINIMAL);
+    const out = await page.evaluate(async () => {
+      const one = document.querySelector('[data-message-id="msg-one"]');
+      const body = one.querySelector('[data-component="MessageContent"]');
+      const before = one.querySelectorAll("[data-arf-slot]").length;
+      body.innerHTML =
+        '<div class="_editArea_kqzrw_2"><textarea name="message-edit-content" ' +
+        'class="_editTextarea_kqzrw_8">The lamp over the bench had been out for a week.</textarea>' +
+        '<div class="_editActions_kqzrw_132" data-spindle-mount="message_edit_actions" ' +
+        'data-spindle-scope-key="message:msg-one:edit-actions">' +
+        '<button type="button">Cancel</button><button type="button">Save</button></div></div>';
+      await new Promise((r) => setTimeout(r, 700));
+      return { before, during: one.querySelectorAll("[data-arf-slot]").length };
+    });
+    ok("the row mode carries one too", out.before === 1, JSON.stringify(out));
+    ok("and it comes out of the row while the editor is open", out.during === 0, JSON.stringify(out));
+  });
+
+  // Teardown. Anything left behind outlives the extension being switched off.
+  await inTab(browser, { saved: { enabled: true, barButton: true, messageButton: true } }, async (page) => {
+    await draw(page, MESSAGES);
+    const out = await page.evaluate(async () => {
+      const before = document.querySelectorAll("[data-arf-slot]").length;
+      window.__teardown();
+      await new Promise((r) => setTimeout(r, 120));
+      return {
+        before,
+        after: document.querySelectorAll("[data-arf-slot]").length,
+        rows: document.querySelectorAll(".arf-slot-row").length,
+      };
+    });
+    ok("the buttons are on the page to begin with", out.before === 3, JSON.stringify(out));
+    ok("and teardown leaves none of them behind", out.after === 0 && out.rows === 0, JSON.stringify(out));
+  });
+}
+
+console.log("\nswitching on a setting with nowhere to put its answer");
+{
+  // A prompt saved before the worn block existed does not carry it. Turning the
+  // setting on then fills nothing, and doing that without saying so is the failure.
+  const noWorn = [
+    { id: "system", name: "The job", on: true, role: "system", text: "<your_task>\nRewrite it.\n</your_task>" },
+    { id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" },
+  ];
+  await inTab(browser, { saved: { blocks: noWorn, wornOn: false } }, async (page) => {
+    await goTab(page, "Limits");
+    const said = await page.evaluate(async () => {
+      const box = document.querySelector('#drawer [data-arf-field="wornOn"]');
+      if (!box) return { noRow: true };
+      window.__toasts = [];
+      box.click();
+      await new Promise((r) => setTimeout(r, 320));
+      return { text: (window.__toasts || []).join(" | ") };
+    });
+    ok("the row is on the Limits tab", !said.noRow, JSON.stringify(said));
+    ok("and switching it on says there is nowhere to put them",
+      !said.noRow && /nowhere to put the worn phrases/i.test(said.text), (said.text || "").slice(-220));
+  });
+
+  // And with a block for it, nothing is said.
+  const withWorn = [
+    { id: "system", name: "The job", on: true, role: "system", text: "<your_task>\nRewrite it.\n</your_task>" },
+    { id: "worn", name: "Worn", on: true, role: "system", text: "<worn>\n{{overused}}\n</worn>" },
+    { id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" },
+  ];
+  await inTab(browser, { saved: { blocks: withWorn, wornOn: false } }, async (page) => {
+    await goTab(page, "Limits");
+    const quiet = await page.evaluate(async () => {
+      const box = document.querySelector('#drawer [data-arf-field="wornOn"]');
+      window.__toasts = [];
+      box.click();
+      await new Promise((r) => setTimeout(r, 320));
+      return (window.__toasts || []).join(" | ");
+    });
+    ok("with a block for it, nothing is said", !/nowhere to put/i.test(quiet), quiet);
+  });
+}
+
+console.log("\nwhat each pass changed, on the Log tab");
+{
+  await inTab(browser, { saved: { enabled: true } }, async (page) => {
+    await goTab(page, "Log");
+    const out = await page.evaluate(async () => {
+      const fire = (steps) => {
+        window.__fromBackend({ type: "refine_steps", chatId: "c1", messageId: "m2", steps: steps });
+      };
+      const text = () => document.querySelector("#drawer").textContent || "";
+      const before = text();
+      fire([
+        { name: "Cut the filler", before: "She stepped through and, suddenly, the cold just hit her.", after: "She stepped through and the cold hit her." },
+        { name: "Fix the rhythm", before: "She stepped through and the cold hit her.", after: "She stepped through, and the cold took her breath." },
+      ]);
+      await new Promise((r) => setTimeout(r, 320));
+      const after = text();
+      // Open the fold and read what is inside it.
+      let opened = "";
+      for (const b of document.querySelectorAll("#drawer button")) {
+        if (/what each pass changed/i.test(b.textContent || "")) {
+          b.click();
+          await new Promise((r) => setTimeout(r, 320));
+          opened = text();
+          break;
+        }
+      }
+      return { before, after, opened, marks: document.querySelectorAll("#drawer [data-arf-diff]").length };
+    });
+    ok("nothing is there before a chain runs", !/what each pass changed/i.test(out.before));
+    ok("a chain puts a fold on the Log tab", /what each pass changed/i.test(out.after), out.after.slice(-200));
+    ok("and it names each pass in order",
+      /1\. Cut the filler/.test(out.opened) && /2\. Fix the rhythm/.test(out.opened), out.opened.slice(-300));
+    // The number is what a reader scans for: a pass that took a fifth out is the
+    // thing they are looking for.
+    ok("with how much each one changed the length", /characters/.test(out.opened), out.opened.slice(-300));
+    ok("and a marked diff for each", out.marks >= 2, JSON.stringify({ marks: out.marks }));
+  });
+}
+
+// ---- hold to select text in messages ----
+// Off by default. On, message text is selectable even where something set it
+// not to be, a hold on it does not open the host's menu, and a bar by the
+// selection offers what can be done with it.
+console.log("\nhold to select text in messages");
+{
+  const BUBBLE = `
+  <div class="_bubble_86318_171">
+    <div data-component="MessageContent"><div class="_prose_1rr8k_181">
+      <p id="p1">Wren set the crate down on the step and wiped both hands on her jeans.</p>
+      <p id="p2"><span id="blocked" style="user-select:none;-webkit-user-select:none">"The lock's been changed."</span> She tried the handle twice anyway.</p>
+    </div><div data-spindle-ext="someone_else" id="card" style="user-select:none;-webkit-user-select:none">New text from Ines: the van is out front.</div></div>
+    <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:minimal:footer" style="display:contents"></span>
+  </div>
+  <div id="elsewhere">Not a message.</div>`;
+  for (const [label, viewport, touch] of [
+    ["phone", { width: 390, height: 844 }, true],
+    ["laptop", { width: 1280, height: 860 }, false],
+  ]) {
+    for (const zoom of label === "phone" ? [1, 1.25, 0.85] : [1]) {
+      for (const on of [false, true]) {
+        const css = zoom === 1 ? "" : "html{zoom:" + zoom + "}";
+        await inTab(browser, { css, viewport, touch, saved: { enabled: true, freeSelect: on } }, async (page) => {
+          const tag = label + (zoom === 1 ? "" : ", zoom " + zoom) + (on ? ", on" : ", off");
+          if (!on && zoom === 1) {
+            await goTab(page, "Setup");
+            await settle(page);
+            const row = await page.evaluate(() => {
+              const r = document.querySelector('#drawer [data-arf-row="freeSelect"]');
+              const rows = [...document.querySelectorAll("#drawer [data-arf-row]")].map((n) => n.getAttribute("data-arf-row"));
+              return { has: !!r, off: !!r && !r.querySelector("input[type=checkbox]").checked, after: rows.indexOf("freeSelect") === rows.indexOf("messageButton") + 1 };
+            });
+            ok(tag + ": the switch is under A button on every message, and off", row.has && row.off && row.after, JSON.stringify(row));
+          }
+          const out = await page.evaluate(async (html) => {
+            const wrap = document.createElement("div");
+            wrap.innerHTML = html;
+            document.body.appendChild(wrap);
+            for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+            for (const f of window.__handlers.CHARACTER_MESSAGE_RENDERED || []) f({ chatId: "c1", messageId: "msg-one" });
+            await new Promise((r) => setTimeout(r, 40));
+            const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+            // The host's menu listens on the page, above the message.
+            let menus = 0;
+            document.body.addEventListener("contextmenu", () => menus++);
+            const hold = (node) => {
+              node.dispatchEvent(new Event("touchstart", { bubbles: true }));
+              const ev = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+              node.dispatchEvent(ev);
+              return ev.defaultPrevented;
+            };
+            const heldPrevented = hold(document.getElementById("p1"));
+            const menusOnText = menus;
+            hold(document.getElementById("elsewhere"));
+            const menusElsewhere = menus - menusOnText;
+            const blockedSelect = getComputedStyle(document.getElementById("blocked")).userSelect;
+            // Another extension's card inside the reply keeps its own taps.
+            const cardSelect = getComputedStyle(document.getElementById("card")).userSelect;
+            const before = menus;
+            const cardPrevented = hold(document.getElementById("card"));
+            const menusOnCard = menus - before;
+            // Select part of the reply, as a hold or a drag would, with the
+            // reply on screen as it is when somebody holds it.
+            document.getElementById("p1").scrollIntoView({ block: "center" });
+            await frame();
+            const node = document.getElementById("p1").firstChild;
+            const at = node.nodeValue.indexOf("wiped both hands");
+            const r = document.createRange();
+            r.setStart(node, at);
+            r.setEnd(node, at + "wiped both hands".length);
+            getSelection().removeAllRanges();
+            getSelection().addRange(r);
+            document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+            await frame();
+            await frame();
+            await new Promise((res) => setTimeout(res, 40));
+            const bar = document.querySelector("[data-arf-selbar]");
+            const shownMid = bar ? parseFloat(getComputedStyle(bar).opacity) : -1;
+            await new Promise((res) => setTimeout(res, 300));
+            const shown = !!bar && bar.hasAttribute("data-arf-on");
+            const b = bar ? bar.getBoundingClientRect() : null;
+            const sr = r.getBoundingClientRect();
+            const acts = bar ? [...bar.querySelectorAll("[data-arf-selbar-act]")] : [];
+            // In CSS pixels, which is what a tap target is sized in.
+            const tallest = Math.min(...acts.map((a) => a.offsetHeight));
+            let snip = null;
+            if (shown) {
+              window.__sent.length = 0;
+              bar.querySelector('[data-arf-selbar-act="snip"]').click();
+              await new Promise((res) => setTimeout(res, 60));
+              snip = window.__sent.filter((m) => m && m.type === "snip_selection").pop() || null;
+            }
+            const hiddenAfter = !bar || !bar.hasAttribute("data-arf-on");
+            return {
+              heldPrevented, menusOnText, menusElsewhere, blockedSelect, cardSelect, cardPrevented, menusOnCard, shown, shownMid,
+              acts: acts.map((a) => a.textContent.trim()),
+              inside: !!b && b.left >= 0 && b.right <= innerWidth && b.top >= 0 && b.bottom <= innerHeight,
+              // Below the selection, or above it when there is no room below.
+              near: !!b && (Math.abs(b.top - sr.bottom) < 60 || Math.abs(sr.top - b.bottom) < 60),
+              // Clear of the drag handles under the selection on a touch screen.
+              clear: !!b && (b.top - sr.bottom >= 24 || b.bottom <= sr.top),
+              tallest,
+              snip: snip && { picked: snip.picked, messageId: snip.messageId },
+              hiddenAfter,
+            };
+          }, BUBBLE);
+          if (!on) {
+            ok(tag + ": a hold on message text reaches the host as usual", out.menusOnText === 1, JSON.stringify(out));
+            ok(tag + ": and no bar comes up", !out.shown, JSON.stringify(out));
+            return;
+          }
+          ok(tag + ": text another extension blocked can be selected", out.blockedSelect === "text", JSON.stringify(out));
+          ok(tag + ": a hold on message text does not open the host's menu", out.menusOnText === 0 && out.heldPrevented, JSON.stringify(out));
+          ok(tag + ": a hold anywhere else still does", out.menusElsewhere === 1, JSON.stringify(out));
+          ok(tag + ": another extension's card inside the reply keeps its own setting", out.cardSelect === "none", JSON.stringify(out));
+          ok(tag + ": and a hold on it reaches the host as usual", out.menusOnCard === 1 && !out.cardPrevented, JSON.stringify(out));
+          ok(tag + ": selecting text brings up the bar", out.shown && out.acts.join("|") === "Refine it|Take it out|Copy", JSON.stringify(out));
+          ok(tag + ": it fades in", out.shownMid > 0 && out.shownMid < 1, JSON.stringify(out));
+          ok(tag + ": by the selection, inside the screen", out.inside && out.near, JSON.stringify(out));
+          if (touch) ok(tag + ": its buttons are 32px tap targets", out.tallest >= 32, JSON.stringify(out));
+          if (touch) ok(tag + ": it sits clear of the selection's drag handles", out.clear, JSON.stringify(out));
+          ok(tag + ": Take it out takes out what was selected", !!out.snip && out.snip.picked === "wiped both hands" && out.snip.messageId === "msg-one", JSON.stringify(out));
+          ok(tag + ": and the bar goes", out.hiddenAfter, JSON.stringify(out));
+        });
+      }
+    }
+  }
+}
+
+// While a selection is dragged, the bar glides after it and lets touches
+// through, and nothing on the page moves. Adding the selection's buttons to
+// the message mid-drag shifted the text under the finger, and the selection
+// jumped, so those wait until it stops.
+console.log("\na selection being dragged is followed by the bar");
+for (const [label, viewport, touch, zoom] of [
+  ["phone", { width: 390, height: 844 }, true, 1],
+  ["phone, zoom 1.25", { width: 390, height: 844 }, true, 1.25],
+  ["phone, zoom 0.85", { width: 390, height: 844 }, true, 0.85],
+  ["laptop", { width: 1280, height: 860 }, false, 1],
+]) {
+  const BUBBLE = `
+  <div class="_bubble_86318_171">
+    <span data-spindle-mount="message_header" data-spindle-scope="message:msg-one:minimal:header" style="display:contents"></span>
+    <div data-component="MessageContent"><div class="_prose_1rr8k_181">
+      <p id="d1">Wren set the crate down on the step and wiped both hands on her jeans.</p>
+      <p id="d2">The lock had been changed again, and the new key was not on her ring.</p>
+      <p id="d3">She tried the handle twice anyway, then sat down on the crate to wait.</p>
+    </div></div>
+    <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:minimal:footer" style="display:contents"></span>
+  </div>`;
+  await inTab(browser, { css: zoom === 1 ? "" : "html{zoom:" + zoom + "}", viewport, touch, saved: { enabled: true, freeSelect: true, messageButton: true } }, async (page) => {
+    const out = await page.evaluate(async (html) => {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = html;
+      // Room above and below, so the page can always scroll the message to
+      // the middle of the screen, with space for the bar under it.
+      wrap.style.padding = "100vh 0";
+      document.body.appendChild(wrap);
+      for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+      for (const f of window.__handlers.CHARACTER_MESSAGE_RENDERED || []) f({ chatId: "c1", messageId: "msg-one" });
+      await new Promise((r) => setTimeout(r, 120));
+      document.getElementById("d2").scrollIntoView({ block: "center" });
+      // Where the text sits as a share of the screen's height.
+      const aim = document.getElementById("d2").getBoundingClientRect().top / innerHeight;
+      const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+      const top = () => Math.round(document.getElementById("d3").getBoundingClientRect().top);
+      const extras = () => document.querySelectorAll('[data-arf-slot="part"],[data-arf-slot="snip"]').length;
+      const bar = () => document.querySelector("[data-arf-selbar]");
+      const barState = () => {
+        const b = bar();
+        if (!b) return { on: false };
+        const r = b.getBoundingClientRect();
+        return { on: b.hasAttribute("data-arf-on"), through: getComputedStyle(b).pointerEvents === "none", top: Math.round(r.top) };
+      };
+      const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+      const start = top();
+      // A finger dragging the end of the selection down, a paragraph at a time.
+      const from = document.getElementById("d1").firstChild;
+      const steps = [["d1", 30], ["d1", 60], ["d2", 20], ["d2", 50], ["d3", 10], ["d3", 40]];
+      const seen = [];
+      let glides = 0;
+      for (const [id, at] of steps) {
+        const r = document.createRange();
+        r.setStart(from, 5);
+        r.setEnd(document.getElementById(id).firstChild, at);
+        getSelection().removeAllRanges();
+        getSelection().addRange(r);
+        // Frame by frame after each move: a glide passes through places
+        // between where it was and where it goes.
+        const tops = [];
+        for (let i = 0; i < 7; i++) {
+          await frame();
+          tops.push(barState().top);
+        }
+        const distinct = new Set(tops.filter((t) => t != null)).size;
+        if (distinct >= 3) glides++;
+        seen.push(Object.assign({ textTop: top(), extras: extras() }, barState()));
+      }
+      await wait(700);
+      return { aim, start, seen, glides, settled: Object.assign({ textTop: top(), extras: extras() }, barState()) };
+    }, BUBBLE);
+    ok(label + ": the message is in the middle of the screen for the test", out.aim > 0.3 && out.aim < 0.7, String(out.aim));
+    const still = out.seen.every((x) => x.textTop === out.start && x.extras === 0);
+    ok(label + ": while the selection is dragged, the text does not move", still, JSON.stringify(out.seen));
+    ok(label + ": the bar follows it the whole way", out.seen.every((x) => x.on) && new Set(out.seen.map((x) => x.top)).size >= 3, JSON.stringify(out.seen));
+    ok(label + ": gliding from place to place", out.glides >= 2, String(out.glides));
+    ok(label + ": and touches pass through it while the drag goes on", out.seen.every((x) => x.through), JSON.stringify(out.seen));
+    ok(label + ": once it stops, the message's buttons come up and the bar can be pressed", out.settled.on && !out.settled.through && out.settled.extras > 0, JSON.stringify(out.settled));
+  });
+}
+
+// A selection is the reply's text: the element Lumiverse marks
+// MessageContent. A drag that slips past the text into blank space, in either
+// direction, is trimmed to the text and still brings up the bar. A drag that
+// takes in the character's name or the line with the number and date never
+// does, and a selection that cannot be used clears the one before it, so the
+// bar and the panel never offer text that is no longer selected. The bar sits
+// by the end being moved, forwards or backwards.
+console.log("\nthe bar reads the reply's text, both ways, and leaves the name alone");
+{
+  const HTML = `
+  <div class="_bubble_86318_171">
+    <div id="nm">Wren</div>
+    <div id="info">#0 · Oct 19, 6:59 AM</div>
+    <span data-spindle-mount="message_header" data-spindle-scope="message:msg-one:minimal:header" style="display:contents"></span>
+    <div id="gapAbove" style="height:24px"></div>
+    <div data-component="MessageContent"><div class="_prose_1rr8k_181">
+      <p id="d1">Wren set the crate down on the step and wiped both hands on her jeans.</p>
+      <p id="d2">The lock had been changed again, and the new key was not on her ring.</p>
+      <p id="d3">She tried the handle twice anyway, then sat down on the crate to wait.</p>
+    </div></div>
+    <div id="gapBelow" style="height:24px"></div>
+    <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:minimal:footer" style="display:contents"></span>
+  </div>`;
+  // [label, anchor, anchor offset, focus, focus offset, whether the bar
+  // comes up, what Refine it sends]
+  const CASES = [
+    ["forwards inside the reply", "d1", 5, "d2", 20, true, "set the crate down on the step and wiped both hands on her jeans.\n\nThe lock had been ch"],
+    ["backwards inside the reply", "d3", 30, "d2", 4, true, "lock had been changed again, and the new key was not on her ring.\n\nShe tried the handle twice any"],
+    ["forwards, past the text into blank space", "d3", 4, "gapBelow", 0, true, "tried the handle twice anyway, then sat down on the crate to wait."],
+    ["backwards, past the text into blank space", "d1", 9, "gapAbove", 0, true, "Wren set "],
+    ["the character's name", "nm", 0, "nm", 4, false, null],
+    ["the number and date", "info", 0, "info", 9, false, null],
+    ["the name and the first words of the reply", "nm", 0, "d1", 9, false, null],
+  ];
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 860 }, false]]) {
+    for (const [what, a, ao, f, fo, wantOn, wantText] of CASES) {
+      await inTab(browser, { viewport, touch, saved: { enabled: true, freeSelect: true, messageButton: true } }, async (page) => {
+        const out = await page.evaluate(async ({ html, a, ao, f, fo }) => {
+          const wrap = document.createElement("div");
+          wrap.innerHTML = html;
+          wrap.style.padding = "100vh 0";
+          document.body.appendChild(wrap);
+          for (const h of window.__handlers.CHAT_CHANGED || []) h({ chatId: "c1" });
+          for (const h of window.__handlers.CHARACTER_MESSAGE_RENDERED || []) h({ chatId: "c1", messageId: "msg-one" });
+          await new Promise((r) => setTimeout(r, 120));
+          document.getElementById("d2").scrollIntoView({ block: "center" });
+          const node = (id) => { const e = document.getElementById(id); return e.firstChild && e.firstChild.nodeType === 3 ? e.firstChild : e; };
+          // A good selection first, so a stale one would show.
+          getSelection().removeAllRanges();
+          getSelection().setBaseAndExtent(node("d1"), 0, node("d1"), 4);
+          document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+          await new Promise((r) => setTimeout(r, 120));
+          getSelection().removeAllRanges();
+          getSelection().setBaseAndExtent(node(a), ao, node(f), fo);
+          // Still moving: the bar follows the end being dragged.
+          await new Promise((r) => setTimeout(r, 120));
+          const b0 = document.querySelector("[data-arf-selbar]");
+          const moving = b0 && b0.hasAttribute("data-arf-on") ? b0.getBoundingClientRect() : null;
+          document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+          await new Promise((r) => setTimeout(r, 500));
+          const b = document.querySelector("[data-arf-selbar]");
+          const on = !!b && b.hasAttribute("data-arf-on");
+          const rects = Array.from(document.querySelectorAll("#d1,#d2,#d3")).map((p) => p.getBoundingClientRect());
+          const sr = getSelection().rangeCount ? Array.from(getSelection().getRangeAt(0).getClientRects()).filter((r) => r.height > 0) : [];
+          const br = on ? b.getBoundingClientRect() : null;
+          window.__sent.length = 0;
+          if (on) b.querySelector('[data-arf-selbar-act="refine"]').click();
+          else {
+            const part = document.querySelector("#drawer [data-arf-part]");
+            if (part) part.click();
+          }
+          await new Promise((r) => setTimeout(r, 80));
+          const fired = window.__sent.find((m) => m && m.type === "refine_selection");
+          return {
+            on, picked: fired ? fired.picked : null,
+            bar: br && { top: br.top, bottom: br.bottom },
+            moving: moving && { top: moving.top, bottom: moving.bottom },
+            selTop: sr.length ? sr[0].top : null, selBottom: sr.length ? sr[sr.length - 1].bottom : null,
+            textTop: rects[0].top,
+          };
+        }, { html: HTML, a, ao, f, fo });
+        const name = label + ", " + what;
+        ok(name + (wantOn ? ": the bar comes up" : ": no bar comes up"), out.on === wantOn, JSON.stringify(out));
+        if (wantOn) ok(name + ": and it sends the reply's text it covers", out.picked === wantText, JSON.stringify(out.picked));
+        else ok(name + ": and nothing earlier is refined in its place", out.picked === null, JSON.stringify(out.picked));
+        if (what === "backwards inside the reply") {
+          ok(name + ": while it is dragged, the bar is above it, by the end being moved",
+            !!out.moving && out.selTop != null && out.moving.bottom <= out.selTop + 1, JSON.stringify(out));
+          if (touch) ok(name + ": once it stops, the bar settles below it, clear of the phone's own menu",
+            !!out.bar && out.selBottom != null && out.bar.top >= out.selBottom - 1, JSON.stringify(out));
+          else ok(name + ": and it stays by that end", !!out.bar && out.bar.bottom <= out.selTop + 1, JSON.stringify(out));
+        }
+        if (what === "forwards inside the reply")
+          ok(name + ": the bar is below it, by the end being moved", !!out.bar && out.selBottom != null && out.bar.top >= out.selBottom - 1, JSON.stringify(out));
+      });
+    }
+  }
+}
+
+console.log("\nthe selection listeners come off with the panel");
+{
+  // Watching for a selection means listening on the document, not on anything
+  // the panel owns, so the drawer emptying does not take them away. Only
+  // teardown can, and an update in the extensions panel is a teardown and a
+  // fresh setup in place: a set left behind every time would run on every
+  // pointer event on the page, for as many reloads as somebody has done.
+  await inTab(browser, {}, async (page) => {
+    const counted = await page.evaluate(async () => {
+      let live = 0;
+      const kinds = [];
+      const add = EventTarget.prototype.addEventListener;
+      const rm = EventTarget.prototype.removeEventListener;
+      EventTarget.prototype.addEventListener = function (t, f, c) {
+        if (this === document && /^pointerup$|^selectionchange$/.test(t)) {
+          live++;
+          kinds.push(t);
+        }
+        return add.call(this, t, f, c);
+      };
+      EventTarget.prototype.removeEventListener = function (t, f, c) {
+        if (this === document && /^pointerup$|^selectionchange$/.test(t)) live--;
+        return rm.call(this, t, f, c);
+      };
+      // Torn down and set up again twice over, which is what updating the
+      // extension does.
+      const before = live;
+      for (let i = 0; i < 2; i++) {
+        window.__teardown();
+        await new Promise((r) => setTimeout(r, 30));
+        window.__teardown = window.__setup({
+          events: { on: () => () => {} },
+          dom: { addStyle: () => () => {}, inject: () => {}, cleanup: () => {} },
+          ui: { registerDrawerTab: () => ({ root: document.getElementById("drawer"), onShow: () => {} }) },
+          sendToBackend: () => {},
+          onBackendMessage: () => () => {},
+        });
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      const after = live;
+      window.__teardown();
+      await new Promise((r) => setTimeout(r, 30));
+      return { before, after, andGone: live, kinds: [...new Set(kinds)] };
+    });
+    // Both, because neither event covers the other: a drag ends with pointerup
+    // and selecting with shift and the arrows fires only selectionchange.
+    ok("both are listened for", counted.kinds.length === 2, JSON.stringify(counted));
+    ok("reloading the panel twice does not pile them up", counted.after <= counted.before, JSON.stringify(counted));
+    ok("and teardown takes the last set off", counted.andGone <= 0, JSON.stringify(counted));
+  });
+}
+
+console.log("\nreaching a selection refine without the floating button");
+{
+  const BUBBLE = `
+  <div>
+    <span data-spindle-mount="message_header" data-spindle-scope="message:msg-two:minimal:header" style="display:contents"></span>
+    <div data-component="MessageContent"><div><div><div><p id="pp">Wren set the crate down on the step and wiped both hands on her jeans.</p></div></div></div></div>
+    <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-two:minimal:footer" style="display:contents"></span>
+  </div>`;
+
+  // The floating button off, which is how it starts, and the Extras row on. The
+  // panel is the way in nobody can switch off, so it is checked either way.
+  await inTab(browser, { saved: { widgetOn: false, inputRefine: true, enabled: true } }, async (page) => {
+    const out = await page.evaluate(async (html) => {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = html;
+      document.body.appendChild(wrap);
+      for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+      await new Promise((r) => setTimeout(r, 40));
+
+      const panelBtn = () => document.querySelector('#drawer [data-arf-part]');
+      const extrasKeys = () => Object.keys(window.__inputActions || {});
+      const shownOnPanel = () => {
+        const b = panelBtn();
+        return !!b && !b.hidden && getComputedStyle(b).display !== "none";
+      };
+
+      const before = { panel: shownOnPanel(), extras: extrasKeys().includes("auto-refine-part"),
+                       cut: extrasKeys().includes("auto-refine-snip") };
+
+      const node = document.getElementById("pp").firstChild;
+      const at = node.nodeValue.indexOf("wiped both hands");
+      const r = document.createRange();
+      r.setStart(node, at);
+      r.setEnd(node, at + "wiped both hands".length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 420));
+      const after = { panel: shownOnPanel(), extras: extrasKeys().includes("auto-refine-part"),
+                      cut: extrasKeys().includes("auto-refine-snip") };
+
+      // And pressing the panel one sends it.
+      window.__sent.length = 0;
+      const b = panelBtn();
+      if (b) b.click();
+      await new Promise((r2) => setTimeout(r2, 60));
+      const fired = window.__sent.filter((m) => m && m.type === "refine_selection");
+
+      getSelection().removeAllRanges();
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 420));
+      const gone = { panel: shownOnPanel(), extras: extrasKeys().includes("auto-refine-part"),
+                     cut: extrasKeys().includes("auto-refine-snip") };
+      return { before, after, gone, fired };
+    }, BUBBLE);
+
+    ok("the panel button is not there with nothing selected", !out.before.panel, JSON.stringify(out.before));
+    ok("selecting part of a reply brings it up on the panel", out.after.panel, JSON.stringify(out.after));
+    ok("and puts a row in the chat input's menu too", out.after.extras, JSON.stringify(out.after));
+    // Taking a selection out used to live on the button under a message and
+    // nowhere else, so running without that button and without the floating one
+    // left four ways to refine a selection and none to cut one.
+    ok("with taking it out beside it, which had no way in but the message button",
+      out.after.cut, JSON.stringify(out.after));
+    ok("and neither is there with nothing selected", !out.before.extras && !out.before.cut,
+      JSON.stringify(out.before));
+    ok("pressing the panel button sends the refine", out.fired.length === 1, JSON.stringify(out.fired));
+    ok("it carries the right message", out.fired[0] && out.fired[0].messageId === "msg-two", JSON.stringify(out.fired[0]));
+    ok("and putting the selection away takes both away",
+      !out.gone.panel && !out.gone.extras && !out.gone.cut, JSON.stringify(out.gone));
+  });
+
+  // A selection made from its end back to its start, which is what dragging
+  // the start handle on a phone often makes. The text in front of it is
+  // measured to where the selection starts, not to where the drag began.
+  // Measured to the drag's start, it held the selection itself, the backend
+  // looked for a second copy of it, and the refine was refused as not in the
+  // reply any more. Checked at a phone width and a laptop width, with the
+  // selection reaching across a line of bold, which is where the start of a
+  // range is a different node from the end.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const backward of [false, true]) {
+      await inTab(browser, { viewport, touch, saved: { widgetOn: false, inputRefine: true, enabled: true } }, async (page) => {
+        const out = await page.evaluate(async ({ html, backward }) => {
+          const wrap = document.createElement("div");
+          wrap.innerHTML = html.replace(
+            "Wren set the crate down on the step and wiped both hands on her jeans.",
+            "Wren set the crate down on the step and <strong>wiped</strong> both hands on her jeans.",
+          );
+          document.body.appendChild(wrap);
+          for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+          await new Promise((r) => setTimeout(r, 40));
+          const p = document.getElementById("pp");
+          const first = p.firstChild;
+          const last = p.lastChild;
+          const startAt = first.nodeValue.indexOf("the step");
+          const endAt = last.nodeValue.indexOf(" on her jeans");
+          const sel = getSelection();
+          sel.removeAllRanges();
+          if (backward) sel.setBaseAndExtent(last, endAt, first, startAt);
+          else sel.setBaseAndExtent(first, startAt, last, endAt);
+          document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+          await new Promise((r2) => setTimeout(r2, 420));
+          window.__sent.length = 0;
+          const b = document.querySelector("#drawer [data-arf-part]");
+          if (b) b.click();
+          await new Promise((r2) => setTimeout(r2, 60));
+          const fired = window.__sent.filter((m) => m && m.type === "refine_selection");
+          return { anchorIsEnd: sel.anchorNode === last, fired };
+        }, { html: BUBBLE, backward });
+        const f = out.fired[0] || {};
+        const how = label + (backward ? ", selected backwards" : ", selected forwards");
+        ok(how + ": the selection really was made that way", out.anchorIsEnd === backward, JSON.stringify(out));
+        ok(how + ": it sends what was selected", f.picked === "the step and wiped both hands", JSON.stringify(f));
+        ok(how + ": and only the text in front of it", f.ahead === "Wren set the crate down on ", JSON.stringify(f));
+      });
+    }
+  }
+
+  // With only one side refined, a selection in a message on the other side
+  // gets no way in: not on the panel and not in the chat input's menu. The
+  // message's side comes from the backend, so the check answers that question
+  // the way the backend would. Checked at a phone width and a laptop width.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const [side, role, wanted] of [["replies", "user", false], ["replies", "assistant", true], ["mine", "assistant", false], ["mine", "user", true]]) {
+      await inTab(browser, { viewport, touch, saved: { widgetOn: false, inputRefine: true, enabled: true, refineSide: side } }, async (page) => {
+        const out = await page.evaluate(async ({ html, role }) => {
+          const wrap = document.createElement("div");
+          wrap.innerHTML = html;
+          document.body.appendChild(wrap);
+          for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+          await new Promise((r) => setTimeout(r, 40));
+          const node = document.getElementById("pp").firstChild;
+          const at = node.nodeValue.indexOf("wiped both hands");
+          const r = document.createRange();
+          r.setStart(node, at);
+          r.setEnd(node, at + "wiped both hands".length);
+          getSelection().removeAllRanges();
+          getSelection().addRange(r);
+          document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+          await new Promise((r2) => setTimeout(r2, 300));
+          const ask = window.__sent.filter((m) => m && m.type === "message_roles").pop();
+          if (ask) window.__fromBackend({ type: "message_roles", requestId: ask.requestId, chatId: "c1", ok: true, roles: { "msg-two": role } });
+          await new Promise((r2) => setTimeout(r2, 420));
+          const b = document.querySelector("#drawer [data-arf-part]");
+          return {
+            asked: !!ask,
+            onPanel: !!b && !b.hidden && getComputedStyle(b).display !== "none",
+            inExtras: Object.keys(window.__inputActions || {}).includes("auto-refine-part"),
+            cutInExtras: Object.keys(window.__inputActions || {}).includes("auto-refine-snip"),
+          };
+        }, { html: BUBBLE, role });
+        const what = label + ", refining " + side + ", a selection in " + (role === "user" ? "your message" : "a reply");
+        ok(what + (wanted ? ": the panel offers it" : ": the panel does not offer it"), out.onPanel === wanted, JSON.stringify(out));
+        ok(what + (wanted ? ": so does the chat input's menu" : ": nor does the chat input's menu"), out.inExtras === wanted && out.cutInExtras === wanted, JSON.stringify(out));
+      });
+    }
+  }
+
+  // With the Extras row switched off as well, the panel is the only way left and
+  // it still works. Somebody who turned off both should not be locked out of a
+  // feature they never said anything about.
+  await inTab(browser, { saved: { widgetOn: false, inputRefine: false, enabled: true } }, async (page) => {
+    const out = await page.evaluate(async (html) => {
+      const wrap = document.createElement("div");
+      wrap.innerHTML = html;
+      document.body.appendChild(wrap);
+      for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+      await new Promise((r) => setTimeout(r, 40));
+      const node = document.getElementById("pp").firstChild;
+      const at = node.nodeValue.indexOf("wiped both hands");
+      const r = document.createRange();
+      r.setStart(node, at);
+      r.setEnd(node, at + "wiped both hands".length);
+      getSelection().removeAllRanges();
+      getSelection().addRange(r);
+      document.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+      await new Promise((r2) => setTimeout(r2, 420));
+      const b = document.querySelector('#drawer [data-arf-part]');
+      window.__sent.length = 0;
+      if (b && !b.hidden) b.click();
+      await new Promise((r2) => setTimeout(r2, 60));
+      return {
+        onPanel: !!b && !b.hidden,
+        inExtras: Object.keys(window.__inputActions || {}).includes("auto-refine-part"),
+        fired: window.__sent.filter((m) => m && m.type === "refine_selection").length,
+      };
+    }, BUBBLE);
+    ok("with the Extras row off too, the panel still offers it", out.onPanel, JSON.stringify(out));
+    ok("and nothing is put in a menu that was turned off", !out.inExtras, JSON.stringify(out));
+    ok("and it still sends", out.fired === 1, JSON.stringify(out));
+  });
+}
+
+console.log("\nthe rows that only appear when switched on, at both sizes");
+{
+  // Every check that measures the panel does it with the defaults, and the rows
+  // added for passes and worn phrases are hidden under their own switches. So
+  // nothing has ever measured them: they could push the panel sideways on a
+  // phone and every run would still come back green.
+  const ON = {
+    enabled: true,
+    passMode: "many",
+    passNames: ["A judge", "A judge that thinks"],
+    wornOn: true,
+    wornBack: 60,
+    wornLeast: 3,
+    wornFine: ["a shiver ran down her spine", "the air between them was thick with something"],
+  };
+  for (const [label, viewport, touch] of [
+    ["a small phone", { width: 320, height: 680 }, true],
+    ["a phone", { width: 390, height: 844 }, true],
+    ["a desktop", { width: 1440, height: 900 }, false],
+  ]) {
+    await inTab(browser, { saved: ON, viewport, touch }, async (page) => {
+      await goTab(page, "Limits");
+      const out = await page.evaluate(() => {
+        const drawer = document.getElementById("drawer");
+        const rows = ["passMode", "passNames", "passNamesYours", "passOwnModel", "wornOn", "wornBack", "wornLeast", "wornFine"];
+        const missing = [];
+        const spilling = [];
+        const small = [];
+        const coarse = matchMedia("(pointer: coarse)").matches;
+        const box = drawer.getBoundingClientRect();
+        for (const key of rows) {
+          const node = drawer.querySelector('[data-arf-field="' + key + '"]');
+          if (!node) { missing.push(key); continue; }
+          const r = node.getBoundingClientRect();
+          // Inside the panel it lives in, with a pixel of slack for rounding.
+          if (r.right > box.right + 1 || r.left < box.left - 1) spilling.push(key + " " + Math.round(r.width));
+          // A finger needs something to land on. Only what is actually pressed:
+          // a text box is as tall as its rows and is not a tap target.
+          const tag = String(node.tagName).toUpperCase();
+          if (coarse && (tag === "SELECT" || node.type === "checkbox") && r.height < 24)
+            small.push(key + " " + Math.round(r.height));
+        }
+        return {
+          missing,
+          spilling,
+          small,
+          sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+          panelFits: box.width <= window.innerWidth + 1,
+        };
+      });
+      ok(label + ": every switched-on row is drawn", out.missing.length === 0, JSON.stringify(out.missing));
+      ok(label + ": none of them reaches past the panel", out.spilling.length === 0, JSON.stringify(out.spilling));
+      ok(label + ": nothing pushes the page sideways", !out.sideways);
+      ok(label + ": the panel fits the screen", out.panelFits);
+      if (touch) ok(label + ": what a finger presses is big enough", out.small.length === 0, JSON.stringify(out.small));
+    });
+  }
+}
+
+console.log("\npicking a preset loads it, so a save cannot land on the wrong one");
+{
+  // The bug: picking moved the name into the box and left the prompt alone, so
+  // the panel showed one preset's rules while the picker named another. Update
+  // selected then wrote what was on screen over the preset just picked, and the
+  // preset it overwrote was gone with no way back.
+  const errors = await inTab(browser, {}, async (page) => {
+    await goTab(page, "Prompt");
+
+    const setBlock = (text) =>
+      page.evaluate((t) => {
+        const ta = document.querySelector('#drawer [data-arf-field^="blocktext:"]');
+        ta.value = t;
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+        ta.dispatchEvent(new Event("blur", { bubbles: true }));
+      }, text);
+    const saveAs = (name) =>
+      page.evaluate((n) => {
+        const box = document.querySelector('#drawer [data-arf-field="presetName"]');
+        box.value = n;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-preset="new"]').click();
+      }, name);
+    const pick = (name) =>
+      page.evaluate((n) => {
+        const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+        sel.value = n;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      }, name);
+    const blockText = () =>
+      page.evaluate(
+        () => document.querySelector('#drawer [data-arf-field^="blocktext:"]').value,
+      );
+
+    await setBlock("<my_rule>ALPHA</my_rule>");
+    await saveAs("Alpha");
+    await settle(page);
+    await setBlock("<my_rule>BETA</my_rule>");
+    await saveAs("Beta");
+    await settle(page);
+
+    // Loads are forced with the button through this part, so the same check
+    // runs against a build where picking does not load and still gets each
+    // preset's real contents on screen to compare.
+    const forceLoad = (name) =>
+      page
+        .evaluate((n) => {
+          const sel = document.querySelector('#drawer [data-arf-field="presetPick"]');
+          sel.value = n;
+          sel.dispatchEvent(new Event("change", { bubbles: true }));
+        }, name)
+        .then(() => settle(page))
+        .then(() =>
+          page.evaluate(() =>
+            document.querySelector('#drawer [data-arf-preset="load"]').click(),
+          ),
+        )
+        .then(() => settle(page));
+
+    // Standing on Alpha's rules.
+    await forceLoad("Alpha");
+    ok("picking one loads its rules", (await blockText()) === "<my_rule>ALPHA</my_rule>", await blockText());
+
+    // The move that used to destroy a preset: Alpha on screen, pick Beta, save.
+    await pick("Beta");
+    await settle(page);
+    const afterPick = await blockText();
+    ok("picking the other one loads that one instead", afterPick === "<my_rule>BETA</my_rule>", afterPick);
+
+    await page.evaluate(() =>
+      document.querySelector('#drawer [data-arf-preset="update"]').click(),
+    );
+    await settle(page);
+    await forceLoad("Alpha");
+    await forceLoad("Beta");
+    const betaNow = await blockText();
+    ok(
+      "and updating it writes its own rules back, not the ones it replaced",
+      betaNow === "<my_rule>BETA</my_rule>",
+      betaNow,
+    );
+
+    // Put it back, for a pick made to see what was in there.
+    await setBlock("<my_rule>UNSAVED</my_rule>");
+    await settle(page);
+    await pick("Alpha");
+    await settle(page);
+    ok("a pick over unsaved work loads the preset", (await blockText()) === "<my_rule>ALPHA</my_rule>");
+    const undoThere = await page.evaluate(
+      () => !!document.querySelector('#drawer [data-arf-preset="undo"]'),
+    );
+    ok("and offers to put it back", undoThere);
+    if (undoThere) {
+      await page.evaluate(() =>
+        document.querySelector('#drawer [data-arf-preset="undo"]').click(),
+      );
+      await settle(page);
+    }
+    const restored = await blockText();
+    ok("which brings the unsaved work back", restored === "<my_rule>UNSAVED</my_rule>", restored);
+    const pickNow = await page.evaluate(
+      () => document.querySelector('#drawer [data-arf-field="presetPick"]').value,
+    );
+    ok("and takes the picker back with it", pickNow === "Beta", pickNow);
+    const undoGone = await page.evaluate(
+      () => !!document.querySelector('#drawer [data-arf-preset="undo"]'),
+    );
+    ok("with nothing left to put back", !undoGone);
+  });
+  for (const e of errors) ok("no console errors", false, e);
+  if (!errors.length) ok("no console errors", true);
+}
+
+console.log("\npicking a model setup loads it, the same as a preset");
+{
+  // The presets card and the setups card had the same fault, one above the
+  // other. Fixed in both, and checked in both, because a fix that landed on
+  // one of two identical cards is the kind that gets found by a user.
+  const errors = await inTab(browser, {}, async (page) => {
+    await goTab(page, "Model");
+
+    const setWait = (n) =>
+      page.evaluate((v) => {
+        const el = document.querySelector('[data-arf-field="timeoutSecs"]');
+        el.value = String(v);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.dispatchEvent(new Event("blur", { bubbles: true }));
+      }, n);
+    const wait = () =>
+      page.evaluate(
+        () => document.querySelector('[data-arf-field="timeoutSecs"]').value,
+      );
+    const saveAs = (name) =>
+      page.evaluate((n) => {
+        const box = document.querySelector('#drawer [data-arf-field="setupName"]');
+        box.value = n;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-setup="new"]').click();
+      }, name);
+    const pick = (name) =>
+      page.evaluate((n) => {
+        const sel = document.querySelector('#drawer [data-arf-field="setupPick"]');
+        sel.value = n;
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      }, name);
+    const forceLoad = async (name) => {
+      await pick(name);
+      await settle(page);
+      await page.evaluate(() =>
+        document.querySelector('#drawer [data-arf-setup="load"]').click(),
+      );
+      await settle(page);
+    };
+
+    await setWait(111);
+    await settle(page);
+    await saveAs("Slow");
+    await settle(page);
+    await setWait(222);
+    await settle(page);
+    await saveAs("Fast");
+    await settle(page);
+
+    await forceLoad("Slow");
+    ok("picking one loads its numbers", (await wait()) === "111", await wait());
+
+    await pick("Fast");
+    await settle(page);
+    const afterPick = await wait();
+    ok("picking the other one loads that one instead", afterPick === "222", afterPick);
+
+    await page.evaluate(() =>
+      document.querySelector('#drawer [data-arf-setup="update"]').click(),
+    );
+    await settle(page);
+    await forceLoad("Slow");
+    await forceLoad("Fast");
+    const fastNow = await wait();
+    ok(
+      "and updating it writes its own numbers back, not the ones it replaced",
+      fastNow === "222",
+      fastNow,
+    );
+
+    await setWait(333);
+    await settle(page);
+    await pick("Slow");
+    await settle(page);
+    ok("a pick over unsaved changes loads the setup", (await wait()) === "111", await wait());
+    const undoThere = await page.evaluate(
+      () => !!document.querySelector('#drawer [data-arf-setup="undo"]'),
+    );
+    ok("and offers to put it back", undoThere);
+    if (undoThere) {
+      await page.evaluate(() =>
+        document.querySelector('#drawer [data-arf-setup="undo"]').click(),
+      );
+      await settle(page);
+    }
+    const restored = await wait();
+    ok("which brings the unsaved changes back", restored === "333", restored);
+    const pickNow = await page.evaluate(
+      () => document.querySelector('#drawer [data-arf-field="setupPick"]').value,
+    );
+    ok("and takes the picker back with it", pickNow === "Fast", pickNow);
+
+    // A rename keeps what the setup holds, and says so when the Model tab
+    // holds more than it does.
+    const renameTo = (name) =>
+      page.evaluate((n) => {
+        const box = document.querySelector('#drawer [data-arf-field="setupName"]');
+        box.value = n;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        document.querySelector('#drawer [data-arf-setup="rename"]').click();
+      }, name);
+    const said = () => page.evaluate(() => document.getElementById("drawer").textContent || "");
+    await forceLoad("Slow");
+    await renameTo("Slower");
+    await settle(page);
+    ok("a setup renamed with nothing changed just says Renamed", /Renamed\./.test(await said()) && !/Only the name changed/.test(await said()));
+    await setWait(444);
+    await settle(page);
+    await renameTo("Slowest");
+    await settle(page);
+    ok("renamed with changes on the Model tab, it says they are not saved in it", /Only the name changed, so your changes are not saved in it yet/.test(await said()));
+    await forceLoad("Slowest");
+    ok("and the setup still holds what it held", (await wait()) === "111", await wait());
+  });
+  for (const e of errors) ok("no console errors", false, e);
+  if (!errors.length) ok("no console errors", true);
+}
+
+console.log("\nthe faults reported on 1.12.0");
+
+// 1. The automatic switch keeps its place whatever the panel is showing. It was
+// one more item in a row that wraps, so where it landed depended on how much
+// room the buttons before it had left.
+await inTab(browser, { saved: { enabled: true, inputRefine: true }, viewport: { width: 420, height: 900 } }, async (page) => {
+  await page.evaluate(() => (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" })));
+  await page.waitForTimeout(350);
+  const where = () =>
+    page.evaluate(() => {
+      const lab = [...document.querySelectorAll("#drawer .arf-row")].find((l) =>
+        /every new reply automatically/i.test(l.textContent || ""),
+      );
+      if (!lab) return { found: false };
+      const r = lab.getBoundingClientRect();
+      const prev = lab.previousElementSibling && lab.previousElementSibling.getBoundingClientRect();
+      // Below the buttons rather than beside them, which is what stops the
+      // width of the panel deciding where it sits.
+      return { found: true, left: Math.round(r.left), under: !!prev && r.top >= prev.bottom - 1 };
+    });
+  const hunt = (text) =>
+    page.evaluate(async (t) => {
+      const box = [...document.querySelectorAll("input")].find((i) => /search/i.test(i.placeholder || ""));
+      box.value = t;
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 450));
+    }, text);
+  const idle = await where();
+  await hunt("Kacvskcajcajc");
+  await page.waitForTimeout(300);
+  const none = await where();
+  await hunt("wait");
+  await page.waitForTimeout(300);
+  const some = await where();
+  ok("the automatic switch sits under the buttons, not among them", idle.found && idle.under, JSON.stringify(idle));
+  ok("a search with no results leaves it where it was", none.found && none.left === idle.left && none.under, JSON.stringify({ idle, none }));
+  ok("and so does a search with results", some.found && some.left === idle.left, JSON.stringify({ idle, some }));
+
+  // Its own line put empty space beside it, and a label is pressable
+  // everywhere it reaches, so that space was switching the automatic pass on
+  // and off.
+  const reach = await page.evaluate(async () => {
+    const find = () =>
+      [...document.querySelectorAll("#drawer .arf-row")].find((l) =>
+        /every new reply automatically/i.test(l.textContent || ""),
+      );
+    const lab = find();
+    const words = lab.querySelector("span");
+    const box = lab.querySelector("input");
+    const r = lab.getBoundingClientRect();
+    const said = words.getBoundingClientRect();
+    const card = lab.parentElement.getBoundingClientRect();
+    const was = !!box.checked;
+    // Past the end of the words and still well inside the card, which is the
+    // empty space that was switching it.
+    const x = Math.min(card.right - 6, said.right + 20);
+    const y = r.top + r.height / 2;
+    const under = document.elementFromPoint(x, y);
+    if (under && under.click) under.click();
+    await new Promise((r2) => setTimeout(r2, 400));
+    return {
+      // How far the pressable area runs past the last word it holds.
+      over: Math.round(r.right - said.right),
+      room: Math.round(card.right - said.right),
+      was,
+      now: !!find().querySelector("input").checked,
+      hit: under ? under.tagName + "." + String(under.className || "").split(" ")[0] : "",
+    };
+  });
+  ok(
+    "the switch reaches no further than its own words",
+    reach.room > 40 && reach.over < 12,
+    JSON.stringify(reach),
+  );
+  ok("so pressing beside it leaves it alone", reach.was === reach.now, JSON.stringify(reach));
+});
+
+// 2. Back to the default loads one of the prompts that come with the extension,
+// so the boxes have to lock even though the picker was never touched.
+await inTab(browser, { saved: { enabled: true, blocks: [{ id: "x", name: "Mine", text: "my own words {{turn}}", role: "system", on: true }] } }, async (page) => {
+  const look = () =>
+    page.evaluate(() => {
+      const tab = [...document.querySelectorAll("button")].find((b) => /^prompt$/i.test((b.textContent || "").trim()));
+      if (tab) tab.click();
+      const boxes = [...document.querySelectorAll("[data-arf-block] textarea")];
+      return {
+        boxes: boxes.length,
+        // readOnly and not disabled. A locked block stays selectable on
+        // purpose, so a line can be copied out of a prompt you want to borrow
+        // wording from, and a disabled box cannot be selected.
+        locked: boxes.length > 0 && boxes.every((t) => t.readOnly),
+        says: /cannot be changed|Save as new/i.test(document.body.innerText),
+      };
+    });
+  await page.waitForTimeout(400);
+  const mine = await look();
+  await page.evaluate(async () => {
+    const btn = [...document.querySelectorAll("button")].find((b) => /back to the default/i.test(b.textContent || ""));
+    if (btn) btn.click();
+    await new Promise((r) => setTimeout(r, 700));
+  });
+  await page.waitForTimeout(400);
+  const after = await look();
+  ok("a prompt of your own leaves the boxes open to type in", mine.boxes > 0 && !mine.locked, JSON.stringify(mine));
+  ok("back to the default locks them, with the picker never touched", after.locked, JSON.stringify(after));
+  ok("and says why", after.says, JSON.stringify(after));
+});
+
+// 2b. A prompt that comes with the extension still lets you choose which of its
+// parts go to the model. Some of them come switched off, so locking the switch
+// with the rest put those out of reach entirely.
+await inTab(browser, { saved: { enabled: true } }, async (page) => {
+  await page.waitForTimeout(400);
+  const out = await page.evaluate(async () => {
+    const tab = [...document.querySelectorAll("button")].find((b) => /^prompt$/i.test((b.textContent || "").trim()));
+    if (tab) tab.click();
+    await new Promise((r) => setTimeout(r, 300));
+    const btn = [...document.querySelectorAll("button")].find((b) => /back to the default/i.test(b.textContent || ""));
+    if (btn) btn.click();
+    await new Promise((r) => setTimeout(r, 700));
+    const boxes = [...document.querySelectorAll("[data-arf-block] textarea")];
+    const switches = [...document.querySelectorAll('input[type="checkbox"][aria-label^="Send "]')];
+    void boxes;
+    const off = switches.filter((c) => !c.checked);
+    const before = off.length;
+    if (off[0]) {
+      off[0].checked = true;
+      off[0].dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    const now = [...document.querySelectorAll('input[type="checkbox"][aria-label^="Send "]')];
+    return {
+      textLocked: boxes.length > 0 && boxes.every((t) => t.readOnly),
+      switchesLive: switches.length > 0 && switches.every((c) => !c.disabled),
+      hadOff: before > 0,
+      turnedOn: now.filter((c) => !c.checked).length === before - 1,
+    };
+  });
+  ok("the words of a prompt that comes with it stay locked", out.textLocked, JSON.stringify(out));
+  ok("but every part's switch stays live", out.switchesLive, JSON.stringify(out));
+  ok("and a part that comes switched off can be turned on", out.hadOff && out.turnedOn, JSON.stringify(out));
+});
+
+// The selector card under the swipe switch, so a Lumiverse update that renames
+// the arrows on a message can be worked around on the day rather than waited
+// out. Built the way Where the input box is is built, since the two do the same
+// job and two boxes that do one job should not be two things to learn.
+for (const [label, viewport, touch] of [
+  ["a small phone", { width: 320, height: 680 }, true],
+  ["a phone", { width: 390, height: 844 }, true],
+  ["a desktop", { width: 1440, height: 900 }, false],
+]) {
+  await inTab(browser, { saved: { enabled: true }, viewport, touch }, async (page) => {
+    await page.waitForTimeout(400);
+    const read = () =>
+      page.evaluate(() => {
+        const tab = [...document.querySelectorAll("button")].find((b) => /^limits$/i.test((b.textContent || "").trim()));
+        if (tab) tab.click();
+        const shows = (el) => !!el && !!el.offsetParent;
+        const sw = document.querySelector('[data-arf-field="asSwipe"]');
+        const box = document.querySelector('[data-arf-field="swipeSelector"]');
+        const list = document.querySelector("[data-arf-swipelist]");
+        const drawer = document.getElementById("drawer");
+        const room = drawer ? drawer.getBoundingClientRect() : null;
+        const wide = [];
+        const small = [];
+        const coarse = matchMedia("(pointer: coarse)").matches;
+        for (const one of [box, document.querySelector("[data-arf-testswipe]"), document.querySelector("[data-arf-resetswipe]")]) {
+          if (!one || !one.offsetParent) continue;
+          const r = one.getBoundingClientRect();
+          if (room && (r.left < room.left - 1 || r.right > room.right + 1)) wide.push(one.tagName);
+          // The same floor the rest of the panel is held to on a touch screen.
+          if (coarse && r.height < 28) small.push(one.tagName);
+        }
+        return {
+          toggle: !!sw,
+          on: !!sw && sw.checked,
+          boxShows: shows(box),
+          listShows: shows(list),
+          value: box ? box.value : null,
+          test: !!document.querySelector("[data-arf-testswipe]"),
+          reset: !!document.querySelector("[data-arf-resetswipe]"),
+          picker: !!document.querySelector("[data-arf-pickswipe]"),
+          lines: list ? list.querySelectorAll(".arf-pick").length : 0,
+          wide,
+          small,
+        };
+      });
+    const off = await read();
+    await page.evaluate(async () => {
+      const sw = document.querySelector('[data-arf-field="asSwipe"]');
+      sw.checked = true;
+      sw.dispatchEvent(new Event("change", { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 500));
+    });
+    await page.waitForTimeout(400);
+    const on = await read();
+    ok(label + ": the swipe switch is there and starts off", off.toggle && !off.on, JSON.stringify(off));
+    ok(label + ": its selector box stays shut while it is off", !off.boxShows && !off.listShows, JSON.stringify(off));
+    ok(label + ": and comes out when it is switched on", on.boxShows && on.listShows, JSON.stringify(on));
+    ok(label + ": holding the selectors it really looks under", /Next swipe/.test(on.value || ""), JSON.stringify(on.value));
+    ok(label + ": with Test and the way back beside it", on.test && on.reset, JSON.stringify(on));
+    ok(label + ": and a button that picks it for you", on.picker, JSON.stringify(on));
+    ok(label + ": every selector listed in the order it is tried",
+      on.lines >= 3 && on.lines === String(on.value || "").split(",").filter((s) => s.trim()).length,
+      JSON.stringify({ lines: on.lines, value: on.value }));
+    ok(label + ": nothing hanging off the side of the panel", !on.wide.length, JSON.stringify(on.wide));
+    ok(label + ": and nothing too small to press", !on.small.length, JSON.stringify(on.small));
+  });
+}
+
+// 3. The wait means since the run started. Re-arming used to set a whole fresh
+// wait from that moment, so each provider wait pushed the deadline further out.
+await inTab(browser, { saved: { enabled: true, timeoutSecs: 5 } }, async (page) => {
+  await page.evaluate(() => {
+    window.__makeComposer("");
+    (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" }));
+  });
+  await page.waitForTimeout(350);
+  const began = await page.evaluate(async () => {
+    const btn = [...document.querySelectorAll("button")].find((b) => /refine the latest reply/i.test(b.textContent || ""));
+    window.__sent.length = 0;
+    btn.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const ask = window.__sent.find((m) => /refine/.test(m.type || ""));
+    if (ask) window.__fromBackend({ type: "refine_ack", requestId: ask.requestId });
+    window.__t0 = Date.now();
+    return !!ask;
+  });
+  // Two provider waits partway through, which is what used to move the deadline.
+  await page.waitForTimeout(3000);
+  await page.evaluate(() => window.__fromBackend({ type: "refine_stage", stage: "waiting", waitMs: 1000, attempt: 1, of: 2 }));
+  await page.waitForTimeout(3000);
+  await page.evaluate(() => window.__fromBackend({ type: "refine_stage", stage: "waiting", waitMs: 1000, attempt: 2, of: 2 }));
+  const gaveUp = await page.evaluate(async () => {
+    for (let i = 0; i < 80; i++) {
+      if (!/Thinking|Asking|Writing|Checking|Stop this refine/i.test(document.body.innerText))
+        return Math.round((Date.now() - window.__t0) / 1000);
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return -1;
+  });
+  ok("a refine given five seconds gives up", began && gaveUp > 0, String(gaveUp));
+  // Five seconds floors to twenty, plus the two seconds of waiting it was told
+  // to allow. Anything near forty is the deadline having been set again whole.
+  ok("once, rather than once per provider wait", gaveUp > 0 && gaveUp <= 30, gaveUp + "s");
+});
+
+// 4. Every reading mark joins the same sweep, whenever its element was built.
+await inTab(browser, { saved: { enabled: true, widgetOn: true } }, async (page) => {
+  await page.evaluate(() => (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" })));
+  await page.waitForTimeout(400);
+  const out = await page.evaluate(async () => {
+    const btn = [...document.querySelectorAll("button")].find((b) => /refine the latest reply/i.test(b.textContent || ""));
+    btn.click();
+    await new Promise((r) => setTimeout(r, 900));
+    const eyes = [...document.querySelectorAll(".arf-eye.arf-eye-read")];
+    const delayOf = (el) => {
+      const p = el.querySelector(".arf-eye-pupil");
+      return p ? getComputedStyle(p).animationDelay : "";
+    };
+    return {
+      reading: eyes.length,
+      delays: eyes.map(delayOf),
+      // A negative delay is how an animation joins a cycle already running.
+      // The sweep is counted from the first mark of it, so nought is the right
+      // delay for that one and for no other: every mark at nought is every
+      // mark starting a sweep of its own, which is the fault this covers.
+      joined:
+        eyes.length > 1 &&
+        eyes.every((e) => /^-?0s$/.test(delayOf(e)) || /^-/.test(delayOf(e))) &&
+        eyes.some((e) => /^-/.test(delayOf(e)) && !/^-?0s$/.test(delayOf(e))),
+    };
+  });
+  ok("more than one mark reads at once", out.reading > 1, JSON.stringify(out.reading));
+  ok("and each joins the sweep already in progress", out.joined, JSON.stringify(out.delays));
+});
+
+// 5. A mark Lumiverse draws rather than this extension. The one on the drawer
+// tab is an SVG handed to the host once and written out again whenever it
+// redraws its sidebar, which is every change of tab. The copy that comes back
+// is a fresh element resting shut, and a run it lands in the middle of has to
+// reach it.
+await inTab(browser, { saved: { enabled: true, widgetOn: true } }, async (page) => {
+  await page.evaluate(() => (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" })));
+  await page.waitForTimeout(400);
+  const out = await page.evaluate(async () => {
+    const btn = [...document.querySelectorAll("button")].find((b) => /refine the latest reply/i.test(b.textContent || ""));
+    btn.click();
+    await new Promise((r) => setTimeout(r, 900));
+    const reading = document.querySelector(".arf-eye.arf-eye-read");
+    if (!reading) return { none: true };
+    // Written out the way the host writes it: the mark as it was registered,
+    // with nothing this extension has since put on it.
+    const fresh = reading.cloneNode(true);
+    fresh.removeAttribute("data-arf-eyebase");
+    fresh.setAttribute("class", "arf-eye arf-opens");
+    for (const p of fresh.querySelectorAll(".arf-eye-pupil,.arf-eye-ball")) p.style.animationDelay = "";
+    const seat = document.createElement("span");
+    seat.appendChild(fresh);
+    document.body.appendChild(seat);
+    const shutAtFirst = fresh.getAttribute("class");
+    // One frame. The mark has to be reading before the browser paints it, or
+    // the redraw is something you watch stall and then jump.
+    await new Promise((r) => requestAnimationFrame(() => r()));
+    const inOneFrame = fresh.getAttribute("class");
+    await new Promise((r) => setTimeout(r, 700));
+    const pupil = fresh.querySelector(".arf-eye-pupil");
+    return {
+      shutAtFirst,
+      now: fresh.getAttribute("class"),
+      inOneFrame,
+      delay: pupil ? getComputedStyle(pupil).animationDelay : "",
+    };
+  });
+  ok("a refine is running with a mark reading", !out.none, JSON.stringify(out));
+  ok("the host's copy comes back resting", out.shutAtFirst === "arf-eye arf-opens", JSON.stringify(out));
+  ok(
+    "and is reading before the browser has drawn it",
+    /arf-eye-read/.test(out.inOneFrame || ""),
+    JSON.stringify(out),
+  );
+  ok("and is still reading a moment later", /arf-eye-read/.test(out.now || ""), JSON.stringify(out));
+  ok(
+    "in step with the marks that were already going",
+    /^-/.test(out.delay || "") && !/^-?0s$/.test(out.delay || ""),
+    JSON.stringify(out),
+  );
+});
+
+// The refine written in beside the reply, and the arrow that moves the message
+// on to it. Lumiverse is told the new swipe is the one showing; a build that
+// does not read that back leaves the old reply on screen with the refine one
+// arrow away and nothing saying so.
+{
+  const MSG = `
+  <div id="wrap">
+    <div data-message-id="msg-one">
+      <div data-component="MessageContent"><div><p>The lamp over the bench had been out for a week.</p></div></div>
+      <button type="button" aria-label="Next swipe" style="width:28px;height:28px">&gt;</button>
+      <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-one:footer" style="display:contents"></span>
+    </div>
+  </div>`;
+  const WAS = "The lamp over the bench had been out for a week.";
+  const NOW = "The lamp above the bench had been dead a week.";
+
+  await inTab(browser, { saved: { enabled: true, asSwipe: true } }, async (page) => {
+    const out = await page.evaluate(
+      async ([markup, was, now]) => {
+        const put = async (text) => {
+          const old = document.getElementById("wrap");
+          if (old) old.remove();
+          const wrap = document.createElement("div");
+          wrap.innerHTML = markup;
+          document.body.appendChild(wrap.firstElementChild);
+          document.querySelector('[data-component="MessageContent"] p').textContent = text;
+          window.__pressed = 0;
+          document
+            .querySelector('[aria-label="Next swipe"]')
+            .addEventListener("click", () => (window.__pressed += 1));
+          (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" }));
+          await new Promise((r) => setTimeout(r, 400));
+        };
+        const land = () =>
+          window.__fromBackend({
+            type: "refined",
+            chatId: "c1",
+            messageId: "msg-one",
+            before: was,
+            after: now,
+            canUndo: true,
+            kind: "refine",
+            swiped: true,
+          });
+        // Still showing the reply the refine was written beside.
+        await put(was);
+        land();
+        await new Promise((r) => setTimeout(r, 1200));
+        const stale = window.__pressed;
+        // And left alone from there, however long the old writing stays up. The
+        // swipe it moved to is the one showing now, so a second press would be
+        // a fresh reply asked for by nobody.
+        await new Promise((r) => setTimeout(r, 1600));
+        const after = window.__pressed;
+        // A build that followed the write on its own has nothing to press.
+        await put(now);
+        land();
+        await new Promise((r) => setTimeout(r, 1600));
+        const already = window.__pressed;
+        // Writing neither of them knows about, which is a message that has
+        // moved on since.
+        await put("She left the crate where it was and went back inside.");
+        land();
+        await new Promise((r) => setTimeout(r, 1600));
+        const other = window.__pressed;
+        return { stale, after, already, other };
+      },
+      [MSG, WAS, NOW],
+    );
+    ok("the arrow is pressed while the old writing is still up", out.stale === 1, JSON.stringify(out));
+    ok("and pressed once, never again", out.after === 1, JSON.stringify(out));
+    ok("a reply already showing the refine is left alone", out.already === 0, JSON.stringify(out));
+    ok("and so is one showing neither", out.other === 0, JSON.stringify(out));
+  });
+
+  // A sweep refines several replies one after another. Each has its own wait,
+  // so the one before is not called off by the one after it.
+  await inTab(browser, { saved: { enabled: true, asSwipe: true } }, async (page) => {
+    const out = await page.evaluate(
+      async ([was, now]) => {
+        const old = document.getElementById("wrap");
+        if (old) old.remove();
+        const wrap = document.createElement("div");
+        wrap.id = "wrap";
+        window.__pressed = {};
+        for (const id of ["msg-one", "msg-two"]) {
+          const box = document.createElement("div");
+          box.setAttribute("data-message-id", id);
+          box.innerHTML =
+            '<div data-component="MessageContent"><p></p></div>' +
+            '<button type="button" aria-label="Next swipe" style="width:28px;height:28px">&gt;</button>' +
+            '<span data-spindle-mount="message_footer" data-spindle-scope="message:' +
+            id +
+            ':footer" style="display:contents"></span>';
+          box.querySelector("p").textContent = was;
+          window.__pressed[id] = 0;
+          box.querySelector("button").addEventListener("click", () => (window.__pressed[id] += 1));
+          wrap.appendChild(box);
+        }
+        document.body.appendChild(wrap);
+        (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" }));
+        await new Promise((r) => setTimeout(r, 400));
+        // Both land inside one wait, which is what used to throw the first away.
+        for (const id of ["msg-one", "msg-two"])
+          window.__fromBackend({
+            type: "refined",
+            chatId: "c1",
+            messageId: id,
+            before: was,
+            after: now,
+            canUndo: true,
+            kind: "refine",
+            swiped: true,
+          });
+        await new Promise((r) => setTimeout(r, 1400));
+        return window.__pressed;
+      },
+      [WAS, NOW],
+    );
+    ok("a sweep follows every reply it refined", out["msg-one"] === 1 && out["msg-two"] === 1, JSON.stringify(out));
+  });
+
+  // Lumiverse's own box for its swipe arrows, with the labels in another
+  // language. The next arrow is the last button in the box, and the previous
+  // one is left alone.
+  await inTab(browser, { saved: { enabled: true, asSwipe: true } }, async (page) => {
+    const out = await page.evaluate(
+      async ([was, now]) => {
+        const old = document.getElementById("wrap");
+        if (old) old.remove();
+        const wrap = document.createElement("div");
+        wrap.id = "wrap";
+        const box = document.createElement("div");
+        box.setAttribute("data-message-id", "msg-box");
+        box.innerHTML =
+          '<div data-component="MessageContent"><p></p></div>' +
+          '<div data-component="SwipeControls"><button type="button" aria-label="Anterior" style="width:28px;height:28px">&lt;</button>' +
+          '<span>1 / 2</span><button type="button" aria-label="Siguiente" style="width:28px;height:28px">&gt;</button></div>';
+        box.querySelector("p").textContent = was;
+        const hits = { next: 0, previous: 0 };
+        box.querySelector('[aria-label="Siguiente"]').addEventListener("click", () => (hits.next += 1));
+        box.querySelector('[aria-label="Anterior"]').addEventListener("click", () => (hits.previous += 1));
+        wrap.appendChild(box);
+        document.body.appendChild(wrap);
+        (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" }));
+        await new Promise((r) => setTimeout(r, 400));
+        window.__fromBackend({ type: "refined", chatId: "c1", messageId: "msg-box", before: was, after: now, canUndo: true, kind: "refine", swiped: true });
+        await new Promise((r) => setTimeout(r, 1400));
+        return hits;
+      },
+      [WAS, NOW],
+    );
+    ok("the next arrow in Lumiverse's swipe box is pressed, in any language", out.next === 1 && out.previous === 0, JSON.stringify(out));
+  });
+}
+
+console.log("\nonly the switch flips the switch");
+// A press on the words beside a switch changed the setting, which turned every
+// stray tap along a row into a setting nobody meant to change. The words still
+// name the control for a screen reader; they just do not answer a press.
+await inTab(browser, { saved: { enabled: true } }, async (page) => {
+  await page.evaluate(() => (window.__handlers["CHAT_CHANGED"] || []).forEach((f) => f({ chatId: "c1" })));
+  await goTab(page, "Limits");
+  const out = await page.evaluate(async () => {
+    const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+    const box = document.querySelector('#drawer [data-arf-field="asSwipe"]');
+    const name = document.getElementById(box.getAttribute("aria-labelledby") || "");
+    const before = box.checked;
+    name.click();
+    await wait(200);
+    const afterWords = document.querySelector('#drawer [data-arf-field="asSwipe"]').checked;
+    document.querySelector('#drawer [data-arf-field="asSwipe"]').click();
+    await wait(200);
+    const afterBox = document.querySelector('#drawer [data-arf-field="asSwipe"]').checked;
+
+    // The automatic switch on the card above the tabs.
+    const autoBox = [...document.querySelectorAll("#drawer input[type=checkbox]")].find((b) => {
+      const n = document.getElementById(b.getAttribute("aria-labelledby") || "");
+      return n && /every new reply automatically/i.test(n.textContent || "");
+    });
+    const autoName = autoBox ? document.getElementById(autoBox.getAttribute("aria-labelledby")) : null;
+    const autoWas = autoBox ? autoBox.checked : null;
+    if (autoName) autoName.click();
+    await wait(200);
+    const autoNow = autoBox ? autoBox.checked : null;
+
+    return {
+      named: !!name && (name.textContent || "").length > 0,
+      notALabel: !!name && name.tagName !== "LABEL",
+      before,
+      afterWords,
+      afterBox,
+      autoFound: !!autoBox && !!autoName,
+      autoWas,
+      autoNow,
+    };
+  });
+  ok("the switch still takes its words as its name", out.named && out.notALabel, JSON.stringify(out));
+  ok("pressing the words leaves the setting alone", out.afterWords === out.before, JSON.stringify(out));
+  ok("pressing the switch itself changes it", out.afterBox !== out.before, JSON.stringify(out));
+  ok("the automatic switch is the same", out.autoFound && out.autoNow === out.autoWas, JSON.stringify(out));
+});
+
+// The reset list most of all: ticking a part there puts settings back.
+await inTab(browser, { saved: { enabled: true } }, async (page) => {
+  await goTab(page, "Setup");
+  await page.evaluate(() => {
+    const fold = [...document.querySelectorAll("#drawer .arf-fold")].find((h) => /What to put back/.test(h.textContent));
+    if (fold) fold.click();
+  });
+  await settle(page);
+  const out = await page.evaluate(async () => {
+    const all = [...document.querySelectorAll('#drawer [data-arf-part^="resetParts:"]')];
+    if (!all.length) return { none: true };
+    const box = all[0];
+    const row = box.parentElement;
+    const words = row.querySelector(".arf-lab");
+    const was = box.checked;
+    words.click();
+    await new Promise((r) => setTimeout(r, 200));
+    return { was, now: box.checked, rowTag: row.tagName };
+  });
+  if (out.none) {
+    ok("a reset list to press", false, "no reset parts were on the page");
+  } else {
+    ok("a name in the reset list does not tick its part", out.now === out.was && out.rowTag !== "LABEL", JSON.stringify(out));
+  }
+});
+
+console.log("\nkeeping the eye still");
+await inTab(browser, { saved: { eyeStill: true } }, async (page) => {
+  const got = await page.evaluate(async () => {
+    const box = document.createElement("div");
+    box.innerHTML =
+      '<svg class="arf-eye arf-opens" viewBox="0 0 24 24"><g class="arf-eye-ball"><path d="M3 12h18"/><circle class="arf-eye-pupil" cx="12" cy="12" r="2"/></g><path class="arf-eye-lid" d="M3 12h18"/></svg>' +
+      '<svg class="arf-eye arf-eye-read" viewBox="0 0 24 24"><g class="arf-eye-ball"><path d="M3 12h18"/><circle class="arf-eye-pupil" cx="12" cy="12" r="2"/></g><path class="arf-eye-lid" d="M3 12h18"/></svg>';
+    document.body.appendChild(box);
+    await new Promise((r) => setTimeout(r, 50));
+    const [rest, read] = box.querySelectorAll(".arf-eye");
+    const cs = (n) => getComputedStyle(n);
+    const out = {
+      marked: document.documentElement.hasAttribute("data-arf-still-eyes"),
+      restBall: cs(rest.querySelector(".arf-eye-ball")).opacity,
+      restLid: cs(rest.querySelector(".arf-eye-lid")).opacity,
+      readBall: cs(read.querySelector(".arf-eye-ball")).opacity,
+      readPupil: cs(read.querySelector(".arf-eye-pupil")).animationName,
+      readBallAnim: cs(read.querySelector(".arf-eye-ball")).animationName,
+    };
+    box.remove();
+    return out;
+  });
+  ok("the switch marks the page", got.marked, JSON.stringify(got));
+  ok("an eye at rest is shut", got.restBall === "0" && got.restLid === "1", JSON.stringify(got));
+  ok("an eye reading is open", got.readBall === "1", JSON.stringify(got));
+  ok("and its pupil and lid do not move", got.readPupil === "none" && got.readBallAnim === "none", JSON.stringify(got));
+  await goTab(page, "Setup");
+  await settle(page);
+  const off = await page.evaluate(async () => {
+    const box = document.querySelector('#drawer [data-arf-field="eyeStill"]');
+    if (!box) return "no switch";
+    box.click();
+    await new Promise((r) => setTimeout(r, 200));
+    return document.documentElement.hasAttribute("data-arf-still-eyes") ? "still marked" : "clear";
+  });
+  ok("switching it off takes the mark away", off === "clear", off);
+});
+
+console.log("\na pattern behind the panel");
+{
+  // None by default. A pattern chosen in Setup is drawn behind the panel. The
+  // cards and the tab strip are two layers of the theme's raised color over
+  // it, together as solid as How solid the boxes are says: 60 by default,
+  // so the pattern shows through. With no pattern, the tab strip has the
+  // cards' own color and blurs the rows that scroll under it.
+  //
+  // What a box covers, read the way it is drawn: its color, and the one
+  // color its gradient lays on top. A color-mix is read back as
+  // color(srgb r g b / a), with channels from 0 to 1.
+  const COVER = `(el) => {
+    const read = (c) => {
+      let m = /^rgba?\\(([^)]*)\\)/.exec(c);
+      if (m) { const p = m[1].split(/[ ,\\/]+/).filter(Boolean).map(Number); return { r: p[0], g: p[1], b: p[2], a: p.length > 3 ? p[3] : 1 }; }
+      m = /^color\\(srgb ([^)]*)\\)/.exec(c);
+      if (m) { const p = m[1].split(/[ \\/]+/).filter(Boolean).map(Number); return { r: p[0] * 255, g: p[1] * 255, b: p[2] * 255, a: p.length > 3 ? p[3] : 1 }; }
+      return null;
+    };
+    const cs = getComputedStyle(el);
+    const base = read(cs.backgroundColor) || { r: 0, g: 0, b: 0, a: 0 };
+    const stop = /(rgba?\\([^)]*\\)|color\\(srgb [^)]*\\))/.exec(cs.backgroundImage || "");
+    const top = stop ? read(stop[1]) : null;
+    const a = top ? top.a + base.a * (1 - top.a) : base.a;
+    return { a: Math.round(a * 1000) / 1000, rgb: [Math.round(base.r), Math.round(base.g), Math.round(base.b)].join(","), blur: cs.backdropFilter || cs.webkitBackdropFilter || "none", bg: cs.backgroundColor, img: cs.backgroundImage };
+  }`;
+  await inTab(browser, { saved: { enabled: true } }, async (page) => {
+    const plain = await page.evaluate(() => document.querySelector("#drawer").hasAttribute("data-arf-pattern"));
+    ok("by default there is no pattern", plain === false);
+  });
+  // The color comes from the theme. Lumiverse's own "solid card" color is a
+  // fixed gray, and a purple theme turned gray-black under it.
+  const THEMED = ":root{--lumiverse-bg-elevated:rgb(40,0,60);--lumiverse-card-bg-solid:rgb(24,20,34)}";
+  for (const [solid, want] of [[undefined, 0.6], [100, 1], [30, 0.3], [0, 0]]) {
+    const say = solid === undefined ? "by default" : "at " + solid;
+    await inTab(browser, { css: THEMED, saved: { enabled: true, panelPattern: "dots", ...(solid === undefined ? {} : { boxSolid: solid }) } }, async (page) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      const got = await page.evaluate((COVER) => {
+        const cover = eval(COVER);
+        const root = document.querySelector("#drawer");
+        return { card: cover(root.querySelector(".arf-card")), tabs: cover(root.querySelector(".arf-tabs")) };
+      }, COVER);
+      ok("with a pattern, " + say + ", the cards cover " + want * 100 + "% of it", Math.abs(got.card.a - want) < 0.01, JSON.stringify(got.card));
+      ok("with a pattern, " + say + ", the tab strip covers the same as the cards", Math.abs(got.tabs.a - got.card.a) < 0.01, JSON.stringify(got));
+      if (want > 0) ok("with a pattern, " + say + ", the cards take the theme's color, not a fixed gray", got.card.rgb === "40,0,60", JSON.stringify(got.card));
+    });
+  }
+  // With no pattern, the tab strip is the cards' own see-through color, and
+  // blurs what is behind it.
+  await inTab(browser, { saved: { enabled: true } }, async (page) => {
+    await goTab(page, "Setup");
+    await settle(page);
+    const got = await page.evaluate((COVER) => {
+      const cover = eval(COVER);
+      const root = document.querySelector("#drawer");
+      return { card: cover(root.querySelector(".arf-card")), tabs: cover(root.querySelector(".arf-tabs")) };
+    }, COVER);
+    ok("with no pattern, the tab strip has the cards' color", got.tabs.bg === got.card.bg && got.tabs.a === got.card.a && got.tabs.a < 0.5, JSON.stringify(got));
+    ok("with no pattern, the tab strip blurs what scrolls under it", /blur\(12px\)/.test(got.tabs.blur), JSON.stringify(got.tabs));
+  });
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 800 }, true], ["laptop", { width: 1280, height: 800 }, false]]) {
+    // How solid the boxes are is a row of its own, shown only while a
+    // pattern is picked.
+    await inTab(browser, { viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      const shown = () => page.evaluate(() => { const r = document.querySelector('#drawer [data-arf-row="boxSolid"]'); return !!r && !r.hidden && r.getClientRects().length > 0; });
+      ok(label + ": with no pattern, How solid the boxes are is not shown", (await shown()) === false);
+      await page.evaluate(() => {
+        const sel = document.querySelector('#drawer select[data-arf-field="panelPattern"]');
+        sel.value = "stars";
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await page.waitForTimeout(700);
+      ok(label + ": picking a pattern shows How solid the boxes are", (await shown()) === true);
+      const box = await page.evaluate(() => {
+        const f = document.querySelector('#drawer [data-arf-field="boxSolid"]');
+        const r = f.getBoundingClientRect();
+        return { value: f.value, h: r.height, right: r.right, vw: window.innerWidth };
+      });
+      ok(label + ": it shows 60", box.value === "60", JSON.stringify(box));
+      ok(label + ": its box is at least 32 pixels high and inside the screen", box.h >= 32 && box.right <= box.vw, JSON.stringify(box));
+      // Typing a number changes the cards at once, before the box is left.
+      const typed = await page.evaluate((COVER) => {
+        const f = document.querySelector('#drawer [data-arf-field="boxSolid"]');
+        f.value = "100";
+        f.dispatchEvent(new Event("input", { bubbles: true }));
+        return new Promise((r) => requestAnimationFrame(() => r(eval(COVER)(document.querySelector("#drawer .arf-card")).a)));
+      }, COVER);
+      ok(label + ": typing 100 makes the cards solid at once", typed >= 0.98, String(typed));
+    });
+    for (const kind of ["diamonds", "stripes", "dots", "hearts", "stars"]) {
+      await inTab(browser, { viewport, touch, saved: { enabled: true, panelPattern: kind } }, async (page) => {
+        await goTab(page, "Setup");
+        await settle(page);
+        const got = await page.evaluate((COVER) => {
+          const cover = eval(COVER);
+          const root = document.querySelector("#drawer");
+          return {
+            kind: root.getAttribute("data-arf-pattern"),
+            // Drawn on a layer held at the top of the box that scrolls,
+            // behind everything on the panel. Lines and dots are gradients.
+            // Hearts and stars are masked to the shape.
+            drawn: ((cs) =>
+              cs.position === "sticky" &&
+              cs.zIndex === "-1" &&
+              (/gradient/.test(cs.backgroundImage) || /url\(/.test(cs.maskImage || cs.webkitMaskImage || "")))(
+              getComputedStyle(root, "::before"),
+            ),
+            card: cover(root.querySelector(".arf-card")).a,
+            tabs: cover(root.querySelector(".arf-tabs")).a,
+            sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+          };
+        }, COVER);
+        ok(label + ", " + kind + ": the pattern is drawn", got.kind === kind && got.drawn, JSON.stringify(got));
+        ok(label + ", " + kind + ": the cards and the tab strip let some of it show through", got.card > 0.5 && got.card < 0.7 && Math.abs(got.tabs - got.card) < 0.01, JSON.stringify(got));
+        ok(label + ", " + kind + ": nothing runs off the side", !got.sideways, "");
+      });
+    }
+  }
+}
+
+console.log("\ncopying sends no notification");
+{
+  // A copy that works says nothing: the phone or computer shows its own notice.
+  // A copy that fails warns, since nothing else on screen says so.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Log");
+      await settle(page);
+      const out = await page.evaluate(async () => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        const press = () => {
+          const b = [...document.querySelectorAll("#drawer button")].find((x) => x.textContent.trim() === "Copy it");
+          if (b) b.click();
+          return !!b;
+        };
+        let copied = null;
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: { writeText: (t) => { copied = t; return Promise.resolve(); } },
+        });
+        window.__toasts = [];
+        const found = press();
+        await wait(200);
+        const works = { found, copied: typeof copied === "string" && copied.length > 0, toasts: window.__toasts.slice() };
+        Object.defineProperty(navigator, "clipboard", {
+          configurable: true,
+          value: { writeText: () => Promise.reject(new Error("blocked")) },
+        });
+        document.execCommand = () => false;
+        window.__toasts = [];
+        press();
+        await wait(200);
+        return { works, fails: window.__toasts.slice() };
+      });
+      ok(label + ": the Copy it button is there", out.works.found, JSON.stringify(out));
+      ok(label + ": a copy that works sends no notification", out.works.copied && out.works.toasts.length === 0, JSON.stringify(out.works));
+      ok(label + ": a copy that fails warns once", out.fails.length === 1 && /^Could not copy here\./.test(out.fails[0]), JSON.stringify(out.fails));
+    });
+  }
+}
+
+console.log("\nyour own colors for cut and added words");
+{
+  // By default, cut words take the theme's danger color and added words its
+  // success color. The swatch opens Auto Refine's own color editor, the same
+  // on a phone and a laptop: a box for a color code, sliders for hue,
+  // saturation and lightness, the theme's colors to pick from, and a
+  // preview. Use the theme's color puts the theme's back. Only a color
+  // written as #rrggbb reaches the page.
+  const THEMED = ":root{--lumiverse-danger:rgb(200,30,40);--lumiverse-success:rgb(20,160,60);--lumiverse-warning:rgb(240,160,10)}";
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { css: THEMED, viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      const read = (key) =>
+        page.evaluate((key) => {
+          const ink = (cls) => { const w = document.createElement("span"); w.className = cls; document.body.appendChild(w); const c = getComputedStyle(w).color; w.remove(); return c; };
+          const row = document.querySelector('#drawer [data-arf-row="' + key + '"]');
+          const edit = row.querySelector(".arf-coloredit");
+          const code = row.querySelector('[data-arf-field="' + key + '"]');
+          const swatch = row.querySelector("[data-arf-colorswatch]");
+          const back = row.querySelector("[data-arf-colorback]");
+          const tall = (n) => (n && n.getClientRects().length ? Math.round(n.getBoundingClientRect().height) : 0);
+          return {
+            cut: ink("arf-cut"),
+            add: ink("arf-add"),
+            code: code ? code.value : null,
+            swatch: swatch ? getComputedStyle(swatch).backgroundColor : null,
+            open: !!edit && !edit.hidden && edit.getClientRects().length > 0,
+            bad: (row.querySelector("[data-arf-colorbad]") || {}).textContent || "",
+            backShown: !!back && !back.hidden && back.getClientRects().length > 0,
+            sliders: Array.from(row.querySelectorAll("[data-arf-colorpart]")).map((r) => r.value),
+            heights: {
+              swatch: tall(swatch),
+              code: tall(code),
+              slider: Math.min(...Array.from(row.querySelectorAll("[data-arf-colorpart]")).map(tall)),
+              pick: tall(row.querySelector("[data-arf-colorpick]")),
+            },
+            sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+          };
+        }, key);
+      const typeCode = (key, value) =>
+        page.evaluate(({ key, value }) => {
+          const code = document.querySelector('#drawer [data-arf-row="' + key + '"] [data-arf-field="' + key + '"]');
+          code.focus();
+          code.value = value;
+          code.dispatchEvent(new Event("input", { bubbles: true }));
+          code.dispatchEvent(new Event("change", { bubbles: true }));
+          code.blur();
+        }, { key, value });
+
+      const first = await read("cutColor");
+      ok(label + ": by default, cut words take the theme's danger color", first.cut === "rgb(200, 30, 40)", JSON.stringify(first));
+      ok(label + ": and added words its success color", first.add === "rgb(20, 160, 60)", JSON.stringify(first));
+      ok(label + ": the swatch and the code show the theme's color", first.swatch === "rgb(200, 30, 40)" && first.code === "#c81e28", JSON.stringify(first));
+      ok(label + ": the editor starts shut, with nothing to put back", !first.open && !first.backShown, JSON.stringify(first));
+
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-colorswatch="cutColor"]').click());
+      await page.waitForTimeout(350);
+      const opened = await read("cutColor");
+      ok(label + ": the swatch opens the editor", opened.open, JSON.stringify(opened));
+      ok(label + ": the sliders start on the theme's color", opened.sliders.join() === "356,74,45", JSON.stringify(opened.sliders));
+      if (touch)
+        ok(label + ": the swatch, the code box, the sliders and the picks are tall enough to tap",
+          opened.heights.swatch >= 32 && opened.heights.code >= 32 && opened.heights.slider >= 32 && opened.heights.pick >= 32, JSON.stringify(opened.heights));
+      ok(label + ": nothing runs off the side", !opened.sideways, "");
+
+      await typeCode("cutColor", "ff0040");
+      await settle(page);
+      const typed = await read("cutColor");
+      ok(label + ": a code typed without # is used", typed.cut === "rgb(255, 0, 64)" && typed.swatch === "rgb(255, 0, 64)" && typed.backShown, JSON.stringify(typed));
+      await typeCode("cutColor", "#0f8");
+      await settle(page);
+      ok(label + ": the short form is used too", (await read("cutColor")).cut === "rgb(0, 255, 136)", "");
+      await typeCode("cutColor", "not a color");
+      await settle(page);
+      const wrong = await read("cutColor");
+      ok(label + ": a code that is not a color says so, and the color stays", /color code/.test(wrong.bad) && wrong.cut === "rgb(0, 255, 136)" && wrong.code === "#00ff88", JSON.stringify(wrong));
+
+      await page.evaluate(() => {
+        const l = document.querySelector('#drawer [data-arf-row="cutColor"] [data-arf-colorpart="l"]');
+        l.value = "30";
+        l.dispatchEvent(new Event("input", { bubbles: true }));
+        l.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await settle(page);
+      const darker = await read("cutColor");
+      ok(label + ": the Lightness slider changes the color", darker.cut === "rgb(0, 153, 82)" && darker.code === "#009952", JSON.stringify(darker));
+
+      const picks = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('#drawer [data-arf-row="cutColor"] [data-arf-colorpick]')).map((b) => b.getAttribute("data-arf-colorpick")).join());
+      ok(label + ": the theme's danger and success colors are the two picks", picks === "danger,success", picks);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-row="cutColor"] [data-arf-colorpick="success"]').click());
+      await settle(page);
+      ok(label + ": a pick from the theme is used", (await read("cutColor")).cut === "rgb(20, 160, 60)", "");
+      const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("lv-auto-refine:settings:v1") || "{}").cutColor);
+      ok(label + ": it is saved", saved === "#14a03c", String(saved));
+      // Each track shows what its slider reaches, and each knob is filled with
+      // the color in use, so both follow a new color.
+      const look = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('#drawer [data-arf-row="cutColor"] [data-arf-colorpart]')).map((r) => ({
+          part: r.getAttribute("data-arf-colorpart"),
+          track: r.style.getPropertyValue("--arf-track"),
+          thumb: r.style.getPropertyValue("--arf-thumb"),
+          drawn: getComputedStyle(r).appearance || getComputedStyle(r).webkitAppearance,
+        })));
+      ok(label + ": every knob is filled with the color in use", look.length === 3 && look.every((x) => x.thumb === "#14a03c"), JSON.stringify(look));
+      ok(label + ": Hue's track runs through every hue", /^linear-gradient\(to right,hsl\(0,.*hsl\(360,/.test(look[0].track), look[0].track);
+      ok(label + ": Saturation's runs from gray to the full color", /hsl\(\d+,0%,.*hsl\(\d+,100%,/.test(look[1].track), look[1].track);
+      ok(label + ": Lightness's runs from black through the color to white", /,0%\),.*,50%\),.*,100%\)\)$/.test(look[2].track), look[2].track);
+      ok(label + ": the sliders draw their own look", look.every((x) => x.drawn === "none"), JSON.stringify(look.map((x) => x.drawn)));
+      // What is on the screen, read from a screenshot rather than from the
+      // variables set above, since Lumiverse's own slider rules can cover them.
+      const box = await page.evaluate(() => {
+        const r = document.querySelector('#drawer [data-arf-row="cutColor"] [data-arf-colorpart="h"]');
+        r.scrollIntoView({ block: "center" });
+        const b = r.getBoundingClientRect();
+        return { x: b.left, y: b.top, w: b.width, h: b.height, v: Number(r.value), max: Number(r.max) };
+      });
+      await page.mouse.move(0, 0);
+      await page.waitForTimeout(250);
+      const shot = (await page.screenshot({ clip: { x: box.x, y: box.y, width: box.w, height: box.h } })).toString("base64");
+      const px = await page.evaluate(async ({ shot, box }) => {
+        const img = new Image();
+        img.src = "data:image/png;base64," + shot;
+        await img.decode();
+        const c = document.createElement("canvas");
+        c.width = img.width;
+        c.height = img.height;
+        const g = c.getContext("2d");
+        g.drawImage(img, 0, 0);
+        const scale = img.width / box.w;
+        const at = (x, y) => Array.from(g.getImageData(Math.round(x * scale), Math.round(y * scale), 1, 1).data.slice(0, 3));
+        const knob = 22;
+        const knobX = knob / 2 + (box.v / box.max) * (box.w - knob);
+        return {
+          knob: at(knobX, box.h / 2),
+          // Red at the start of the Hue track, well clear of the knob.
+          trackStart: at(4, box.h / 2),
+        };
+      }, { shot, box });
+      const near = (a, b) => a.every((v, i) => Math.abs(v - b[i]) <= 12);
+      ok(label + ": on screen, the knob is the color in use", near(px.knob, [20, 160, 60]), JSON.stringify(px));
+      ok(label + ": on screen, the Hue track starts red", px.trackStart[0] > 120 && px.trackStart[1] < 90 && px.trackStart[2] < 90, JSON.stringify(px));
+      ok(label + ": the slider is its own height, not Lumiverse's 44 pixels", box.h < 44, JSON.stringify(box));
+
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-colorback="cutColor"]').click());
+      await settle(page);
+      const back = await read("cutColor");
+      ok(label + ": Use the theme's color puts the theme's color back", back.cut === "rgb(200, 30, 40)" && back.code === "#c81e28" && !back.backShown, JSON.stringify(back));
+
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-colorswatch="cutColor"]').click());
+      await page.waitForTimeout(400);
+      ok(label + ": the swatch shuts the editor again", !(await read("cutColor")).open, "");
+    });
+  }
+  // The sliders keep their own place. A slider at its far end stays there,
+  // and moving one does not move the others.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true, cutColor: "#ff0040" } }, async (page) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-colorswatch="cutColor"]').click());
+      await page.waitForTimeout(350);
+      const slide = (part, value) =>
+        page.evaluate(({ part, value }) => {
+          const r = document.querySelector('#drawer [data-arf-row="cutColor"] [data-arf-colorpart="' + part + '"]');
+          r.value = String(value);
+          r.dispatchEvent(new Event("input", { bubbles: true }));
+          r.dispatchEvent(new Event("change", { bubbles: true }));
+          r.blur();
+        }, { part, value });
+      const sliders = () =>
+        page.evaluate(() => Array.from(document.querySelectorAll('#drawer [data-arf-row="cutColor"] [data-arf-colorpart]')).map((r) => r.value).join());
+      const values = () =>
+        page.evaluate(() => Array.from(document.querySelectorAll('#drawer [data-arf-row="cutColor"] .arf-colorvalue')).map((r) => r.textContent).join());
+      await slide("h", 360);
+      await settle(page);
+      ok(label + ": Hue moved all the way up stays at the top", (await sliders()).split(",")[0] === "360" && (await values()).split(",")[0] === "360", await sliders());
+      await slide("h", 200);
+      await slide("s", 37);
+      const seen = [];
+      for (const l of [5, 23, 41, 67, 88, 0, 100, 50]) {
+        await slide("l", l);
+        seen.push(await sliders());
+      }
+      ok(label + ": moving Lightness leaves Hue and Saturation where they are", seen.every((v, i) => v === "200,37," + [5, 23, 41, 67, 88, 0, 100, 50][i]), JSON.stringify(seen));
+      await slide("s", 0);
+      await slide("s", 80);
+      ok(label + ": Saturation at 0 and back keeps the hue", (await sliders()).startsWith("200,80,"), await sliders());
+    });
+  }
+  // The preview shows the color in use. A color you pick is shown exactly,
+  // even one too dark to read. The theme's own color, when it is too faint
+  // for the panel, is made readable, and that repair goes as soon as you pick
+  // a color of your own. The theme's danger here is #200008, which cannot be
+  // read on the stub's dark panel.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { css: ":root{--lumiverse-danger:rgb(32,0,8)}", viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-colorswatch="cutColor"]').click());
+      await page.waitForTimeout(350);
+      await settle(page);
+      const sample = () =>
+        page.evaluate(() => {
+          const w = document.querySelector('#drawer [data-arf-row="cutColor"] .arf-coloredit .arf-cut');
+          return { color: getComputedStyle(w).color, painted: w.getAttribute("data-arf-painted") };
+        });
+      const type = (value) =>
+        page.evaluate((value) => {
+          const code = document.querySelector('#drawer [data-arf-row="cutColor"] [data-arf-field="cutColor"]');
+          code.value = value;
+          code.dispatchEvent(new Event("input", { bubbles: true }));
+          code.dispatchEvent(new Event("change", { bubbles: true }));
+        }, value);
+      const themed = await sample();
+      ok(label + ": the theme's color, too dark for the panel, is made readable in the preview", themed.painted === "ink" && themed.color !== "rgb(32, 0, 8)", JSON.stringify(themed));
+      await type("#00ff88");
+      await settle(page);
+      const bright = await sample();
+      ok(label + ": a color you pick replaces it in the preview, exactly", bright.color === "rgb(0, 255, 136)" && bright.painted == null, JSON.stringify(bright));
+      await type("#200008");
+      await settle(page);
+      const dark = await sample();
+      ok(label + ": a color you pick is shown exactly, even one too dark to read", dark.color === "rgb(32, 0, 8)" && dark.painted == null, JSON.stringify(dark));
+    });
+  }
+  // A setting that is not a color, such as one from somebody else's file,
+  // never reaches the page.
+  await inTab(browser, { saved: { enabled: true, cutColor: "url(https://example.com/x.png)" } }, async (page) => {
+    const v = await page.evaluate(() => document.documentElement.style.getPropertyValue("--arf-cut-ink"));
+    ok("a setting that is not a #rrggbb color is not used", v === "", JSON.stringify(v));
+  });
+}
+
+console.log("\nthe switch knob springs");
+{
+  // The knob slides a little past its end and springs back, and stretches
+  // while pressed. With Reduce motion on it does neither.
+  for (const reduceMotion of [false, true]) {
+    await inTab(browser, { saved: { enabled: true, reduceMotion } }, async (page) => {
+      await goTab(page, "Setup");
+      await settle(page);
+      const got = await page.evaluate(() => {
+        const box = document.querySelector("#drawer .arf-box");
+        const cs = getComputedStyle(box, "::after");
+        const names = cs.transitionProperty.split(",").map((x) => x.trim());
+        const timing = cs.transitionTimingFunction.split(/,(?![^(]*\))/).map((x) => x.trim());
+        const curve = timing[names.indexOf("left")] || "";
+        const m = /cubic-bezier\(([^)]*)\)/.exec(curve);
+        const over = !!m && m[1].split(",").map(Number).some((v, i) => (i === 1 || i === 3) && v > 1);
+        return { names, curve, over, duration: cs.transitionDuration };
+      });
+      if (!reduceMotion) ok("the knob overshoots its end and springs back", got.over, JSON.stringify(got));
+      else ok("with Reduce motion on, the knob does not move", !/[1-9]/.test(got.duration.replace(/0s/g, "")), JSON.stringify(got));
+    });
+  }
+  // Pressed, the knob stretches. With Reduce motion on, from the panel or
+  // from the device, it keeps its size and place, so it does not jump on a
+  // press and jump back on release.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const how of ["off", "panel", "device"]) {
+      await inTab(browser, { viewport, touch, saved: { enabled: true, reduceMotion: how === "panel" } }, async (page) => {
+        if (how === "device") await page.emulateMedia({ reducedMotion: "reduce" });
+        await goTab(page, "Setup");
+        await settle(page);
+        const knob = () => page.evaluate(() => {
+          const cs = getComputedStyle(document.querySelector("#drawer .arf-box"), "::after");
+          return cs.width + " " + cs.left;
+        });
+        const box = page.locator("#drawer .arf-box").first();
+        await box.scrollIntoViewIfNeeded();
+        const r = await box.boundingBox();
+        const atRest = await knob();
+        await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+        await page.mouse.down();
+        await page.waitForTimeout(400);
+        const pressed = await knob();
+        await page.mouse.move(r.x - 40, r.y - 40);
+        await page.mouse.up();
+        if (how === "off") ok(label + ": pressed, the knob stretches", pressed !== atRest, atRest + " | " + pressed);
+        else ok(label + ": Reduce motion from the " + how + ", a pressed knob keeps its size and place", pressed === atRest, atRest + " | " + pressed);
+      });
+    }
+  }
+}
+
+console.log("\nrefines you can put back stay short");
+{
+  // Every refine in a chat used to stack up above the tabs. A chat keeps its
+  // last five. The newest is open, and the others are in one fold.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true, popup: false } }, async (page) => {
+      await page.evaluate(async () => {
+        for (let i = 1; i <= 8; i++) {
+          window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m" + i, canUndo: true,
+            before: "Lamp " + i + " was lit late, and the keeper said nothing about it.",
+            after: "Lamp " + i + " was lit late. The keeper said nothing." });
+          await new Promise((r) => setTimeout(r, 15));
+        }
+      });
+      await goTab(page, "Log");
+      await settle(page);
+      const got = await page.evaluate(() => {
+        const card = document.querySelector("[data-arf-last]");
+        if (!card) return null;
+        const heads = Array.from(card.querySelectorAll(".arf-fold .arf-grow")).map((h) => h.textContent.trim());
+        const wells = Array.from(card.querySelectorAll("[data-arf-diff]")).filter((w) => w.offsetParent !== null).length;
+        const r = card.getBoundingClientRect();
+        return {
+          says: card.textContent,
+          heads,
+          shownDiffs: wells,
+          tall: Math.round(r.height),
+          sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+        };
+      });
+      ok(label + ": the newest refine is open", !!got && /Lamp 8/.test(got.says) && got.shownDiffs === 1, JSON.stringify(got && got.heads));
+      ok(label + ": the older ones are in one fold", !!got && got.heads[0] === "Older refines", JSON.stringify(got && got.heads));
+      ok(label + ": only the last five of the chat are kept", !!got && got.heads.length === 5 && !/Lamp 3\b/.test(got.heads.join("|")), JSON.stringify(got && got.heads));
+      ok(label + ": each older one is named by its time and first words", !!got && /^\d\d:\d\d: Lamp 7 was lit late/.test(got.heads[1] || ""), JSON.stringify(got && got.heads));
+      ok(label + ": nothing runs off the side", !!got && !got.sideways, "");
+      const reload = await page.evaluate(() => (document.querySelector("[data-arf-last] [data-arf-reloadnote]") || {}).textContent || "");
+      ok(label + ": the card says a reload keeps the list, and how to keep it through an update",
+        /kept through a reload/.test(reload) && /Keep them through an update/.test(reload), reload);
+      const tapped = await page.evaluate(async () => {
+        const card = document.querySelector("[data-arf-last]");
+        const outer = Array.from(card.querySelectorAll(".arf-fold")).find((h) => h.querySelector(".arf-grow").textContent.trim() === "Older refines");
+        outer.click();
+        await new Promise((r) => setTimeout(r, 300));
+        const again = document.querySelector("[data-arf-last]");
+        const heads = Array.from(again.querySelectorAll(".arf-fold")).filter((h) => h.offsetParent !== null);
+        const h = heads[1].getBoundingClientRect();
+        return { seen: heads.length, rowTall: Math.round(h.height) };
+      });
+      ok(label + ": tapping the fold shows the four older ones", tapped.seen === 5, JSON.stringify(tapped));
+      if (touch) ok(label + ": each is at least 32 pixels tall to tap", tapped.rowTall >= 32, JSON.stringify(tapped));
+    });
+  }
+}
+
+console.log("\nthe reload line follows the swipe setting");
+{
+  // With Add the refine as a swipe on, the original is already one swipe
+  // back in the chat, so the line says that instead of pointing at the
+  // setting.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true, popup: false, asSwipe: true } }, async (page) => {
+      await page.evaluate(() => {
+        window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m1", canUndo: true,
+          before: "The ferry left late, and nobody on the dock said a word.", after: "The ferry left late. Nobody on the dock spoke." });
+      });
+      await goTab(page, "Log");
+      await settle(page);
+      const said = await page.evaluate(() => {
+        const n = document.querySelector("[data-arf-last] [data-arf-reloadnote]");
+        return { text: n ? n.textContent : "", sideways: document.documentElement.scrollWidth > window.innerWidth + 1 };
+      });
+      ok(label + ": with the swipe setting on, it also says the original stays a swipe back", /kept through a reload/.test(said.text) && /one swipe back/.test(said.text), said.text);
+      ok(label + ": nothing runs off the side", !said.sideways, "");
+    });
+  }
+}
+
+// The greeting is left alone unless the reader turns this on, and a warning
+// under the switch says what a refine of it can do.
+// The pattern behind the panel is a wallpaper: the tab scrolls over it and it
+// stays where it is. With every row hidden, the box looks the same at any
+// scroll position. A pattern drawn on the tab itself moves with it.
+console.log("\nthe pattern stays still while the tab scrolls");
+for (const zoom of [1, 1.25, 0.85]) {
+  for (const kind of zoom === 1 ? ["diamonds", "dots", "hearts"] : ["diamonds"]) {
+    const css =
+      // The box that scrolls is around the tab, as Lumiverse's drawer is.
+      "html{zoom:" + zoom + ";overflow:hidden}body{margin:0;height:520px;overflow-y:auto;scrollbar-width:none}" +
+      "body::-webkit-scrollbar{display:none}.arf>*{visibility:hidden}";
+    await inTab(browser, { css, saved: { enabled: true, panelPattern: kind } }, async (page) => {
+      await page.waitForTimeout(150);
+      const box = page.locator("body");
+      const tall = await page.evaluate(() => document.body.scrollHeight - document.body.clientHeight);
+      const a = await box.screenshot();
+      await page.evaluate(() => (document.body.scrollTop = 37));
+      await page.waitForTimeout(60);
+      const b = await box.screenshot();
+      await page.evaluate(() => (document.body.scrollTop = 1e6));
+      await page.waitForTimeout(60);
+      const c = await box.screenshot();
+      ok("zoom " + zoom + ", " + kind + ": the tab can scroll", tall > 100, String(tall));
+      ok("zoom " + zoom + ", " + kind + ": the pattern does not move as it scrolls", a.equals(b) && a.equals(c));
+    });
+  }
+}
+// The rows sit where they would with no pattern, so a pattern moves nothing.
+{
+  const place = async (pattern) => {
+    let top = 0;
+    await inTab(browser, { css: "html{overflow:hidden}body{margin:0;height:520px;overflow-y:auto}", saved: { enabled: true, panelPattern: pattern } }, async (page) => {
+      await page.waitForTimeout(150);
+      top = await page.evaluate(() => {
+        const first = document.querySelector("#drawer > *");
+        return first.getBoundingClientRect().top - document.body.getBoundingClientRect().top;
+      });
+    });
+    return top;
+  };
+  const plain = await place("");
+  const drawn = await place("stripes");
+  ok("a pattern does not move the rows", Math.abs(plain - drawn) < 0.5, plain + " and " + drawn);
+}
+
+console.log("\nrefine the greeting");
+for (const size of [
+  { name: "phone", viewport: { width: 412, height: 860 }, touch: true },
+  { name: "laptop", viewport: { width: 1280, height: 860 }, touch: false },
+]) {
+  const errors = await inTab(browser, { viewport: size.viewport, touch: size.touch }, async (page) => {
+    await goTab(page, "Limits");
+    await settle(page);
+    const look = () =>
+      page.evaluate(() => {
+        const row = document.querySelector('#drawer [data-arf-row="refineGreeting"]');
+        const box = row && row.querySelector("input[type=checkbox]");
+        const warn = Array.from(document.querySelectorAll("#drawer *")).find(
+          (n) => n.children.length === 0 && /written by the card's author/.test(n.textContent || ""),
+        );
+        const holder = warn && (warn.closest("[data-arf-hangs]") || warn);
+        const shown = !!holder && !holder.closest("[hidden]") && holder.getBoundingClientRect().height > 0;
+        const r = row ? row.getBoundingClientRect() : null;
+        const wr = shown ? holder.getBoundingClientRect() : null;
+        return {
+          has: !!row,
+          on: !!box && box.checked,
+          shown,
+          fits: !!r && r.left >= 0 && r.right <= window.innerWidth && (!wr || wr.right <= window.innerWidth),
+          tap: box ? box.getBoundingClientRect().height : 0,
+          sideways: document.documentElement.scrollWidth > window.innerWidth,
+        };
+      });
+    const before = await look();
+    ok(size.name + ": Refine the greeting is on the Limits tab, and off", before.has && !before.on, JSON.stringify(before));
+    ok(size.name + ": with no warning while it is off", !before.shown, JSON.stringify(before));
+    // The warning opens the way every row under a switch does: its space opens
+    // over several frames while it fades and slides in.
+    const motion = await page.evaluate(async () => {
+      const frame = () => new Promise((r) => requestAnimationFrame(() => r()));
+      const hold = document.querySelector('#drawer [data-arf-hangs="refineGreeting"]');
+      document.querySelector('#drawer [data-arf-row="refineGreeting"] input[type=checkbox]').click();
+      const heights = [];
+      const fades = [];
+      for (let i = 0; i < 40; i++) {
+        await frame();
+        heights.push(Math.round(hold.getBoundingClientRect().height));
+        fades.push(parseFloat(getComputedStyle(hold).opacity));
+      }
+      return { heights, fades };
+    });
+    const end = Math.max(...motion.heights);
+    const between = motion.heights.filter((v) => v > 0 && v < end).length;
+    ok(size.name + ": the warning opens over several frames, as a row under a switch does", between >= 4, JSON.stringify(motion.heights));
+    ok(size.name + ": and fades in", motion.fades.some((v) => v > 0.05 && v < 0.95), JSON.stringify(motion.fades.map((v) => v.toFixed(2))));
+    await page.waitForTimeout(400);
+    const after = await look();
+    ok(size.name + ": turned on, the warning shows under it", after.on && after.shown, JSON.stringify(after));
+    ok(size.name + ": nothing runs off the side", after.fits && !after.sideways, JSON.stringify(after));
+    if (size.touch) ok(size.name + ": the switch is a 32px tap target", after.tap >= 32, JSON.stringify(after));
+    const sent = await page.evaluate(() => window.__sent.filter((m) => m.type === "set_settings").pop());
+    ok(size.name + ": and the backend is told", !!sent && sent.settings.refineGreeting === true, JSON.stringify(sent && sent.settings.refineGreeting));
+  });
+  ok(size.name + ": no errors on the greeting switch", errors.length === 0, errors.join("\n         "));
+}
+
+console.log("\nthe list comes back after a reload");
+{
+  // The page asks the backend for what it still holds when it starts, and
+  // fills the list in from the answer, with no card coming up for refines
+  // that were already there. Dismissing one tells the backend, so it does not
+  // come back. Keep them through an update sits under Keep what a refine
+  // replaced.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true } }, async (page) => {
+      const asked = await page.evaluate(() => window.__sent.filter((m) => m.type === "list_undoable").length);
+      ok(label + ": the page asks for the list when it starts", asked >= 1, String(asked));
+      await page.evaluate(() => {
+        const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+        window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+      });
+      await settle(page);
+      await page.evaluate(() => {
+        const now = Date.now();
+        window.__fromBackend({ type: "undoable_list", list: [
+          { chatId: "c1", messageId: "m3", before: "The bell rang twice, and then, after a while, it rang again.", after: "The bell rang twice, then again.", at: now - 60000 },
+          { chatId: "c1", messageId: "m4", before: "He waited, quietly, by the old gate for a long time.", after: "He waited by the old gate.", at: now - 30000 },
+        ] });
+      });
+      await goTab(page, "Log");
+      await settle(page);
+      const got = await page.evaluate(() => ({
+        card: !!document.querySelector("[data-arf-last]"),
+        says: (document.querySelector("[data-arf-last]") || {}).textContent || "",
+        pop: !!document.querySelector(".arf-pop"),
+        badge: window.__badge,
+      }));
+      ok(label + ": the refines come back into the list", got.card && /old gate/.test(got.says), got.says.slice(0, 160));
+      ok(label + ": with no card coming up for them", !got.pop, "");
+      ok(label + ": and the tab's badge counts them", got.badge === "2", String(got.badge));
+      await page.evaluate(() => {
+        window.__sent.length = 0;
+        [...document.querySelectorAll("[data-arf-last] button")].find((b) => b.textContent.trim() === "Dismiss").click();
+      });
+      await settle(page);
+      const forgot = await page.evaluate(() => window.__sent.filter((m) => m.type === "forget_undo").pop());
+      ok(label + ": Dismiss tells the backend, so it does not come back", !!forgot && forgot.items.length === 1 && forgot.items[0].messageId === "m4", JSON.stringify(forgot));
+
+      await goTab(page, "Limits");
+      await settle(page);
+      const row = await page.evaluate(() => {
+        const r = document.querySelector('#drawer [data-arf-row="keepPutBack"]');
+        const above = document.querySelector('#drawer [data-arf-row="keepOriginal"]');
+        return {
+          there: !!r && !r.hidden,
+          under: !!r && !!above && (above.compareDocumentPosition(r) & Node.DOCUMENT_POSITION_FOLLOWING) > 0,
+          off: !!r && !r.querySelector('input[type="checkbox"]').checked,
+          sideways: document.documentElement.scrollWidth > window.innerWidth + 1,
+        };
+      });
+      ok(label + ": Keep them through an update is under Keep what a refine replaced, and off", row.there && row.under && row.off, JSON.stringify(row));
+      ok(label + ": nothing runs off the side", !row.sideways, "");
+    });
+  }
+}
+
+console.log("\nthe view switch on the tab's card turns that card round");
+{
+  // Lumiverse takes the tab's panel out of the page while the drawer is shut
+  // or on another tab, and puts the same panel back when it is opened. A view
+  // picked on the page's card in that time is the view the tab's card shows
+  // when it comes back, and the tab's own switch still turns that card round.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true, keepPutBack: true, panelPattern: "hearts" } }, async (page) => {
+      await page.evaluate(() => {
+        const id = window.__sent.filter((m) => m.type === "active_chat").pop().requestId;
+        window.__fromBackend({ type: "active_chat", requestId: id, chatId: "c1", character: "Wren", hasCharacter: true, resolved: true });
+      });
+      await settle(page);
+      const read = () => page.evaluate(() => {
+        const c = document.querySelector("#drawer [data-arf-last]");
+        const w = c && c.querySelector("[data-arf-diff]");
+        const b = c && c.querySelector("[data-arf-diff-switch]");
+        return { card: !!c, mode: w ? w.getAttribute("data-arf-diff-mode") : null, cols: c ? c.querySelectorAll("[data-arf-side]").length : -1, says: b ? b.textContent : null };
+      });
+      const tapTab = () => page.evaluate(() => document.querySelector("#drawer [data-arf-last] [data-arf-diff-switch]").click());
+      await page.evaluate(() => window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", canUndo: true, before: "She set the kettle on, slowly, and waited for it.", after: "She set the kettle on and waited." }));
+      await settle(page);
+      const first = await read();
+      ok(label + ": the card is on the tab, marked up together", first.card && first.mode === "inline" && first.says === "Read them side by side", JSON.stringify(first));
+
+      // The drawer is shut: the panel is out of the page, and the view is
+      // picked on the card on the page.
+      await page.evaluate(() => {
+        const d = document.getElementById("drawer");
+        window.__drawerSpot = { el: d, parent: d.parentNode, next: d.nextSibling };
+        d.remove();
+        document.querySelector("[data-arf-pop] [data-arf-diff-switch]").click();
+      });
+      await settle(page);
+      // Opened again: the same panel goes back where it was.
+      await page.evaluate(() => {
+        const s = window.__drawerSpot;
+        s.parent.insertBefore(s.el, s.next);
+      });
+      await settle(page);
+      const back = await read();
+      ok(label + ": opened again, the tab's card shows the view picked on the page", back.mode === "side" && back.cols === 2 && back.says === "Read them together", JSON.stringify(back));
+
+      await tapTab();
+      await settle(page);
+      const together = await read();
+      ok(label + ": its own switch puts that card back together", together.mode === "inline" && together.cols === 0 && together.says === "Read them side by side", JSON.stringify(together));
+      await tapTab();
+      await settle(page);
+      const side = await read();
+      ok(label + ": and side by side again", side.mode === "side" && side.cols === 2 && side.says === "Read them together", JSON.stringify(side));
+    });
+  }
+}
+
+console.log("\nreduce motion");
+{
+  // With Reduce motion on, or the device set to reduce motion, nothing of
+  // ours moves or fades. Off, the panel's own transitions run as before.
+  const read = (page) =>
+    page.evaluate(async () => {
+      window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m2", canUndo: true, before: "The old line of the reply.", after: "The new line of the reply." });
+      await new Promise((r) => setTimeout(r, 60));
+      const moving = [];
+      const look = (n, pseudo) => {
+        const cs = getComputedStyle(n, pseudo || null);
+        const t = cs.transitionDuration.split(",").some((d) => parseFloat(d) > 0);
+        const a = cs.animationName !== "none" && cs.animationName !== "";
+        return t || a;
+      };
+      const all = Array.from(document.querySelectorAll('[class*="arf-"]'));
+      for (const n of all) {
+        if (look(n)) moving.push(String(n.className.baseVal != null ? n.className.baseVal : n.className).slice(0, 30));
+        if (look(n, "::before")) moving.push(String(n.className).slice(0, 30) + "::before");
+      }
+      return { count: all.length, moving: moving, marked: document.documentElement.hasAttribute("data-arf-still") };
+    });
+  await inTab(browser, { saved: { enabled: true, popup: true } }, async (page) => {
+    const got = await read(page);
+    ok("off, the panel's own transitions run", got.moving.length > 0, JSON.stringify(got).slice(0, 200));
+  });
+  await inTab(browser, { saved: { enabled: true, popup: true, reduceMotion: true } }, async (page) => {
+    const got = await read(page);
+    ok("with Reduce motion on, the page is marked", got.marked, JSON.stringify(got).slice(0, 200));
+    ok("and nothing of ours moves or fades", got.count > 20 && got.moving.length === 0, JSON.stringify(got.moving.slice(0, 8)));
+    await goTab(page, "Setup");
+    await settle(page);
+    const off = await page.evaluate(async () => {
+      const box = document.querySelector('#drawer [data-arf-field="reduceMotion"]');
+      if (!box) return "no switch";
+      box.click();
+      await new Promise((r) => setTimeout(r, 200));
+      return document.documentElement.hasAttribute("data-arf-still") ? "still marked" : "clear";
+    });
+    ok("switching it off takes the mark away", off === "clear", off);
+  });
+  await inTab(browser, { saved: { enabled: true, popup: true } }, async (page) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    const got = await read(page);
+    ok("with the device set to reduce motion, nothing of ours moves either", got.count > 20 && got.moving.length === 0, JSON.stringify(got.moving.slice(0, 8)));
+  });
+}
+
+console.log("\nthe floating button shrinks a little when pressed");
+{
+  // Pressed, the button shrinks a little and lightens, and it grows back on
+  // release. With Reduce motion on, from the panel or the device, it only
+  // lightens. Checked at a phone width and a laptop width.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const how of ["off", "panel", "device"]) {
+      // The host places the button as a small widget fixed in a corner.
+      const css = "#float{position:fixed!important;right:16px;bottom:16px;width:56px!important;height:56px!important}";
+      await inTab(browser, { css, viewport, touch, saved: { widgetOn: true, enabled: true, reduceMotion: how === "panel" } }, async (page) => {
+        if (how === "device") await page.emulateMedia({ reducedMotion: "reduce" });
+        await page.evaluate(async () => {
+          history.pushState({}, "", "/chat/c1");
+          for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+          await new Promise((r) => setTimeout(r, 200));
+        });
+        const b = page.locator("#float .arf-float").first();
+        const r = await b.boundingBox();
+        const read = () => page.evaluate(() => {
+          const cs = getComputedStyle(document.querySelector("#float .arf-float"));
+          const m = /matrix\(([^,]+)/.exec(cs.transform);
+          return { scale: m ? Math.round(parseFloat(m[1]) * 100) / 100 : 1, filter: cs.filter };
+        });
+        const rest = await read();
+        // The press has to land on the button, or it proves nothing.
+        const aim = await page.evaluate(([x, y]) => {
+          const n = document.elementFromPoint(x, y);
+          return !!n && !!n.closest("#float .arf-float");
+        }, [r.x + r.width / 2, r.y + r.height / 2]);
+        ok(label + ", " + how + ": the press lands on the button", aim, JSON.stringify(r));
+        await page.mouse.move(r.x + r.width / 2, r.y + r.height / 2);
+        await page.mouse.down();
+        await page.waitForTimeout(400);
+        const pressed = await read();
+        await page.mouse.move(r.x - 60, r.y - 60);
+        await page.mouse.up();
+        await page.waitForTimeout(400);
+        const after = await read();
+        const name = label + (how === "off" ? "" : ", Reduce motion from the " + how);
+        ok(name + ": pressed, it lightens", /brightness/.test(pressed.filter), JSON.stringify(pressed));
+        if (how === "off") {
+          ok(name + ": pressed, it shrinks a little", pressed.scale > 0.9 && pressed.scale < 0.97, JSON.stringify({ rest, pressed }));
+          ok(name + ": let go, it grows back to its size", after.scale === 1 && rest.scale === 1, JSON.stringify({ rest, after }));
+        } else ok(name + ": pressed, it keeps its size", pressed.scale === 1, JSON.stringify(pressed));
+      });
+    }
+  }
+}
+
+console.log("\nthe problem report");
+// Easy to read for the person and for whoever fixes the bug: the reader's own
+// time with the zone, the second model in use, every changed setting by its
+// name with its default, and the kind of each recent line. Safe to paste in
+// public: an address, a name and a note's text never appear.
+await inTab(browser, { saved: { judgeMode: "two", judgeConnection: "dc-9", judgeOver: 40, connectionId: "conn-lantern", soundUrl: "http://192.0.2.7:8000/chime.mp3", askNoteRefused: "Please try the lantern scene again.", passNames: ["Wren Hollow"] } }, async (page) => {
+  await goTab(page, "Log");
+  await settle(page);
+  const text = await page.evaluate(async () => {
+    window.__fromBackend({
+      type: "decision_connections",
+      list: [{ id: "dc-9", name: "Lantern checks", provider: "typesafe", model: "jev-1.14.0", isDefault: false, hasKey: true }],
+      state: "ok",
+    });
+    window.__fromBackend({ type: "jev_found_sent", count: 1, after: false });
+    await new Promise((r) => setTimeout(r, 400));
+    const card = [...document.querySelectorAll("#drawer .arf-card")].find((c) => /Reporting a problem/.test(c.textContent));
+    const well = card && card.querySelector(".arf-well");
+    return well ? well.textContent : "";
+  });
+  ok("the report was found", text.length > 200, text.slice(0, 200));
+  ok("its time is the reader's own, with the zone", /when: \d{4}-\d\d-\d\d \d\d:\d\d:\d\d \(UTC[+-]\d+(:\d\d)?\)/.test(text), text.slice(0, 200));
+  ok("it names the Decision connection's provider and model, and the line",
+    /Decision connection: one picked, provider "typesafe", model "jev-1\.14\.0"/.test(text) && /refine when a check reaches: 40% \(judgeOver, default 30\)/.test(text), text);
+  ok("but never the connection's name", !/Lantern checks/.test(text), text);
+  ok("a changed setting is listed with its default", /judgeOver: 40 \(default: 30\)/.test(text), text);
+  ok("a setting whose default is empty says so in a word",
+    /connectionId: "conn-lantern" \(default: empty\)/.test(text) && !/default: ""/.test(text), text);
+  ok("an address shows only as set", /soundUrl: set/.test(text) && !/192\.0\.2\.7/.test(text), text);
+  ok("a name and a note's text never appear", !/Wren Hollow/.test(text) && !/lantern scene/.test(text), text);
+  ok("a recent line says its kind", /\[found\] what jev-1\.14\.0 found/.test(text), text);
+  ok("it says which Lumiverse, or that Lumiverse did not say", /\nlumiverse: (\S+|not reported by this Lumiverse)\n/.test(text), text.slice(0, 300));
+  ok("it says whether the page is secure, with no address", /\nsecure page: no \(plain http, reached over the network\)\n/.test(text), text.slice(0, 400));
+});
+
+console.log("\nhiding kinds of line in the Log");
+await inTab(browser, { saved: { judgeMode: "two" } }, async (page) => {
+  await goTab(page, "Log");
+  await settle(page);
+  const got = await page.evaluate(async () => {
+    window.__fromBackend({ type: "judge_said", chatId: "c1", messageId: "m2", refine: false, scores: [{ check: "reply repeats itself.", pct: 3 }], cost: 0, model: "jev-1.13.0", over: 30 });
+    await new Promise((r) => setTimeout(r, 400));
+    const lines = () => [...document.querySelectorAll('#drawer [data-arf-logline="judge"]')].filter((n) => !n.hidden).length;
+    const before = lines();
+    const box = document.querySelector('#drawer [data-arf-part="logShow:judge"]');
+    if (!box) return { before, missing: true };
+    box.click();
+    await new Promise((r) => setTimeout(r, 300));
+    const card = [...document.querySelectorAll("#drawer .arf-card")].find((c) => /What it has been doing/.test(c.textContent));
+    return { before, after: lines(), count: card ? card.textContent : "" };
+  });
+  ok("a line from the second model shows", got.before >= 1, JSON.stringify(got));
+  ok("unticking its kind hides it", got.after === 0, JSON.stringify(got));
+  ok("and the count says how many are hidden", /hidden/.test(got.count || ""), JSON.stringify(got).slice(0, 300));
+});
+// Model setups arriving from the account are hidden with settings and presets,
+// under the same choice.
+await inTab(browser, {}, async (page) => {
+  await goTab(page, "Log");
+  await settle(page);
+  const got = await page.evaluate(async () => {
+    const ask = window.__sent.filter((m) => m.type === "load_setups").pop();
+    if (!ask) return { noAsk: true };
+    window.__fromBackend({ type: "loaded_setups", requestId: ask.requestId, setups: [{ name: "Quick and cheap", at: 1, settings: {} }, { name: "Careful", at: 2, settings: {} }] });
+    await new Promise((r) => setTimeout(r, 400));
+    const seen = () => [...document.querySelectorAll("#drawer [data-arf-logline]")].some((n) => !n.hidden && /model setups down/.test(n.textContent));
+    const before = seen();
+    const box = document.querySelector('#drawer [data-arf-part="logShow:setup"]');
+    if (!box) return { before, missing: true };
+    const label = (box.closest("label") || box.parentElement).textContent;
+    box.click();
+    await new Promise((r) => setTimeout(r, 300));
+    return { before, after: seen(), label };
+  });
+  ok("a model setup line shows", got.before === true, JSON.stringify(got));
+  ok("unticking settings, presets and model setups hides it", got.after === false, JSON.stringify(got));
+  ok("and the choice names model setups", /model setups/i.test(got.label || ""), JSON.stringify(got));
+});
+// What the second model found, sent on to the refine model, has its own kind,
+// and so does every other line. One box for each kind in the list.
+await inTab(browser, { saved: { judgeMode: "two" } }, async (page) => {
+  await goTab(page, "Log");
+  await settle(page);
+  const got = await page.evaluate(async () => {
+    window.__fromBackend({ type: "jev_found_sent", count: 2, after: false });
+    await new Promise((r) => setTimeout(r, 400));
+    const lines = () => [...document.querySelectorAll('#drawer [data-arf-logline="found"]')].filter((n) => !n.hidden).length;
+    const boxes = document.querySelectorAll('#drawer [data-arf-picker="logShow"] [data-arf-part^="logShow:"]').length;
+    const before = lines();
+    const box = document.querySelector('#drawer [data-arf-part="logShow:found"]');
+    if (!box) return { before, boxes, missing: true };
+    box.click();
+    await new Promise((r) => setTimeout(r, 300));
+    const other = [...document.querySelectorAll("#drawer [data-arf-logline]")].filter((n) => n.getAttribute("data-arf-logline") === "other").length;
+    return { before, boxes, after: lines(), other };
+  });
+  ok("a line saying what the second model sent on shows", got.before === 1, JSON.stringify(got));
+  ok("unticking What the second model sent on hides it", got.after === 0, JSON.stringify(got));
+  ok("there is one box for each of the eight kinds", got.boxes === 8, JSON.stringify(got));
+  ok("no line is left without a kind", got.other === 0, JSON.stringify(got));
+});
+// The list of eight fits a phone and a laptop: nothing runs off the side,
+// and on a phone each box is at least 32 pixels high.
+for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+  await inTab(browser, { viewport, touch }, async (page) => {
+    await goTab(page, "Log");
+    await settle(page);
+    const out = await page.evaluate(() => {
+      const drawer = document.querySelector("#drawer");
+      const boxes = [...document.querySelectorAll('#drawer [data-arf-part^="logShow:"]')].map((b) => {
+        const r = b.getBoundingClientRect();
+        return { id: b.getAttribute("data-arf-part"), tall: Math.round(r.height), right: Math.round(r.right), left: Math.round(r.left) };
+      });
+      const d = drawer.getBoundingClientRect();
+      return {
+        boxes,
+        width: Math.round(d.right),
+        sideways: document.documentElement.scrollWidth > window.innerWidth + 1 || drawer.scrollWidth > drawer.clientWidth + 1,
+      };
+    });
+    ok(label + ": the eight boxes are there", out.boxes.length === 8, JSON.stringify(out));
+    ok(label + ": nothing runs off the side", !out.sideways && out.boxes.every((b) => b.left >= 0 && b.right <= out.width + 1), JSON.stringify(out));
+    if (touch) ok(label + ": each box is at least 32 pixels high", out.boxes.every((b) => b.tall >= 32), JSON.stringify(out.boxes));
+  });
+}
+
+console.log("\na reroll Auto Retry adds");
+// Several tries at once writes its reroll into the chat directly, so no end
+// event announces it. Auto Retry says so in the page, and the panel hands it to
+// the backend for the automatic pass.
+await inTab(browser, { saved: { refineOn: true } }, async (page) => {
+  const got = await page.evaluate(async () => {
+    (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" }));
+    window.dispatchEvent(new CustomEvent("auto-retry:reroll-added", { detail: { chatId: "c1", messageId: "m2", swipe: 2 } }));
+    await new Promise((r) => setTimeout(r, 100));
+    return window.__sent.filter((m) => m.type === "reroll_added");
+  });
+  ok("it is handed to the backend", got.length === 1 && got[0].messageId === "m2" && got[0].swipe === 2, JSON.stringify(got));
+});
+await inTab(browser, { saved: { refineOn: false } }, async (page) => {
+  const got = await page.evaluate(async () => {
+    window.dispatchEvent(new CustomEvent("auto-retry:reroll-added", { detail: { chatId: "c1", messageId: "m2", swipe: 2 } }));
+    await new Promise((r) => setTimeout(r, 100));
+    return window.__sent.filter((m) => m.type === "reroll_added").length;
+  });
+  ok("not with the automatic pass off", got === 0, String(got));
+});
+
+console.log("\na retry Auto Retry sets and calls off");
+// Auto Retry says in the page when it sets a retry of a chat's reply and when
+// it calls one off. The panel hands both to the backend, which leaves a reply
+// about to be replaced, and refines it after all when the retry is off.
+await inTab(browser, { saved: { refineOn: true } }, async (page) => {
+  const got = await page.evaluate(async () => {
+    window.dispatchEvent(new CustomEvent("auto-retry:retrying", { detail: { chatId: "c4" } }));
+    window.dispatchEvent(new CustomEvent("auto-retry:retry-off", { detail: { chatId: "c4" } }));
+    window.dispatchEvent(new CustomEvent("auto-retry:retrying", { detail: {} }));
+    await new Promise((r) => setTimeout(r, 100));
+    return window.__sent.filter((m) => m.type === "retry_pending" || m.type === "retry_off").map((m) => m.type + ":" + m.chatId);
+  });
+  ok("both are handed to the backend, with the chat", got.join() === "retry_pending:c4,retry_off:c4", JSON.stringify(got));
+});
+
+console.log("\nwhat to refine");
+{
+  const look = (page) =>
+    page.evaluate(async () => {
+      (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" }));
+      await new Promise((r) => setTimeout(r, 200));
+      // Both groups are always built, and the one for a side you do not
+      // refine is hidden, so only what is drawn counts.
+      const shown = (n) => !!n && n.getClientRects().length > 0;
+      const heads = [...document.querySelectorAll("#drawer .arf-btngroup-h")].filter(shown).map((h) => h.textContent);
+      const inGroup = (sel) => { const n = document.querySelector(sel); return shown(n) && !!n.closest(".arf-btngroup"); };
+      return {
+        heads,
+        now: inGroup("#drawer [data-arf-now]"),
+        mine: inGroup("#drawer [data-arf-mine]"),
+        auto: [...document.querySelectorAll("#drawer .arf-btngroup span")].some((n) => shown(n) && /every new reply automatically/.test(n.textContent || "")),
+      };
+    });
+  await inTab(browser, {}, async (page) => {
+    const both = await look(page);
+    ok("by default, both groups show", both.heads.join() === "Replies,Your messages" && both.now && both.mine && both.auto, JSON.stringify(both));
+  });
+  await inTab(browser, { saved: { refineSide: "replies" } }, async (page) => {
+    const r = await look(page);
+    ok("replies only hides the buttons for your messages", r.heads.join() === "Replies" && r.now && !r.mine, JSON.stringify(r));
+  });
+  await inTab(browser, { saved: { refineSide: "mine", refineOn: true } }, async (page) => {
+    const m = await look(page);
+    ok("your messages only hides the reply buttons and the automatic switch", m.heads.join() === "Your messages" && !m.now && m.mine && !m.auto, JSON.stringify(m));
+    const status = await page.evaluate(() => document.querySelector("#drawer").textContent);
+    ok("and the status line does not claim every reply is refined", !/refining every reply/.test(status), "");
+    await goTab(page, "Prompt");
+    const prompt = await page.evaluate(() => {
+      const yours = document.querySelector('#drawer [data-arf-editing="userBlocks"]');
+      const seg = yours && yours.parentElement;
+      return { segHidden: !!seg && (seg.hidden || seg.getClientRects().length === 0), pressed: yours && yours.getAttribute("aria-pressed") };
+    });
+    ok("and the Prompt tab shows only the prompt for your messages", prompt.segHidden && prompt.pressed === "true", JSON.stringify(prompt));
+  });
+}
+
+console.log("\nwaiting to be told the chat");
+// Every button above the tabs waits for the chat, the draft one included, so
+// they are all in the same state at once.
+await inTab(browser, { saved: { inputRefine: true } }, async (page) => {
+  const got = await page.evaluate(() => ({
+    draft: document.querySelector("#drawer [data-arf-draft]").disabled,
+    now: document.querySelector("#drawer [data-arf-now]").disabled,
+  }));
+  ok("the draft button is grayed out with the rest", got.draft && got.now, JSON.stringify(got));
+});
+
+console.log("\nthe buttons above the tabs on a phone and a laptop");
+// Two groups of buttons in two columns. On a phone and on a laptop, nothing
+// runs off the card, the labels wrap inside their buttons, and on a phone
+// every button is big enough to tap.
+for (const [name, viewport, touch] of [["phone", { width: 360, height: 800 }, true], ["laptop", { width: 1280, height: 800 }, false]]) {
+  await inTab(browser, { viewport, touch, saved: { inputRefine: true } }, async (page) => {
+    const got = await page.evaluate(() => {
+      (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" }));
+      const card = document.querySelector("#drawer [data-arf-now]").closest(".arf-btngroup").parentElement;
+      const box = card.getBoundingClientRect();
+      const buttons = [...card.querySelectorAll(".arf-btngrid > button")].filter((b) => !b.hidden);
+      const outside = buttons.filter((b) => {
+        const r = b.getBoundingClientRect();
+        return r.left < box.left - 1 || r.right > box.right + 1;
+      }).map((b) => b.textContent);
+      const clipped = buttons.filter((b) => b.scrollWidth > b.clientWidth + 1).map((b) => b.textContent);
+      const short = buttons.filter((b) => b.getBoundingClientRect().height < 32).map((b) => b.textContent);
+      return { count: buttons.length, outside, clipped, short, sideways: document.documentElement.scrollWidth > window.innerWidth + 1 || drawer.scrollWidth > drawer.clientWidth + 1 };
+    });
+    ok(name + ": every button stays inside the card", got.count >= 5 && !got.outside.length, JSON.stringify(got));
+    ok(name + ": no label is cut off", !got.clipped.length, JSON.stringify(got.clipped));
+    ok(name + ": every button is at least 32 pixels high", !got.short.length, JSON.stringify(got.short));
+    ok(name + ": the page does not scroll sideways", !got.sideways, JSON.stringify(got));
+  });
+}
+
+console.log("\nevery tab on a phone and under a mouse");
+// On a phone: nothing scrolls sideways and everything that can be pressed is
+// at least 32 pixels, with the switches answering a tap just around them. Under
+// a mouse: each kind of control answers the pointer.
+{
+  const SAVED = { inputRefine: true, judgeMode: "two", refineAtOnce: true, widgetOn: true };
+  await inTab(browser, { viewport: { width: 375, height: 812 }, touch: true, saved: SAVED }, async (page) => {
+    await page.evaluate(() => (window.__handlers.CHAT_CHANGED || []).forEach((f) => f({ chatId: "c1" })));
+    for (const tab of ["Prompt", "Context", "Model", "Limits", "Log", "Setup"]) {
+      await goTab(page, tab);
+      await page.waitForTimeout(200);
+      const got = await page.evaluate(() => {
+        const root = document.querySelector("#drawer");
+        const pressable = [...root.querySelectorAll('button, [role="button"], input[type=checkbox], select, a[href]')].filter((n) => {
+          if (n.closest("[hidden]") || n.disabled) return false;
+          const r = n.getBoundingClientRect();
+          return r.width > 1 && r.height > 1 && getComputedStyle(n).visibility !== "hidden";
+        });
+        const small = pressable.filter((n) => !n.matches(".arf-box")).filter((n) => { const r = n.getBoundingClientRect(); return r.width < 32 || r.height < 32; }).map((n) => (n.getAttribute("aria-label") || n.textContent || "").trim().slice(0, 40));
+        const box = root.querySelector(".arf-box");
+        let around = true;
+        if (box) { const r = box.getBoundingClientRect(); around = document.elementFromPoint(r.left + r.width / 2, r.top - 3) === box; }
+        return { sideways: document.documentElement.scrollWidth > window.innerWidth + 1, small, around };
+      });
+      ok("phone, " + tab + ": nothing scrolls sideways", !got.sideways, "");
+      ok("phone, " + tab + ": everything pressable is at least 32 pixels", !got.small.length, JSON.stringify(got.small.slice(0, 5)));
+      ok("phone, " + tab + ": a switch answers a tap just above it", got.around, "");
+    }
+  });
+  await inTab(browser, { viewport: { width: 1280, height: 900 }, saved: SAVED }, async (page) => {
+    await goTab(page, "Limits");
+    const look = (sel) => page.evaluate((sel) => { const n = document.querySelector(sel); const cs = getComputedStyle(n); return [cs.backgroundColor, cs.borderColor, cs.boxShadow, cs.filter].join("|"); }, sel);
+    // The first list on the tab that is drawn. A list under a switch that is
+    // off is on the card and hidden, and a pointer cannot reach it.
+    await page.evaluate(() => {
+      const n = [...document.querySelectorAll("#drawer select.arf-field")].find((x) => !x.closest("[hidden]") && x.getClientRects().length);
+      if (n) n.setAttribute("data-probe-list", "1");
+    });
+    for (const [name, sel] of [["a switch", '#drawer [data-arf-row="protectOn"] .arf-box'], ["a list", "#drawer [data-probe-list]"], ['a "?"', "#drawer .arf-q"]]) {
+      await page.evaluate((sel) => document.querySelector(sel).scrollIntoView({ block: "center" }), sel);
+      const before = await look(sel);
+      await page.hover(sel);
+      await page.waitForTimeout(250);
+      const after = await look(sel);
+      await page.mouse.move(2, 2);
+      ok("under a mouse, " + name + " answers the pointer", before !== after, before + " / " + after);
+    }
+  });
+}
+
+console.log("\nthe tabs stay at the top");
+{
+  // The drawer scrolls on its own, as it does in Lumiverse. The tab strip has
+  // to stay at the top of it while the tab scrolls, and be back in its own
+  // place once the tab is scrolled back up. The search box scrolls away with
+  // the rest. The strip has the cards' own color at all times, and blurs what
+  // passes under it, so it never changes color as you scroll and the rows
+  // under it cannot be read through it. Held at the top it gains a shadow
+  // along its lower edge.
+  const SCROLLS = "#drawer{height:520px;overflow-y:auto}";
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 760 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { css: SCROLLS, viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Prompt");
+      const got = await page.evaluate(async () => {
+        const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const drawer = document.getElementById("drawer");
+        const bar = () => drawer.querySelector("[data-arf-stick]");
+        const strip = () => bar().querySelector(".arf-tabs");
+        const where = () => Math.round(bar().getBoundingClientRect().top - drawer.getBoundingClientRect().top);
+        const pad = Math.round(parseFloat(getComputedStyle(drawer).paddingTop) || 0);
+        const clear = (c) => c === "transparent" || /rgba\([^)]*,\s*0\)$/.test(c);
+        // The cards' own color, with what is behind it blurred.
+        const card = drawer.querySelector(".arf-card");
+        const solid = () => {
+          const cs = getComputedStyle(strip());
+          return cs.backgroundColor === getComputedStyle(card).backgroundColor && /blur\(12px\)/.test(cs.backdropFilter || cs.webkitBackdropFilter || "");
+        };
+        const shadow = () => getComputedStyle(strip()).boxShadow !== "none";
+        const rest = where();
+        const restHolder = getComputedStyle(bar()).backgroundColor;
+        const restStuck = bar().classList.contains("arf-stuck");
+        const restStrip = getComputedStyle(strip()).backgroundColor;
+        const room = drawer.scrollHeight - drawer.clientHeight;
+        const restSolid = solid();
+        const restShadow = shadow();
+        drawer.scrollTop = drawer.scrollHeight;
+        await frame();
+        await new Promise((r) => setTimeout(r, 350));
+        const atTop = where();
+        const hasTabs = !!bar().querySelector(".arf-tab") && !bar().querySelector('input[type="search"]');
+        const r = strip().getBoundingClientRect();
+        const hit = document.elementFromPoint(r.left + r.width / 2, r.top + 2);
+        const covers = !!hit && strip().contains(hit);
+        const heldSolid = solid();
+        const heldShadow = shadow();
+        const heldStuck = bar().classList.contains("arf-stuck");
+        const heldStrip = getComputedStyle(strip()).backgroundColor;
+        drawer.scrollTop = 0;
+        await frame();
+        // While it scrolls back, the color does not change at all.
+        const goingStrip = getComputedStyle(strip()).backgroundColor;
+        await new Promise((r) => setTimeout(r, 400));
+        const back = where();
+        const backStuck = bar().classList.contains("arf-stuck");
+        const backShadow = shadow();
+        const backStrip = getComputedStyle(strip()).backgroundColor;
+        return { pad, rest, restHolder: clear(restHolder), restStuck, restSolid, restShadow, restStrip, room, atTop, hasTabs, covers, heldSolid, heldShadow, heldStuck, back, backStuck, backShadow, sameColor: heldStrip === restStrip && goingStrip === restStrip && backStrip === restStrip, sideways: document.documentElement.scrollWidth > window.innerWidth + 1 || drawer.scrollWidth > drawer.clientWidth + 1 };
+      });
+      ok(label + ": the tab is long enough to scroll", got.room > 300, JSON.stringify(got));
+      ok(label + ": at rest nothing is drawn behind the strip, and the strip has the cards' color and a blur, with no shadow", got.restHolder && !got.restStuck && got.restSolid && !got.restShadow, JSON.stringify(got));
+      ok(label + ": scrolled down, the strip sits at the top of the drawer", got.atTop === got.pad, JSON.stringify(got));
+      ok(label + ": and it holds the tabs, not the search box", got.hasTabs, JSON.stringify(got));
+      ok(label + ": held there, the strip keeps the cards' color, blurs what is under it, and has a shadow", got.heldStuck && got.heldSolid && got.heldShadow && got.covers, JSON.stringify(got));
+      ok(label + ": the strip keeps one color the whole way, held, scrolling back and at rest", got.sameColor, JSON.stringify(got));
+      ok(label + ": scrolled back up, it is in its own place with no shadow", got.back === got.rest && got.rest > 0 && !got.backStuck && !got.backShadow, JSON.stringify(got));
+      ok(label + ": nothing scrolls sideways", !got.sideways, "");
+    });
+    // Away to another drawer tab and back. The host hides the panel and shows
+    // it again with the scroll where it was, and no scroll event comes. A
+    // repaint while it was hidden measured nothing, which is what leaves the
+    // strip held at the top with nothing behind it.
+    await inTab(browser, { css: SCROLLS, viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Log");
+      const got = await page.evaluate(async () => {
+        const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const drawer = document.getElementById("drawer");
+        const bar = () => drawer.querySelector("[data-arf-stick]");
+        drawer.scrollTop = drawer.scrollHeight;
+        await frame();
+        const before = bar().classList.contains("arf-stuck");
+        const top = drawer.scrollTop;
+        // From here on no scroll event reaches the panel, as when the host
+        // puts the scroll back itself.
+        const swallow = (e) => e.stopImmediatePropagation();
+        window.addEventListener("scroll", swallow, true);
+        drawer.style.display = "none";
+        await frame();
+        bar().classList.remove("arf-stuck");
+        drawer.style.display = "";
+        drawer.scrollTop = top;
+        await frame();
+        await new Promise((r) => setTimeout(r, 100));
+        window.removeEventListener("scroll", swallow, true);
+        return { before, after: bar().classList.contains("arf-stuck"), scrolled: drawer.scrollTop > 0 };
+      });
+      ok(label + ": back from another tab, the strip held at the top is marked as held again", got.before && got.scrolled && got.after, JSON.stringify(got));
+    });
+    // The shadow starts once the search box has scrolled away and the strip is
+    // held, and not before: at rest, one strip height short of the top, and two
+    // pixels short, it has none, whether the drawer is moving or still.
+    // Two browsers: one that can tell by itself that the strip is held, and one
+    // that cannot, which is Safari and Firefox and is made here by taking the
+    // stylesheet's check away.
+    const NO_CHECK = "#drawer .arf-stick{container-type:normal!important}";
+    for (const [which, css] of [["with the browser's own check", SCROLLS], ["without it", SCROLLS + NO_CHECK]]) {
+      await inTab(browser, { css, viewport, touch, saved: { enabled: true } }, async (page) => {
+        await goTab(page, "Prompt");
+        const got = await page.evaluate(async () => {
+          const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const drawer = document.getElementById("drawer");
+          const bar = () => drawer.querySelector("[data-arf-stick]");
+          const strip = () => bar().querySelector(".arf-tabs");
+          // The strip is solid at all times. What being held adds is the
+          // shadow, so that is what is read here.
+          const solid = () => getComputedStyle(strip()).boxShadow !== "none";
+          const where = () => bar().getBoundingClientRect().top - drawer.getBoundingClientRect().top;
+          const pad = parseFloat(getComputedStyle(drawer).paddingTop) || 0;
+          const rest = where();
+          const restSolid = solid();
+          const at = (gap) => {
+            drawer.scrollTop = rest - pad - gap;
+          };
+          at(bar().offsetHeight);
+          await frame();
+          const near = { gap: Math.round(where() - pad), moving: solid() };
+          await new Promise((r) => setTimeout(r, 400));
+          near.still = solid();
+          at(2);
+          await frame();
+          const edge = { gap: Math.round(where() - pad), moving: solid() };
+          await new Promise((r) => setTimeout(r, 400));
+          edge.still = solid();
+          drawer.scrollTop = drawer.scrollHeight;
+          await frame();
+          await new Promise((r) => setTimeout(r, 350));
+          const held = { gap: Math.round(where() - pad), solid: solid() };
+          // A repaint while held. The strip is a new element, read before the
+          // next frame.
+          const old = bar();
+          drawer.querySelector(".arf-tab[aria-selected='true']").click();
+          const fresh = bar() !== old;
+          const repaintSolid = solid();
+          return { restSolid, near, edge, held, fresh, repaintSolid };
+        });
+        ok(label + ", " + which + ": at rest the strip has no shadow", !got.restSolid, JSON.stringify(got));
+        ok(label + ", " + which + ": one strip height short of the top, it has no shadow, moving or still", got.near.gap > 20 && !got.near.moving && !got.near.still, JSON.stringify(got.near));
+        ok(label + ", " + which + ": two pixels short of the top, it has no shadow either", got.edge.gap > 0 && got.edge.gap <= 3 && !got.edge.moving && !got.edge.still, JSON.stringify(got.edge));
+        ok(label + ", " + which + ": held at the top, it has its shadow", got.held.gap === 0 && got.held.solid, JSON.stringify(got.held));
+        ok(label + ", " + which + ": a repaint while it is held keeps the shadow at once", got.fresh && got.repaintSolid, JSON.stringify(got));
+      });
+    }
+    // The browser's own check alone, with the script's classes taken off the
+    // moment they are put on. Without the check the strip has no shadow,
+    // which shows the classes really were kept off.
+    for (const [which, css, want] of [["the browser's own check", SCROLLS, true], ["no check and no script", SCROLLS + NO_CHECK, false]]) {
+      await inTab(browser, { css, viewport, touch, saved: { enabled: true } }, async (page) => {
+        await goTab(page, "Prompt");
+        const got = await page.evaluate(async () => {
+          const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const drawer = document.getElementById("drawer");
+          const bar = drawer.querySelector("[data-arf-stick]");
+          const strip = bar.querySelector(".arf-tabs");
+          // Only when one is there: remove() writes the attribute even when it
+          // changes nothing, and the observer would then call itself forever.
+          const strike = () => {
+            if (bar.classList.contains("arf-stuck")) bar.classList.remove("arf-stuck");
+          };
+          const mo = new MutationObserver(strike);
+          mo.observe(bar, { attributes: true, attributeFilter: ["class"] });
+          drawer.scrollTop = drawer.scrollHeight;
+          await frame();
+          await frame();
+          await new Promise((r) => setTimeout(r, 350));
+          strike();
+          const solid = getComputedStyle(strip).boxShadow !== "none";
+          const classes = bar.className;
+          mo.disconnect();
+          return { solid, classes, scrolled: drawer.scrollTop > 0 };
+        });
+        ok(label + ", " + which + ": held at the top, " + (want ? "the strip has its shadow" : "the strip has no shadow"), got.scrolled && got.solid === want && !/arf-stuck/.test(got.classes), JSON.stringify(got));
+      });
+    }
+  }
+}
+
+console.log("\nthe tabs stay at the top: the shadow fades");
+{
+  // The shadow fades in when the strip is held and out when it is let go.
+  // With Reduce motion on, from the panel or from the device, it comes and
+  // goes at once. A repaint while held never fades it in again, and a fast
+  // run of scrolls up and down ends with the shadow matching where the strip
+  // is.
+  const SCROLLS = "#drawer{height:520px;overflow-y:auto}";
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 760 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    for (const how of ["off", "panel", "device"]) {
+      await inTab(browser, { css: SCROLLS, viewport, touch, saved: { enabled: true, reduceMotion: how === "panel" } }, async (page) => {
+        if (how === "device") await page.emulateMedia({ reducedMotion: "reduce" });
+        await goTab(page, "Prompt");
+        const got = await page.evaluate(async () => {
+          const frame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+          const drawer = document.getElementById("drawer");
+          const bar = () => drawer.querySelector("[data-arf-stick]");
+          const strip = () => bar().querySelector(".arf-tabs");
+          const fading = () => strip().getAnimations().filter((a) => a.transitionProperty === "box-shadow").length;
+          const shadow = () => getComputedStyle(strip()).boxShadow;
+          const restShadow = shadow();
+          drawer.scrollTop = drawer.scrollHeight;
+          await frame();
+          const fadingIn = fading();
+          await wait(400);
+          const heldShadow = shadow();
+          drawer.querySelector(".arf-tab[aria-selected='true']").click();
+          const fadingAfterRepaint = fading();
+          const repaintShadow = shadow();
+          await frame();
+          const fadingLater = fading();
+          // Up and down, a frame or less apart, as a flick on a phone does.
+          for (let i = 0; i < 12; i++) {
+            drawer.scrollTop = i % 2 ? drawer.scrollHeight : 0;
+            await new Promise((r) => requestAnimationFrame(r));
+          }
+          drawer.scrollTop = 0;
+          await frame();
+          await wait(400);
+          const endTop = { shadow: shadow(), stuck: bar().classList.contains("arf-stuck") };
+          for (let i = 0; i < 12; i++) {
+            drawer.scrollTop = i % 2 ? 0 : drawer.scrollHeight;
+            await new Promise((r) => requestAnimationFrame(r));
+          }
+          drawer.scrollTop = drawer.scrollHeight;
+          await frame();
+          await wait(400);
+          const endHeld = { shadow: shadow(), stuck: bar().classList.contains("arf-stuck") };
+          return { restShadow, fadingIn, heldShadow, fadingAfterRepaint, fadingLater, repaintShadow, endTop, endHeld };
+        });
+        const name = label + (how === "off" ? "" : ", Reduce motion from the " + how);
+        if (how === "off") ok(name + ": held, the shadow fades in", got.fadingIn > 0, JSON.stringify(got));
+        else ok(name + ": held, the shadow is there at once with no fade", got.fadingIn === 0 && got.heldShadow !== "none", JSON.stringify(got));
+        ok(name + ": a repaint while held keeps the shadow and does not fade it in again", got.repaintShadow === got.heldShadow && got.fadingAfterRepaint === 0 && got.fadingLater === 0, JSON.stringify(got));
+        ok(name + ": after fast scrolling, back at the top there is no shadow", got.endTop.shadow === got.restShadow && got.restShadow === "none" && !got.endTop.stuck, JSON.stringify(got.endTop));
+        ok(name + ": after fast scrolling, held at the top there is the shadow", got.endHeld.shadow === got.heldShadow && got.endHeld.stuck, JSON.stringify(got.endHeld));
+      });
+    }
+  }
+}
+
+console.log("\nhow many at once shows under its switch");
+{
+  // The count waits on its switch. Once the switch is on it has to be on
+  // screen straight under it, not in a fold somewhere else on the card.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch, saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Limits");
+      const shown = () =>
+        page.evaluate(() => {
+          const row = document.querySelector('#drawer [data-arf-row="refineAtOnceCount"]');
+          if (!row) return { there: false, seen: false };
+          const r = row.getBoundingClientRect();
+          return { there: true, seen: !!row.offsetParent && r.height > 0 };
+        });
+      const before = await shown();
+      await page.evaluate(() => document.querySelector('#drawer [data-arf-row="refineAtOnce"] .arf-box').click());
+      await page.waitForTimeout(300);
+      const after = await shown();
+      const order = await page.evaluate(() => {
+        const rows = [...document.querySelectorAll("#drawer [data-arf-row]")].filter((n) => n.offsetParent).map((n) => n.getAttribute("data-arf-row"));
+        return rows.indexOf("refineAtOnceCount") - rows.indexOf("refineAtOnce");
+      });
+      ok(label + ": with the switch off, How many at once is not on screen", !before.seen, JSON.stringify(before));
+      ok(label + ": switched on, How many at once is on screen", after.seen, JSON.stringify(after));
+      ok(label + ": and it is the row straight under the switch", order === 1, String(order));
+    });
+  }
+}
+
+console.log("\nwhat to refine reaches the message buttons and the floating menu");
+{
+  // Two messages, one of yours and one reply, each with the mount the host
+  // leaves for extensions. The page does not say whose a message is, so the
+  // panel asks the backend, and the answer is given here the way it would be.
+  const TWO = `
+  <div data-message-id="msg-mine"><p>i open the shutters</p>
+    <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-mine:minimal:footer" style="display:contents"></span></div>
+  <div data-message-id="msg-reply"><p>Gray light came into the room and found the empty chair.</p>
+    <span data-spindle-mount="message_footer" data-spindle-scope="message:msg-reply:minimal:footer" style="display:contents"></span></div>`;
+  for (const [side, wantMine, wantReply] of [["replies", false, true], ["mine", true, false], ["both", true, true]]) {
+    await inTab(browser, { saved: { enabled: true, messageButton: true, widgetOn: true, inputRefine: true, refineSide: side } }, async (page) => {
+      const out = await page.evaluate(async (html) => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+        const wrap = document.createElement("div");
+        wrap.innerHTML = html;
+        document.body.appendChild(wrap);
+        await wait(400);
+        const asks = window.__sent.filter((m) => m && m.type === "message_roles");
+        const ask = asks[asks.length - 1];
+        const before = {
+          mine: !!document.querySelector('[data-message-id="msg-mine"] [data-arf-slot="message"]'),
+          reply: !!document.querySelector('[data-message-id="msg-reply"] [data-arf-slot="message"]'),
+        };
+        if (ask) window.__fromBackend({ type: "message_roles", requestId: ask.requestId, chatId: "c1", ok: true, roles: { "msg-mine": "user", "msg-reply": "assistant" } });
+        await wait(100);
+        const after = {
+          mine: !!document.querySelector('[data-message-id="msg-mine"] [data-arf-slot="message"]'),
+          reply: !!document.querySelector('[data-message-id="msg-reply"] [data-arf-slot="message"]'),
+        };
+        window.__menu = null;
+        const b = document.querySelector("#float button") || document.querySelector(".arf-float");
+        let menu = null;
+        if (b) {
+          b.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, clientX: 20, clientY: 20 }));
+          await wait(620);
+          b.dispatchEvent(new PointerEvent("pointerup", { bubbles: true }));
+          await wait(40);
+          menu = window.__menu ? window.__menu.items.filter((i) => i.type !== "divider").map((i) => i.label) : null;
+        }
+        return { asked: asks.length, before, after, menu };
+      }, TWO);
+      if (side === "both") {
+        ok(side + ": every message has its button, with nothing to ask", out.after.mine && out.after.reply && out.asked === 0, JSON.stringify(out));
+      } else {
+        ok(side + ": the panel asks whose each message is", out.asked >= 1, JSON.stringify(out));
+        ok(side + ": no button shows before the answer", !out.before.mine && !out.before.reply, JSON.stringify(out));
+        ok(side + ": your message has the button only if your messages are refined", out.after.mine === wantMine, JSON.stringify(out));
+        ok(side + ": a reply has the button only if replies are refined", out.after.reply === wantReply, JSON.stringify(out));
+      }
+      const draft = !!out.menu && out.menu.some((t) => /what I am typing/i.test(t));
+      ok(side + ": the floating menu offers Refine what I am typing only if your messages are refined", !!out.menu && draft === wantMine, JSON.stringify(out.menu));
+    });
+  }
+  // The first ask can go out before the backend is listening, and then nothing
+  // answers it. The backend saying it is ready asks again, and so does a wait
+  // that ran out, so the buttons still arrive.
+  for (const how of ["ready", "wait"]) {
+    await inTab(browser, { saved: { enabled: true, messageButton: true, refineSide: "replies" } }, async (page) => {
+      const out = await page.evaluate(async ([html, how]) => {
+        const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+        for (const f of window.__handlers.CHAT_CHANGED || []) f({ chatId: "c1" });
+        const wrap = document.createElement("div");
+        wrap.innerHTML = html;
+        document.body.appendChild(wrap);
+        await wait(400);
+        const asks = () => window.__sent.filter((m) => m && m.type === "message_roles");
+        const first = asks().length;
+        if (how === "ready") window.__fromBackend({ type: "backend_ready" });
+        else await wait(5400);
+        await wait(400);
+        const again = asks();
+        const last = again[again.length - 1];
+        if (last) window.__fromBackend({ type: "message_roles", requestId: last.requestId, chatId: "c1", ok: true, roles: { "msg-mine": "user", "msg-reply": "assistant" } });
+        await wait(150);
+        return {
+          first,
+          asked: again.length,
+          reply: !!document.querySelector('[data-message-id="msg-reply"] [data-arf-slot="message"]'),
+          mine: !!document.querySelector('[data-message-id="msg-mine"] [data-arf-slot="message"]'),
+        };
+      }, [TWO, how]);
+      const why = how === "ready" ? "the backend says it is ready" : "the first ask goes unanswered";
+      ok("when " + why + ", the panel asks again", out.first >= 1 && out.asked > out.first, JSON.stringify(out));
+      ok("and the answer puts the buttons where they belong", out.reply && !out.mine, JSON.stringify(out));
+    });
+  }
+}
+
+// Rows that come and go with a setting, and that had their own spacing or
+// were built only when the card was built again. Each opens and closes over
+// several frames, and nothing moves once the movement ends, including when
+// the card is built again a moment later. Measured on the whole drawer, so a
+// step anywhere in it counts.
+console.log("\nrows with a setting of their own open and close with no step");
+for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+  for (const zoom of [1, 1.25, 0.85]) {
+    await inTab(browser, { viewport, touch, css: "#drawer{height:100vh;overflow-y:auto}" + (zoom === 1 ? "" : "html{zoom:" + zoom + "}"), saved: { enabled: true } }, async (page) => {
+      const say = label + (zoom === 1 ? "" : ", zoom " + zoom) + ": ";
+      // Presses or picks with the page's own code, then reads the drawer's
+      // height on every frame for longer than the card takes to be built again.
+      const watch = (tab, how) =>
+        page.evaluate(async ([tab, how]) => {
+          const tabs = [...document.querySelectorAll("#drawer [role=tab]")];
+          const t = tabs.find((b) => b.textContent.trim().startsWith(tab));
+          if (!t) return null;
+          t.click();
+          await new Promise((r) => setTimeout(r, 400));
+          const d = document.querySelector("#drawer");
+          const start = d.scrollHeight;
+          if (how.box) {
+            const row = document.querySelector('#drawer [data-arf-row="' + how.box + '"]');
+            const box = row && row.querySelector("input[type=checkbox]");
+            if (!box) return null;
+            box.click();
+          } else {
+            const sel = [...document.querySelectorAll("#drawer select")].find((x) => [...x.options].some((o) => o.value === how.value) && [...x.options].some((o) => o.value === how.other));
+            if (!sel) return null;
+            sel.value = how.value;
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+          }
+          const tops = [];
+          const t0 = performance.now();
+          while (performance.now() - t0 < 700) {
+            await new Promise((r) => requestAnimationFrame(r));
+            tops.push(d.scrollHeight - start);
+          }
+          return tops;
+        }, [tab, how]);
+      const steps = [
+        ["Add the refine as a swipe, switched on", "Limits", { box: "asSwipe" }],
+        ["Add the refine as a swipe, switched off", "Limits", { box: "asSwipe" }],
+        ["two models picked", "Model", { value: "two", other: "one" }],
+        ["one model picked", "Model", { value: "one", other: "two" }],
+        ["Refine set to replies only", "Setup", { value: "replies", other: "mine" }],
+        ["Refine set to both", "Setup", { value: "both", other: "mine" }],
+      ];
+      for (const [name, tab, how] of steps) {
+        const tops = await watch(tab, how);
+        const travel = tops ? tops[tops.length - 1] : 0;
+        let biggest = 0;
+        if (tops) tops.forEach((t, i) => { biggest = Math.max(biggest, Math.abs(t - (i ? tops[i - 1] : 0))); });
+        ok(say + name + ": the space opens or closes over several frames",
+          !!tops && Math.abs(travel) > 20 && biggest < Math.abs(travel) * 0.6, JSON.stringify(tops && tops.map(Math.round)));
+        ok(say + name + ": nothing moves after the movement ends", !!tops && lateJump(tops) <= 2, JSON.stringify(tops && tops.map(Math.round)));
+        await closed(page);
+      }
+      // A kind of Log line switched off. The Log starts with one line, of
+      // this kind, so its line closes while the note that every line is
+      // hidden opens in its place. Each is measured on its own.
+      for (const name of ["hidden", "shown again"]) {
+        const got = await page.evaluate(async () => {
+          const tabs = [...document.querySelectorAll("#drawer [role=tab]")];
+          tabs.find((b) => b.textContent.trim().startsWith("Log")).click();
+          await new Promise((r) => setTimeout(r, 400));
+          const box = document.querySelector('#drawer [data-arf-part="logShow:setup"]');
+          if (!box) return null;
+          const tall = (sel) => {
+            const n = document.querySelector(sel);
+            return n && !n.hidden ? n.getBoundingClientRect().height : 0;
+          };
+          box.click();
+          const line = [];
+          const words = [];
+          const t0 = performance.now();
+          while (performance.now() - t0 < 700) {
+            await new Promise((r) => requestAnimationFrame(r));
+            line.push(tall('#drawer [data-arf-logline="setup"]'));
+            words.push(tall('#drawer [data-arf-hangs="every log line hidden"]'));
+          }
+          return { line, words };
+        });
+        for (const [what, tops] of [["its line", got && got.line], ["the note that every line is hidden", got && got.words]]) {
+          const travel = tops ? tops[tops.length - 1] - tops[0] : 0;
+          let biggest = 0;
+          if (tops) tops.forEach((t, i) => { if (i) biggest = Math.max(biggest, Math.abs(t - tops[i - 1])); });
+          ok(say + "a kind of Log line " + name + ": " + what + " opens or closes over several frames",
+            !!tops && Math.abs(travel) > 8 && biggest < Math.abs(travel) * 0.6, JSON.stringify(tops && tops.map(Math.round)));
+          ok(say + "a kind of Log line " + name + ": " + what + " stays still once it lands", !!tops && lateJump(tops) <= 2, JSON.stringify(tops && tops.map(Math.round)));
+        }
+        await closed(page);
+      }
+    });
+  }
+}
+
+// A box that opens is held at a height worked out in CSS pixels, and let go
+// when it lands. Under UI Scale that height has to be its real height to a
+// fraction of a pixel, or the box snaps to its real height as it is let go,
+// which shows as a small step at the end. Checked at every UI Scale step.
+console.log("\na box opens to its exact height at every UI Scale");
+for (const [label, viewport, touch] of [["phone", { width: 390, height: 900 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+  await inTab(browser, { viewport, touch, saved: { enabled: true } }, async (page) => {
+    await settle(page);
+    const off = [];
+    for (let step = 50; step <= 150; step += 5) {
+      const got = await page.evaluate(async (z) => {
+        document.documentElement.style.zoom = String(z);
+        const tabs = [...document.querySelectorAll("#drawer [role=tab]")];
+        tabs.find((t) => t.textContent.trim().startsWith("Limits")).click();
+        await new Promise((r) => setTimeout(r, 400));
+        const box = document.querySelector('#drawer [data-arf-row="asSwipe"] input[type=checkbox]');
+        if (!box) return null;
+        box.click();
+        await new Promise((r) => setTimeout(r, 60));
+        const opening = document.querySelector('#drawer [data-arf-hangs="asSwipe"]');
+        const held = opening ? parseFloat(opening.style.height) : NaN;
+        await new Promise((r) => setTimeout(r, 400));
+        const open = document.querySelector('#drawer [data-arf-hangs="asSwipe"]');
+        const real = open ? parseFloat(getComputedStyle(open).height) : NaN;
+        box.isConnected ? box.click() : document.querySelector('#drawer [data-arf-row="asSwipe"] input[type=checkbox]').click();
+        await new Promise((r) => setTimeout(r, 400));
+        return { held, real };
+      }, step / 100);
+      if (!got || !(Math.abs(got.held - got.real) < 0.05)) off.push(step + "%: " + JSON.stringify(got));
+    }
+    ok(label + ": the box under Add the refine as a swipe opens to its real height at every UI Scale from 50% to 150%", off.length === 0, off.join(" "));
+  });
+}
+
+console.log("\nfolding a block with one side refined");
+{
+  // What to refine is changed while the panel is open, and the Prompt tab is
+  // opened after. The list has to be that side's prompt from the first draw,
+  // or a fold arrow folds a block of the other prompt and takes a second press
+  // to do anything.
+  const firstBlock = (page) =>
+    page.evaluate(() => {
+      const block = document.querySelector("#drawer .arf-block");
+      const btn = block.querySelector(".arf-blockfold");
+      return { name: (block.querySelector("input:not([type=checkbox])") || {}).value || "", expanded: btn.getAttribute("aria-expanded") };
+    });
+  const pressList = (page, label) =>
+    page.evaluate((label) => {
+      const b = [...document.querySelectorAll("#drawer .arf-segbtn")].find((x) => x.textContent.trim() === label);
+      if (b) b.click();
+    }, label);
+  const setSide = (page, value) =>
+    page.evaluate((value) => {
+      const sel = document.querySelector('#drawer select[data-arf-field="refineSide"]');
+      sel.value = value;
+      sel.dispatchEvent(new Event("change", { bubbles: true }));
+    }, value);
+  for (const [side, from] of [["mine", "For replies"], ["replies", "For your messages"]]) {
+    await inTab(browser, { saved: { enabled: true } }, async (page) => {
+      await goTab(page, "Prompt");
+      await settle(page);
+      await pressList(page, "For replies");
+      await settle(page);
+      const replyName = (await firstBlock(page)).name;
+      await pressList(page, "For your messages");
+      await settle(page);
+      const mineName = (await firstBlock(page)).name;
+      // Left on the list for the other side, as somebody would leave it.
+      await pressList(page, from);
+      await settle(page);
+      await goTab(page, "Setup");
+      await settle(page);
+      await setSide(page, side);
+      await settle(page);
+      await goTab(page, "Prompt");
+      await settle(page);
+      const shown = await firstBlock(page);
+      const pressed = await page.evaluate(async () => {
+        const btn = document.querySelector("#drawer .arf-block .arf-blockfold");
+        btn.click();
+        await new Promise((r) => setTimeout(r, 100));
+        return btn.getAttribute("aria-expanded");
+      });
+      await goTab(page, "Context");
+      await goTab(page, "Prompt");
+      await settle(page);
+      const again = await firstBlock(page);
+      const want = side === "mine" ? mineName : replyName;
+      ok(side + ": the Prompt tab shows that side's prompt from the first draw", !!want && shown.name === want && replyName !== mineName, JSON.stringify({ shown, replyName, mineName }));
+      ok(side + ": one press folds the first block", pressed === "false", String(pressed));
+      ok(side + ": and it is still folded after a repaint", again.name === want && again.expanded === "false", JSON.stringify(again));
+    });
+  }
+}
+
+console.log("\ncolors for cut and added words that come from the account");
+{
+  // Nothing saved in this browser, and the account holds colors of its own.
+  // A refine that finishes after the account answers draws its words in them.
+  for (const [label, viewport, touch] of [["phone", { width: 390, height: 844 }, true], ["laptop", { width: 1280, height: 900 }, false]]) {
+    await inTab(browser, { viewport, touch }, async (page) => {
+      const drawn = await page.evaluate(async () => {
+        const id = window.__sent.filter((m) => m.type === "load_settings").pop().requestId;
+        window.__fromBackend({ type: "loaded_settings", requestId: id, settings: { enabled: true, cutColor: "#2244aa", addColor: "#aa6600" } });
+        await new Promise((r) => setTimeout(r, 100));
+        window.__fromBackend({ type: "refined", chatId: "c1", messageId: "m4", canUndo: true, before: "The kettle sang loudly.", after: "The kettle sang softly." });
+        await new Promise((r) => setTimeout(r, 400));
+        const cut = document.querySelector(".arf-pop .arf-cut");
+        const add = document.querySelector(".arf-pop .arf-add");
+        return { cut: cut ? getComputedStyle(cut).color : null, add: add ? getComputedStyle(add).color : null };
+      });
+      ok(label + ": cut words are drawn in the account's color", drawn.cut === "rgb(34, 68, 170)", JSON.stringify(drawn));
+      ok(label + ": added words are drawn in the account's color", drawn.add === "rgb(170, 102, 0)", JSON.stringify(drawn));
+    });
+  }
+}
+
+console.log("\nfolds in a preset of yours after Lumiverse is opened again");
+{
+  // A preset of yours is loaded and one of its blocks is folded. Lumiverse is
+  // closed and opened again. The fold and the preset's name in the picker are
+  // still there, whichever of the account's two answers comes first, and with
+  // or without this browser's copy.
+  const BLOCKS = [
+    { id: "kept-a", on: true, role: "system", name: "Pacing", text: "Keep each scene to one place." },
+    { id: "kept-b", on: true, role: "system", name: "Voice", text: "Short lines for the shopkeeper." },
+  ];
+  const SETTINGS = { enabled: true, presetPick: "Harbor nights", blocks: BLOCKS, blocksShut: ["blocks@Harbor nights\nkept-a"] };
+  const PRESETS = [{ name: "Harbor nights", at: 1, settings: { blocks: BLOCKS } }];
+  const state = (page) =>
+    page.evaluate(() => {
+      const block = document.querySelector('#drawer .arf-block[data-arf-block="kept-a"]');
+      const btn = block && block.querySelector(".arf-blockfold");
+      const sel = document.querySelector('#drawer select[data-arf-field="presetPick"]');
+      return { expanded: btn ? btn.getAttribute("aria-expanded") : null, pick: sel ? sel.value : null };
+    });
+  const answer = (page, type, key, value) =>
+    page.evaluate(async ({ type, key, value }) => {
+      const ask = type === "loaded_settings" ? "load_settings" : "load_presets";
+      const id = window.__sent.filter((m) => m.type === ask).pop().requestId;
+      window.__fromBackend({ type, requestId: id, [key]: value });
+      await new Promise((r) => setTimeout(r, 100));
+    }, { type, key, value });
+  for (const [label, local, first] of [
+    ["with this browser's copy, settings answered first", true, "settings"],
+    ["with this browser's copy, presets answered first", true, "presets"],
+    ["with no copy in this browser, settings answered first", false, "settings"],
+    ["with no copy in this browser, presets answered first", false, "presets"],
+  ]) {
+    await inTab(browser, local ? { saved: SETTINGS, presets: PRESETS } : {}, async (page) => {
+      await goTab(page, "Prompt");
+      await settle(page);
+      const order = first === "settings" ? [["loaded_settings", "settings", SETTINGS], ["loaded_presets", "presets", PRESETS]] : [["loaded_presets", "presets", PRESETS], ["loaded_settings", "settings", SETTINGS]];
+      for (const [type, key, value] of order) {
+        await answer(page, type, key, value);
+        await settle(page);
+      }
+      const now = await state(page);
+      ok(label + ": the preset is still picked", now.pick === "Harbor nights", JSON.stringify(now));
+      ok(label + ": and its folded block is still folded", now.expanded === "false", JSON.stringify(now));
+    });
+  }
+}
+
+await browser.close();
+
+console.log("\n" + (ran - failures) + " of " + ran + " checks passed");
+if (failures) process.exit(1);

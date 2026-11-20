@@ -1,0 +1,8736 @@
+// The refine pass, driven for real.
+//
+// This extension hands somebody's writing to a model and saves whatever comes
+// back over it. Almost everything worth checking is about refusing to save the
+// wrong thing, and none of it can be checked by reading the source: it depends
+// on what the model answers with. So these load the built backend against a
+// stub host, feed it answers a model really gives, and watch what it writes.
+//
+// The greeting block is the one that matters most. A person wrote that message.
+import { expect, test, describe } from "bun:test";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+import { __testing } from "../src/frontend";
+
+// The prompt a fresh install starts with, taken from the panel that owns it.
+const { DEFAULT_BLOCKS } = __testing as any;
+
+const SRC = readFileSync(new URL("../dist/backend.js", import.meta.url), "utf8");
+
+interface Msg {
+  id: string;
+  role: string;
+  content: string;
+}
+
+// A prompt small enough to assert against, in the shape the panel writes.
+const PROMPT = [
+  { id: "system", name: "The job", on: true, role: "system", text: "<your_task>\nRewrite it.\n</your_task>" },
+  { id: "character", name: "Character", on: true, role: "system", text: "<character>\n{{description}}\n</character>" },
+  { id: "lore", name: "World", on: true, role: "system", text: "<world>\n{{lore}}\n</world>" },
+  { id: "history", name: "Scene", on: true, role: "system", text: "<recent_scene>\n{{history}}\n</recent_scene>" },
+  { id: "cliches", name: "Cliches", on: true, role: "system", text: "<cliches>\nCut filler words.\n</cliches>" },
+  { id: "answer", name: "How to answer", on: true, role: "system", text: "<how_to_answer>\nPut the rewritten message between <refined> and </refined>.\n</how_to_answer>\n\n{{protect_notes}}" },
+  { id: "turn", name: "The turn", on: true, role: "user", text: "{{whose}}\n\n<turn_to_refine>\n{{message}}\n</turn_to_refine>" },
+];
+
+const RULES = {
+  enabled: true,
+  refineOn: true,
+  blocks: PROMPT,
+  connectionId: "",
+  thinkingMode: "off",
+  timeoutSecs: 90,
+  maxGrowthPct: 60,
+  minShrinkPct: 40,
+  keepOriginal: true,
+  confirmBeforeSave: false,
+  // Most answers below are written without the tags, to test what is inside
+  // them. The check on the tags has its own tests.
+  requireTags: false,
+};
+
+// The card the stub host hands back. first_mes is in here on purpose: it is a
+// writing sample, and a model told to rewrite will copy one if it is shown one,
+// so a test below checks it never reaches the prompt.
+const CARD = {
+  name: "Wren",
+  description: "A ferry pilot who has crossed the same water for thirty years.",
+  personality: "Blunt, and slow to trust anyone who arrives at night.",
+  scenario: "The last crossing before the gate is shut.",
+  first_mes: "The gate stands open, and the road past it is dark.",
+  mes_example: "Wren: You are late.",
+};
+
+// The second card in a group chat.
+const OTHER_CARD = {
+  name: "Oriel",
+  description: "A lamp keeper on the far bank who counts every boat.",
+  personality: "Talks too much and remembers everything.",
+  scenario: "",
+};
+
+// answers is what the stubbed model says, one per call, in order.
+function host(
+  messages: Msg[],
+  answers: string[],
+  opts: {
+    fail?: string;
+    // How long each call takes, by the order they were made, so several made
+    // at once can finish in an order the check chooses. A call still waiting
+    // ends when its signal is aborted, and is counted in stopped.
+    delays?: number[];
+    // Fails the first n calls with this message and then answers normally,
+    // which is what a rate limit looks like from here.
+    failFirst?: { times: number; why: string };
+    // With delays, the calls by their place in order that end in an error.
+    errorsAt?: Record<number, string>;
+    chatFail?: string;
+    cardFail?: string;
+    noCard?: boolean;
+    loreFail?: string;
+    // The chat memory, and the four ways it can come back with nothing: the
+    // build has no such call, the reader switched memory off, the chat has
+    // nothing vectorized, or the call threw.
+    noMemories?: boolean;
+    memoryOff?: boolean;
+    noMemory?: boolean;
+    memoryFail?: string;
+    noLore?: boolean;
+    macroFail?: string;
+    stream?: boolean;
+    // Runs while the model is "thinking", which is the window another
+    // extension's write lands in.
+    whileAsking?: () => void;
+    // Runs while the pass is reading the chat, before any model call. That is
+    // several round trips, and it is where a swipe usually lands.
+    whileReading?: () => void;
+    // Lumiverse's token counter, and whether it says its own answer is the
+    // characters over four guess rather than a real count.
+    tokens?: { approximate?: boolean };
+    // The second model, behind spindle.decisions.evaluate. The function is
+    // given "decisions" and what was sent as JSON text, and answers with a
+    // status and a body of text the way a provider does, or throws. Anything
+    // but a 200 becomes the error Lumiverse throws.
+    jev?: (url: string, init: any) => any;
+    // What spindle.decisions.listConnections answers, or an error it throws.
+    decisionList?: any[] | Error;
+    // A Lumiverse with no spindle.decisions at all.
+    noDecisions?: boolean;
+    // Held open until the check lets it go, so a second account's work can be
+    // started while this one is still running.
+    asking?: () => Promise<void>;
+    // The one account that can see the chats, for a server with several.
+    chatOwner?: string;
+    // A group chat: the chat's own card is Wren, and Oriel is a second card in
+    // it. Each card read is counted, since each one is a host call.
+    group?: boolean;
+    // The chat's own settings, such as the connection it is set to.
+    chatMeta?: any;
+    cardReads?: string[];
+  } = {},
+) {
+  // An install scoped to an operator refuses a model call that names no
+  // account. Every host here behaves that way, because the path that had no
+  // account to give was the automatic pass, and a stub that accepted the call
+  // anyway is a stub that says the pass works when it does not.
+  const needsUser = (req: any) => {
+    if (!req || !req.userId)
+      throw new Error("userId is required for operator-scoped extensions");
+  };
+
+  const handlers: Record<string, Array<(p: any) => any>> = {};
+  let frontHandler: any = null;
+  // The interceptor the backend registers, so a check can run a prompt through it.
+  let interceptor: any = null;
+  const sent: any[] = [];
+  const writes: Array<{ id: string; content: string }> = [];
+  const asked: any[] = [];
+  const stoppedCalls: number[] = [];
+  const memoryAsked: Array<{ chatId: any; userId: any }> = [];
+  // Every write as it was sent, so a check can read the swipe list rather than
+  // only the text that ended up on screen.
+  const patches: Array<{ id: string; patch: any }> = [];
+  const msgs = messages.map((m) => ({ ...m }));
+  let turn = 0;
+
+  let chatBroken = false;
+  let storageBroken = false;
+  // How long each of the next writes to an account's store takes, in turn, so
+  // a check can have an older save finish after a newer one.
+  const writeDelays: number[] = [];
+  const shared: Record<string, string> = {};
+  // A store handed in stands in for what a backend that restarted, or was
+  // updated, finds already written.
+  const perUser: Record<string, any> = (opts as any).perUser || {};
+  const forbidden: string[] = [];
+  // The secure store, per account, and every call that went out to the
+  // second model.
+  const vault: Record<string, string> = (opts as any).vault || {};
+  const jevCalls: Array<{ url: string; init: any; body: any }> = [];
+  // Lumiverse's own notifications, as the backend asked for them.
+  const notes: Array<{ kind: string; text: string; opts: any }> = [];
+  const note = (kind: string) => (text: string, opts?: any) => {
+    notes.push({ kind: kind, text: text, opts: opts });
+  };
+  // Each time the backend asked Lumiverse to close the drawer, and for whom.
+  const drawerCloses: any[] = [];
+  const spindle = {
+    toast: { success: note("success"), info: note("info"), warning: note("warning"), error: note("error") },
+    // Lumiverse's drawer. Absent for a check standing in for a Lumiverse that
+    // has no way to close it, and refusing for one where the call fails.
+    ...((opts as any).noUi
+      ? {}
+      : {
+          ui: {
+            closeDrawer: async (o?: any) => {
+              drawerCloses.push(o);
+              if ((opts as any).uiFail) throw new Error((opts as any).uiFail);
+            },
+          },
+        }),
+    ...(opts.noDecisions
+      ? {}
+      : {
+          decisions: {
+            evaluate: async (input: any, o?: any) => {
+              // An operator-scoped install refuses a call that names no account.
+              needsUser(input);
+              const body = { connection_id: input.connection_id, model: input.model, state: input.state, questions: input.questions };
+              const init = { body: JSON.stringify(body), signal: o && o.signal };
+              jevCalls.push({ url: "decisions", init: init, body: body });
+              if (!opts.jev) throw new Error("No default Decision connection configured");
+              const res = await opts.jev("decisions", init);
+              if (!res || !res.status) throw new Error((res && res.error) || "Decision operation failed");
+              if (res.status !== 200) throw new Error("Provider answered " + res.status + ": " + String(res.body || "").slice(0, 200));
+              return JSON.parse(String(res.body));
+            },
+            listConnections: async (o?: any) => {
+              needsUser(o);
+              if (opts.decisionList instanceof Error) throw opts.decisionList;
+              return opts.decisionList || [];
+            },
+          },
+        }),
+    enclave: {
+      put: async (k: string, v: string, u?: string) => {
+        vault[String(u) + ":" + k] = v;
+      },
+      get: async (k: string, u?: string) => vault[String(u) + ":" + k] ?? null,
+      has: async (k: string, u?: string) => String(u) + ":" + k in vault,
+      delete: async (k: string, u?: string) => {
+        delete vault[String(u) + ":" + k];
+      },
+      list: async (u?: string) =>
+        Object.keys(vault)
+          .filter((k) => k.indexOf(String(u) + ":") === 0)
+          .map((k) => k.slice(String(u).length + 1)),
+    },
+    on: (name: string, fn: any) => {
+      (handlers[name] = handlers[name] || []).push(fn);
+    },
+    onFrontendMessage: (fn: any) => {
+      frontHandler = fn;
+    },
+    sendToFrontend: (msg: any) => sent.push(msg),
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+    generate: {
+      // The loud one, which posts its result into the chat as a new message.
+      // Calling this instead of quiet would turn every refine into a reply.
+      raw: async () => {
+        forbidden.push("generate.raw");
+        return { content: "" };
+      },
+      rawStream: async () => {
+        forbidden.push("generate.rawStream");
+        return (async function* () {})();
+      },
+      quiet: async (req: any) => {
+        asked.push(req);
+        needsUser(req);
+        if (opts.delays) {
+          const mine = turn;
+          turn++;
+          await new Promise((res, rej) => {
+            const t = setTimeout(res, opts.delays![Math.min(mine, opts.delays!.length - 1)]);
+            if (req.signal)
+              req.signal.addEventListener("abort", () => {
+                clearTimeout(t);
+                stoppedCalls.push(mine);
+                const e: any = new Error("aborted");
+                e.name = "AbortError";
+                rej(e);
+              });
+          });
+          if (opts.errorsAt && opts.errorsAt[mine]) throw new Error(opts.errorsAt[mine]);
+          return { content: answers[Math.min(mine, answers.length - 1)], finish_reason: "stop", usage: {} };
+        }
+        if (opts.whileAsking) opts.whileAsking();
+        if (opts.asking) await opts.asking();
+        if (opts.fail) throw new Error(opts.fail);
+        if (opts.failFirst && opts.failFirst.times > 0) {
+          opts.failFirst.times--;
+          throw new Error(opts.failFirst.why);
+        }
+        const answer = answers[Math.min(turn, answers.length - 1)];
+        turn++;
+        return { content: answer, finish_reason: "stop", usage: {} };
+      },
+      // Only present when the check asks for it, since a host without it is
+      // the case the fallback exists for.
+      quietStream: opts.stream
+        ? async (req: any) => {
+            asked.push(req);
+            needsUser(req);
+            if (opts.fail) throw new Error(opts.fail);
+            const answer = answers[Math.min(turn, answers.length - 1)];
+            turn++;
+            // In the shape Lumiverse hands them over: a token at a time, then
+            // one at the end carrying the whole answer.
+            if (opts.stream === "host")
+              return (async function* () {
+                yield { type: "reasoning", token: "weighing it" };
+                const step = Math.ceil(answer.length / 4);
+                for (let i = 0; i < answer.length; i += step) {
+                  await new Promise((r) => setTimeout(r, 350));
+                  yield { type: "token", token: answer.slice(i, i + step) };
+                }
+                yield { type: "done", content: answer, finish_reason: "stop" };
+              })();
+            return (async function* () {
+              // Handed over in pieces, the way a provider does.
+              for (let i = 0; i < answer.length; i += 12) yield answer.slice(i, i + 12);
+            })();
+          }
+        : undefined,
+    },
+    // Lumiverse's own counter. Absent unless a check asks for it, since most of
+    // them do not care and the fallback is the same guess either way.
+    tokens: opts.tokens
+      ? {
+          countText: async (text: string) => ({
+            total_tokens: Math.ceil(String(text || "").length / 3),
+            approximate: !!opts.tokens.approximate,
+          }),
+        }
+      : undefined,
+    connections: {
+      list: async () => [
+        { id: "c-fast", name: "Cheap and quick", provider: "openai", model: "mini", is_default: false },
+        { id: "c-main", name: "The good one", provider: "anthropic", model: "big", is_default: true },
+        ...((opts as any).bound || []).map((b: any, i: number) => ({
+          id: "c-bound-" + i,
+          name: "Bound " + i,
+          provider: "custom",
+          model: "local",
+          is_default: false,
+          reasoning_bindings: { settings: { prefix: b[0], suffix: b[1], autoParse: true } },
+        })),
+      ],
+    },
+    macros: {
+      // Stands in for Lumiverse's own resolver: the character fields and the
+      // persona, and anything it does not know left as it was.
+      resolve: async (text: string, opt: any) => {
+        if (opts.macroFail) throw new Error(opts.macroFail);
+        // The host resolves a card macro against a real chat. With no chat, or
+        // with the characters permission refused, it comes back empty, which is
+        // what the real one does and what the extension has to cope with.
+        const known = !!(opt && opt.chatId) && !opts.cardFail && !opts.noCard;
+        const card = opts.group && opt && opt.characterId === "ch2" ? OTHER_CARD : CARD;
+        return String(text)
+          .replace(/\{\{description\}\}/g, known ? card.description : "")
+          .replace(/\{\{personality\}\}/g, known ? CARD.personality : "")
+          .replace(/\{\{scenario\}\}/g, known ? CARD.scenario : "")
+          .replace(/\{\{persona\}\}/g, known ? "A traveler who arrived at night." : "")
+          // The name the reader's own character goes by, which is what labels
+          // their side of the run-up. noPersona is a chat with none set.
+          .replace(/\{\{user\}\}/g, known && !opts.noPersona ? "Tam" : "")
+          .replace(/\{\{char\}\}/g, known ? card.name : "");
+      },
+    },
+    world_books: {
+      getActivated: async () => {
+        if (opts.loreFail) throw new Error(opts.loreFail);
+        return opts.noLore ? [] : [{ id: "w1" }, { id: "w2" }];
+      },
+      entries: {
+        get: async (id: string) =>
+          id === "w1"
+            ? { name: "The crossing", content: "The ferry runs at dusk and never after." }
+            : { name: "The gate", content: "The gate is shut at the last bell." },
+      },
+    },
+    chats: {
+      get: async (_chatId?: string, userId?: string) => {
+        if (opts.chatOwner !== undefined && userId !== undefined && userId !== opts.chatOwner) return null;
+        if (opts.whileReading) opts.whileReading();
+        if (opts.chatFail) throw new Error(opts.chatFail);
+        if (opts.noCard) return { id: "c1" };
+        return opts.group
+          ? { id: "c1", character_id: "ch1", metadata: Object.assign({ character_ids: ["ch1", "ch2"] }, opts.chatMeta || {}) }
+          : opts.chatMeta
+            ? { id: "c1", character_id: "ch1", metadata: opts.chatMeta }
+            : { id: "c1", character_id: "ch1" };
+      },
+      // What Lumiverse remembers of the chat, as its own call hands it over:
+      // already written out with the reader's header and chunk templates.
+      // Left off the host entirely when a check asks for a build without it.
+      getMemories: opts.noMemories
+        ? undefined
+        : async (chatId: string, o: any) => {
+            memoryAsked.push({ chatId: chatId, userId: o && o.userId });
+            if (opts.memoryFail) throw new Error(opts.memoryFail);
+            if (opts.memoryOff) return { enabled: false, formatted: "never read this" };
+            return {
+              enabled: true,
+              formatted: opts.noMemory ? "" : "Wren lost a brother to the crossing, years ago.",
+            };
+          },
+    },
+    characters: {
+      get: async (id?: string) => {
+        if (opts.cardReads) opts.cardReads.push(String(id));
+        if (opts.cardFail) throw new Error(opts.cardFail);
+        return opts.group && id === "ch2" ? { ...OTHER_CARD } : { ...CARD };
+      },
+    },
+    chat: {
+      // Every way a host could let an extension put something in the chat.
+      // None of these should ever be called: this extension edits a message
+      // that already exists and does nothing else.
+      createMessage: async () => {
+        forbidden.push("chat.createMessage");
+      },
+      addMessage: async () => {
+        forbidden.push("chat.addMessage");
+      },
+      sendMessage: async () => {
+        forbidden.push("chat.sendMessage");
+      },
+      appendMessage: async () => {
+        forbidden.push("chat.appendMessage");
+      },
+      deleteMessage: async () => {
+        forbidden.push("chat.deleteMessage");
+      },
+      getMessages: async () => {
+        if (chatBroken) throw new Error("the host went away");
+        return msgs.map((m) => ({ ...m }));
+      },
+      updateMessage: async (_chatId: string, id: string, patch: any) => {
+        const m = msgs.find((x) => x.id === id);
+        if (!m) return;
+        Object.assign(m, patch);
+        writes.push({ id: id, content: patch.content });
+        patches.push({ id: id, patch: patch });
+      },
+    },
+    // The old shared store, which every account on a server would read the
+    // same copy of. Kept so the upgrade path can be checked.
+    storage: {
+      read: async (file: string) => (file in shared ? shared[file] : null),
+      write: async (file: string, text: string) => {
+        if (storageBroken) throw new Error("the disk is full");
+        shared[file] = text;
+      },
+    },
+    // Per user, keyed the way the real one is. A check that reads back another
+    // account's key is the whole point of this being here.
+    userStorage: {
+      getJson: async (file: string, o: any) => {
+        const k = String((o && o.userId) || '') + ':' + file;
+        return k in perUser ? perUser[k] : (o && o.fallback) !== undefined ? o.fallback : null;
+      },
+      setJson: async (file: string, value: any, o: any) => {
+        const slow = writeDelays.shift();
+        if (slow) await new Promise((r) => setTimeout(r, slow));
+        if (storageBroken) throw new Error("the disk is full");
+        perUser[String((o && o.userId) || '') + ':' + file] = value;
+      },
+    },
+    permissions: { has: () => true, onChanged: () => {}, onDenied: () => {} },
+    registerInterceptor: (fn: any) => { interceptor = fn; },
+  };
+
+  vm.runInContext(
+    SRC,
+    vm.createContext({
+      spindle,
+      console,
+      setTimeout,
+      clearTimeout,
+      AbortController,
+      Date,
+      JSON,
+      Math,
+      Number,
+      String,
+      Array,
+      Object,
+      Promise,
+      Map,
+      Set,
+      RegExp,
+      Error,
+      isNaN,
+      parseInt,
+      parseFloat,
+      globalThis,
+    }),
+  );
+
+  return {
+    intercept: (messages: any[], context: any) => (interceptor ? interceptor(messages, context) : messages),
+    hasInterceptor: () => !!interceptor,
+    sent,
+    writes,
+    asked,
+    stoppedCalls,
+    memoryAsked,
+    patches,
+    lastPatch: (id: string) => {
+      for (let i = patches.length - 1; i >= 0; i--) if (patches[i].id === id) return patches[i].patch;
+      return null;
+    },
+    // Stands in for the reader rolling another one after the refine.
+    addSwipe: (id: string, text: string) => {
+      const m: any = msgs.find((x) => x.id === id);
+      if (!m) return;
+      m.swipes = (Array.isArray(m.swipes) ? m.swipes : []).concat([text]);
+      m.swipe_id = m.swipes.length - 1;
+      m.content = text;
+    },
+    // Lets a check stand in for another extension writing to the same reply.
+    edit: (id: string, content: string) => {
+      const m = msgs.find((x) => x.id === id);
+      if (m) m.content = content;
+    },
+    body: (id: string) => (msgs.find((m) => m.id === id) || ({} as any)).content,
+    front: (p: any, who?: string) => frontHandler(p, who === undefined ? "u1" : who),
+    drawerCloses,
+    // What each account's store actually holds, and the old shared one.
+    perUser,
+    vault,
+    jevCalls,
+    notes,
+    shared,
+    breakStorage: () => {
+      storageBroken = true;
+    },
+    slowWrites: (...ms: number[]) => {
+      writeDelays.push(...ms);
+    },
+    ended: async (p: any) => {
+      for (const fn of handlers.GENERATION_ENDED || []) await fn(p);
+    },
+    // The other two ends of a generation, so a check can put one in flight and
+    // see what the pass does about it. Auto Retry swiping a refusal looks
+    // exactly like this from here.
+    started: (p: any) => {
+      for (const fn of handlers.GENERATION_STARTED || []) fn(p);
+    },
+    stopped: (p: any) => {
+      for (const fn of handlers.GENERATION_STOPPED || []) fn(p);
+    },
+    // Any other event Lumiverse sends, with the account it is for.
+    fire: (name: string, p: any, who?: string) => {
+      for (const fn of handlers[name] || []) fn(p, who);
+    },
+    stood: () => sent.filter((m) => m.type === "refine_stood_down").map((m) => m.why),
+    skipped: () => sent.filter((m) => m.type === "refine_skipped").map((m) => m.why),
+    // Anything called that would have put something in the chat.
+    forbidden,
+    // Makes the host fail the way a host that went away does.
+    breakChat: () => {
+      chatBroken = true;
+    },
+  };
+}
+
+const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+const chat = (): Msg[] => [
+  // Written by a person. This is the one message that is never refined.
+  { id: "m0", role: "assistant", content: "The gate stands open, and the road past it is dark." },
+  { id: "m1", role: "user", content: "i walk through it" },
+  { id: "m2", role: "assistant", content: "She stepped through and, suddenly, the cold just hit her." },
+];
+
+async function armed(answers: string[], over: any = {}, messages = chat(), opts = {}) {
+  const h = host(messages, answers, opts);
+  await h.front({ type: "set_settings", settings: { ...RULES, ...over } });
+  return h;
+}
+
+
+// Two questions that look like one. A build that announces the same generation
+// twice must never buy a second refine, whatever the setting says. Going back
+// to a reply that has since been swiped or regenerated is a different thing,
+// and that one is the reader's to choose.
+// With no connection picked, a call that names none goes to Lumiverse's
+// default connection, which is not always the one the chat uses.
+describe("the connection a refine goes to", () => {
+  const reply = ["She stepped through and the cold hit her."];
+
+  test("with none picked, a chat set to its own connection and model is used", async () => {
+    const h = await armed(reply, {}, chat(), { chatMeta: { connection_profile_id: "conn-chat", connection_model: "lamplight-small" } });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked[0].connection_id).toBe("conn-chat");
+    expect(h.asked[0].parameters).toMatchObject({ model: "lamplight-small" });
+  });
+
+  test("one picked for refining wins", async () => {
+    const h = await armed(reply, { connectionId: "conn-cheap" }, chat(), { chatMeta: { connection_profile_id: "conn-chat" } });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked[0].connection_id).toBe("conn-cheap");
+  });
+
+  // Lumiverse tells the interceptor which connection a reply goes to, which
+  // is the only way to learn the one picked in Lumiverse.
+  test("with none picked, the connection the chat's last reply used is used", async () => {
+    const h = await armed(reply);
+    expect(h.hasInterceptor()).toBe(true);
+    const prompt = [{ role: "user", content: "The bell rang twice." }];
+    const back = await h.intercept(prompt, { chatId: "c1", connectionId: "conn-picked", generationType: "normal", userId: "u1" });
+    // The prompt is handed back as it came.
+    expect(back).toBe(prompt);
+    expect(prompt).toEqual([{ role: "user", content: "The bell rang twice." }]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked[0].connection_id).toBe("conn-picked");
+  });
+
+  test("a background call or a prompt preview does not count as the chat's reply", async () => {
+    const h = await armed(reply);
+    await h.intercept([], { chatId: "c1", connectionId: "conn-quiet", generationType: "quiet" });
+    await h.intercept([], { chatId: "c1", connectionId: "conn-preview", generationType: "normal", dryRun: true });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked[0].connection_id).toBeUndefined();
+  });
+
+  test("a chat set to no connection leaves it to Lumiverse", async () => {
+    const h = await armed(reply);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked[0].connection_id).toBeUndefined();
+  });
+});
+
+describe("going over a reply more than once", () => {
+  test("one generation announced twice is refined once", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("and is still refined once with the setting on", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineAgain: true });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  // A swipe is a second generation on the same message, so the id is new and
+  // the text is somebody else's writing again.
+  test("a new generation on the same reply is left alone by default", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("and is refined again with the setting on", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineAgain: true });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(50);
+    expect(h.asked.length).toBe(2);
+  });
+
+  // A build that names no generation has only the message id to go on, which is
+  // the older guard and the one that has to hold there.
+  test("with no generation named, a second event is still refused", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineAgain: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+  });
+});
+
+// Auto Retry says in the page when it sets a retry of a chat's reply, and when
+// it calls one off. A reply about to be replaced is not refined: the call
+// would be paid for writing nobody reads. A retry called off leaves the reply,
+// so it is refined after all.
+describe("a reply Auto Retry is going to retry", () => {
+  // Lumiverse tells this side a reply ended at the same moment it tells Auto
+  // Retry in the page, and Auto Retry's word comes back through the panel a
+  // moment later. The automatic pass waits for it.
+  test("is left when Auto Retry's word arrives just after the reply ends", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_judging", chatId: "c1" });
+    const ending = h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(40);
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.front({ type: "retry_judged", chatId: "c1" });
+    await ending;
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.stood().join(" ")).toMatch(/Auto Retry is going to retry this reply/);
+  });
+
+  test("and a reply Auto Retry passes is refined once it says so", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_judging", chatId: "c1" });
+    const ending = h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(40);
+    expect(h.asked.length).toBe(0);
+    await h.front({ type: "retry_judged", chatId: "c1" });
+    await ending;
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("a chat Auto Retry is not judging is not waited on", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("with no word from Auto Retry, the refine goes ahead after the wait", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_judging", chatId: "c1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  }, 10000);
+
+  test("is left, with no model asked", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.stood().join(" ")).toMatch(/Auto Retry is going to retry this reply/);
+  });
+
+  test("and is refined after all when the retry is called off", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    await h.front({ type: "retry_off", chatId: "c1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("a retry called off with nothing left asks nothing", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.front({ type: "retry_off", chatId: "c1" });
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+  });
+
+  test("the retry's own reply is refined when it ends", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    h.started({ chatId: "c1", generationId: "g2" });
+    h.edit("m2", "A fresh reply from the retry, long enough to be refined.");
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    // The reply the retry replaced is not refined afterwards when nothing calls it off.
+    await h.front({ type: "retry_off", chatId: "c1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("a reroll Auto Retry adds is refined", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.front({ type: "reroll_added", chatId: "c1", messageId: "m2", swipe: 1 });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  // A turn that failed before any text came back saved no reply, so Auto
+  // Retry adds the reply that passed as a new message, with one version.
+  test("a new reply Auto Retry adds after a turn that saved none is refined, and the chat is let go", async () => {
+    const h = await armed(["She stepped through and the cold hit her.", "The next reply, refined as usual."]);
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.front({ type: "reroll_added", chatId: "c1", messageId: "m2", swipe: 0 });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    h.started({ chatId: "c1", generationId: "g5" });
+    h.edit("m2", "A later reply in the same chat, long enough to be refined.");
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g5" });
+    await wait(60);
+    expect(h.asked.length).toBe(2);
+  });
+
+  test("a refine asked for by hand still runs", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineAgain: true });
+    await h.front({ type: "retry_pending", chatId: "c1" });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("another chat is not held", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "retry_pending", chatId: "c9" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+});
+
+// One install serving several accounts. The settings live in one set of
+// variables, so each account's work runs in its own turn with its own settings,
+// and another account's work waits for the turn to end.
+describe("several accounts on one install", () => {
+  const A = { ...RULES, connectionId: "conn-a" };
+  const B = { ...RULES, connectionId: "conn-b" };
+
+  test("a chat on another account is not read, refined or previewed", async () => {
+    const h = host(chat(), ["She stepped through and the cold hit her."], { chatOwner: "a" });
+    await h.front({ type: "set_settings", settings: RULES }, "b");
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" }, "b");
+    await h.front({ type: "preview_prompt", requestId: "p1", chatId: "c1", messageId: "m2" }, "b");
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    const result = h.sent.find((m) => m.type === "refine_result" && m.requestId === "r1");
+    expect(result && result.ok).toBe(false);
+    expect(result.why).toContain("could not find that chat on your account");
+    const preview = h.sent.find((m) => m.type === "prompt_preview" && m.requestId === "p1");
+    expect(preview && preview.ok).toBe(false);
+    await h.front({ type: "refine_all", requestId: "w1", chatId: "c1" }, "b");
+    await wait(30);
+    const whole = h.sent.find((m) => m.type === "refine_all_done" && m.requestId === "w1");
+    expect(whole && whole.saved).toBe(0);
+    expect(whole.why).toContain("could not find that chat on your account");
+    expect(h.asked.length).toBe(0);
+    expect(JSON.stringify(h.sent)).not.toContain("the cold hit her");
+  });
+
+  test("the account that owns the chat can refine it", async () => {
+    const h = host(chat(), ["She stepped through and the cold hit her."], { chatOwner: "a" });
+    await h.front({ type: "set_settings", settings: RULES }, "a");
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" }, "a");
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("a refine runs with the settings of the account that asked", async () => {
+    const h = host(chat(), ["She stepped through and the cold hit her."]);
+    await h.front({ type: "set_settings", settings: A }, "a");
+    await h.front({ type: "set_settings", settings: B }, "b");
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" }, "a");
+    await wait(30);
+    expect(h.asked[0].connection_id).toBe("conn-a");
+    expect(h.asked[0].userId).toBe("a");
+  });
+
+  test("and the other account's refine runs with its own", async () => {
+    const h = host(chat(), ["She stepped through and the cold hit her."]);
+    await h.front({ type: "set_settings", settings: A }, "a");
+    await h.front({ type: "set_settings", settings: { ...B, refineAgain: true } }, "b");
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" }, "b");
+    await wait(30);
+    expect(h.asked[0].connection_id).toBe("conn-b");
+    expect(h.asked[0].userId).toBe("b");
+  });
+
+  test("a second account waits for the first account's refine, then uses its own settings", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const h = host(chat(), ["She stepped through and the cold hit her."], {
+      asking: () => (calls++ === 0 ? held : Promise.resolve()),
+    });
+    await h.front({ type: "set_settings", settings: { ...A, refineAgain: true } }, "a");
+    await h.front({ type: "set_settings", settings: { ...B, refineAgain: true } }, "b");
+    const first = h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" }, "a");
+    await wait(20);
+    const second = h.front({ type: "refine_now", requestId: "r2", chatId: "c1", messageId: "m2" }, "b");
+    await wait(30);
+    // Only the first has reached the model. The second has been told it is waiting.
+    expect(h.asked.length).toBe(1);
+    expect(h.sent.some((m: any) => m.type === "refine_progress" && m.stage === "queued")).toBe(true);
+    release();
+    await first;
+    await second;
+    expect(h.asked.length).toBe(2);
+    expect(h.asked[0].connection_id).toBe("conn-a");
+    expect(h.asked[1].connection_id).toBe("conn-b");
+  });
+
+  test("settings sent during another account's turn do not change the refine that is running", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    const h = host(chat(), ["She stepped through and the cold hit her."], { asking: () => held });
+    await h.front({ type: "set_settings", settings: { ...A, keepOriginal: true } }, "a");
+    const first = h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" }, "a");
+    await wait(20);
+    // B's panel sends settings that would not keep the original. That is read
+    // when the rewrite is saved, after the model has answered.
+    await h.front({ type: "set_settings", settings: { ...B, keepOriginal: false } }, "b");
+    release();
+    await first;
+    const saved = h.sent.find((m: any) => m.type === "refined");
+    expect(saved && saved.canUndo).toBe(true);
+  });
+
+  test("the automatic pass uses the account the event names", async () => {
+    const h = host(chat(), ["She stepped through and the cold hit her."]);
+    await h.front({ type: "set_settings", settings: A }, "a");
+    await h.front({ type: "set_settings", settings: B }, "b");
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1", userId: "a" });
+    await wait(30);
+    expect(h.asked[0].connection_id).toBe("conn-a");
+  });
+
+  test("without one named, the account that can see the chat is used", async () => {
+    const h = host(chat(), ["She stepped through and the cold hit her."], { chatOwner: "a" });
+    await h.front({ type: "set_settings", settings: A }, "a");
+    await h.front({ type: "set_settings", settings: B }, "b");
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(30);
+    expect(h.asked[0].connection_id).toBe("conn-a");
+    expect(h.asked[0].userId).toBe("a");
+  });
+
+  test("a chat switched off by one account is not switched off for another", async () => {
+    const h = host(chat(), ["She stepped through and the cold hit her."]);
+    await h.front({ type: "set_settings", settings: A }, "a");
+    await h.front({ type: "set_chats_off", chats: ["c1"] }, "a");
+    await h.front({ type: "set_settings", settings: B }, "b");
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1", userId: "b" });
+    await wait(30);
+    expect(h.asked.length).toBe(1);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g2", userId: "a" });
+    await wait(30);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("one account's refines never wait for each other", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let calls = 0;
+    const h = host(chat(), ["She stepped through and the cold hit her."], {
+      asking: () => (calls++ === 0 ? held : Promise.resolve()),
+    });
+    await h.front({ type: "set_settings", settings: { ...A, refineAgain: true } }, "a");
+    const first = h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" }, "a");
+    await wait(20);
+    const second = h.front({ type: "refine_now", requestId: "r2", chatId: "c1", messageId: "m2" }, "a");
+    await wait(30);
+    expect(h.asked.length).toBe(2);
+    expect(h.sent.some((m: any) => m.stage === "queued")).toBe(false);
+    release();
+    await first;
+    await second;
+  });
+});
+
+// Two models. The second model answers each check with a chance from 0 to 1,
+// and the refine model runs only where one reaches the line. The second model
+// failing in any way costs a call, never a refine: the reply is refined as it
+// is with one model.
+describe("two models: the second model reads the reply first", () => {
+  // The second model as a Decision connection answers it: one noul answer per
+  // question, the model that answered, and what it cost.
+  const says = (pcts: number[]) => (_url: string, init: any) => {
+    const b = JSON.parse(init.body);
+    const answers: any = {};
+    Object.keys(b.questions).forEach((id, i) => {
+      answers[id] = { type: "noul", noul: (pcts[i] ?? pcts[pcts.length - 1]) / 100 };
+    });
+    return { status: 200, body: JSON.stringify({ model: "typesafe/jev-1.14", answers: answers, usage: { cost: 0.00002 } }) };
+  };
+  const TWO = { judgeMode: "two", judgeChecks: "`reply` repeats itself.\n`reply` uses stock phrases." };
+  const REPLY = "She stepped through and, suddenly, the cold just hit her.";
+  async function two(over: any, opts: any, messages = chat()) {
+    return armed(["She stepped through and the cold hit her."], { ...TWO, ...over }, messages, opts);
+  }
+  const said = (h: any) => h.sent.filter((m: any) => m.type === "judge_said");
+
+  test("a reply with every check under the line is left alone, and the refine model is not asked", async () => {
+    const h = await two({}, { jev: says([10, 20]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.jevCalls.length).toBe(1);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe(REPLY);
+    // Named by the model that answered, without its maker.
+    expect(h.stood().some((w: string) => /^jev-1\.14 found nothing/.test(w) && /highest was 20%/.test(w))).toBe(true);
+  });
+
+  test("a check at the line is refined", async () => {
+    const h = await two({}, { jev: says([10, 50]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    expect(said(h)[0].refine).toBe(true);
+    expect(said(h)[0].scores.map((x: any) => x.pct)).toEqual([10, 50]);
+  });
+
+  test("the line is the setting, not a fixed half", async () => {
+    const h = await two({ judgeOver: 80 }, { jev: says([70]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+  });
+
+  test("the line is 30 by default", async () => {
+    const over = await two({}, { jev: says([31]) });
+    await over.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(over.asked.length).toBe(1);
+    const under = await two({}, { jev: says([29]) });
+    await under.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(under.asked.length).toBe(0);
+  });
+
+  test("what goes to the second model is the reply and the checks, through the default connection", async () => {
+    const h = await two({}, { jev: says([10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const call = h.jevCalls[0];
+    // No connection named, so Lumiverse uses the default Decision connection.
+    expect(call.body.connection_id).toBeUndefined();
+    expect(call.body.model).toBeUndefined();
+    expect(call.body.state).toEqual({ reply: REPLY });
+    expect(call.body.questions).toEqual({
+      check_1: { type: "noul", instructions: "`reply` repeats itself." },
+      check_2: { type: "noul", instructions: "`reply` uses stock phrases." },
+    });
+  });
+
+  test("a connection picked is named in the call", async () => {
+    const h = await two({ judgeConnection: "dc-7" }, { jev: says([10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.jevCalls[0].body.connection_id).toBe("dc-7");
+  });
+
+  // Another extension's block in the reply is hidden on screen, so the second
+  // model reads the reply without it. The tag name is made up.
+  test("the second model is not sent another extension's block", async () => {
+    const c = chat();
+    c[2].content = REPLY + '\n<tide-note kind="dm">{"text":"Bring the spare lantern."}</tide-note>';
+    const h = await two({}, { jev: says([10]) }, c);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(String(h.jevCalls[0].body.state.reply)).not.toContain("spare lantern");
+  });
+
+  test("the panel is told which model answered", async () => {
+    const h = await two({}, { jev: says([10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(said(h)[0].model).toBe("typesafe/jev-1.14");
+  });
+
+  // Anything that stops the second model answering refines the reply anyway,
+  // and says why in plain words.
+  test("a provider error refines anyway, and says what the provider said", async () => {
+    const h = await two({}, { jev: () => ({ status: 401, body: '{"error":"no"}' }) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    expect(said(h)[0].failed).toBe(true);
+    expect(said(h)[0].why).toMatch(/^the second model could not be asked: Provider answered 401/);
+  });
+
+  test("no default Decision connection refines anyway, and says where to set one up", async () => {
+    const h = await two({}, {});
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    expect(said(h)[0].why).toMatch(/no default Decision connection/);
+    expect(said(h)[0].why).toMatch(/Decision models in Lumiverse's Connections panel/);
+  });
+
+  test("a connection that is gone says to pick another", async () => {
+    const h = await two({ judgeConnection: "gone" }, {
+      jev: () => {
+        throw new Error("Decision connection not found");
+      },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(said(h)[0].why).toMatch(/picked is gone/);
+  });
+
+  test("the permission refused says so", async () => {
+    const h = await two({}, {
+      jev: () => {
+        // Lumiverse's own words, which put a long dash before the reason.
+        throw new Error("Permission denied: decisions \u2014 Decision model permission not granted");
+      },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(said(h)[0].why).toMatch(/Decision models permission is refused/);
+  });
+
+  test("a Lumiverse with no Decision connections for extensions says to update it", async () => {
+    const h = await two({}, { noDecisions: true });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    expect(said(h)[0].why).toMatch(/Update Lumiverse/);
+  });
+
+  test("pressing the button is never held back by the second model", async () => {
+    const h = await two({}, { jev: says([0]) });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.jevCalls.length).toBe(0);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("with Let it check refines you start yourself on, the button asks it first", async () => {
+    const h = await two({ judgeByHand: true }, { jev: says([80]) });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.jevCalls.length).toBe(1);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("and a reply it finds nothing wrong with is left alone, and says so", async () => {
+    const h = await two({ judgeByHand: true }, { jev: says([10]) });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.jevCalls.length).toBe(1);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe(REPLY);
+    expect(said(h).length).toBe(1);
+  });
+
+  test("but your own message is never sent to it, switch or not", async () => {
+    const h = await two({ judgeByHand: true }, { jev: says([80]) });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(50);
+    expect(h.jevCalls.length).toBe(0);
+  });
+
+  // Stop reaches the call to the second model, and calls it off.
+  test("Stop while it reads the reply calls the request off and refines nothing", async () => {
+    let h: any = null;
+    let aborted = false;
+    h = await two({}, {
+      jev: (url: string, init: any) =>
+        new Promise((resolve) => {
+          const sig = init.signal;
+          if (sig) sig.addEventListener("abort", () => {
+            aborted = true;
+            resolve({ status: 0, error: "AbortError: the operation was aborted" });
+          });
+          setTimeout(() => h.front({ type: "cancel_refine", requestId: "s" }), 10);
+        }),
+    });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(aborted).toBe(true);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe(REPLY);
+  });
+
+  // {{checks_found}} hands the refine model what the second model picked out,
+  // so it does not have to find the problems again from nothing.
+  const FOUND_BLOCKS = [
+    { id: "t", name: "Passage", on: true, role: "user", text: "<passage>\n{{message}}\n</passage>" },
+    { id: "j", name: "Found", on: true, role: "system", text: "<found>\n{{checks_found}}\n</found>" },
+  ];
+  const sentText = (h: any) => (h.asked[0].messages || []).map((m: any) => m.content).join("\n\n");
+
+test("{{checks_found}} lists the checks that reached the line, strongest first", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS }, { jev: says([60, 90]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const text = sentText(h);
+    expect(text).toContain("<found>");
+    expect(text).toContain("Treat each one as a lead to check.");
+    expect(text).toContain("line of 30%");
+    const first = text.indexOf("- reply uses stock phrases. (90%)");
+    const second = text.indexOf("- reply repeats itself. (60%)");
+    expect(first).toBeGreaterThan(-1);
+    expect(second).toBeGreaterThan(first);
+  });
+test("and leaves out a check under the line", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS }, { jev: says([20, 90]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const text = sentText(h);
+    expect(text).toContain("- reply uses stock phrases. (90%)");
+    expect(text).not.toContain("repeats itself");
+  });
+test("the line is the reader's own, not a fixed half", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS, judgeOver: 65 }, { jev: says([60, 70]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const text = sentText(h);
+    expect(text).toContain("line of 65%");
+    expect(text).toContain("- reply uses stock phrases. (70%)");
+    expect(text).not.toContain("repeats itself");
+  });
+
+  // A real request is not shown anywhere, so the panel is told when what the second model
+  // found went into it, and how many checks.
+  test("the panel is told what the second model found went to the refine model", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS }, { jev: says([60, 90]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const told = h.sent.filter((m: any) => m.type === "jev_found_sent");
+    expect(told.length).toBe(1);
+    expect(told[0].count).toBe(2);
+  });
+
+  test("but not when no block takes it", async () => {
+    const h = await two({}, { jev: says([60, 90]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    expect(h.sent.some((m: any) => m.type === "jev_found_sent")).toBe(false);
+  });
+
+  // The preview never asks the second model, so it says the block is left out rather than
+  // showing a request without it and calling that what is sent.
+  test("the preview says Checks Found is left out, with two models and a block for it", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS }, { jev: says([90]) });
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1" });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "prompt_preview" && m.requestId === "p");
+    expect(got.jevFoundLeftOut).toBe(true);
+    expect(h.jevCalls.length).toBe(0);
+  });
+
+  test("and does not with one model", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS, judgeMode: "one" }, { jev: says([90]) });
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1" });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "prompt_preview" && m.requestId === "p");
+    expect(got.jevFoundLeftOut).toBe(false);
+  });
+
+  test("when the second model did not read the reply, the block is left out", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS }, { jev: says([90]) });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.jevCalls.length).toBe(0);
+    expect(sentText(h)).not.toContain("<found>");
+  });
+
+  test("and when the second model could not decide, it is left out too", async () => {
+    const h = await two({ blocks: FOUND_BLOCKS }, {
+      jev: () => {
+        throw new Error("the provider fell over");
+      },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    expect(sentText(h)).not.toContain("<found>");
+  });
+
+  // Have it check the rewrite: it reads what the refine model wrote, and a
+  // check still at or over the line gets the reply one more refine, once.
+  const FIRST = "She stepped through and the cold hit her.";
+  const SECOND = "The cold hit her as she stepped through.";
+  // Its answers in turn: the first list for the reply, the next for the
+  // rewrite.
+  const inTurn = (...lists: number[][]) => {
+    let i = 0;
+    return (url: string, init: any) => says(lists[Math.min(i++, lists.length - 1)])(url, init);
+  };
+  async function twoWith(answers: string[], over: any, opts: any) {
+    return armed(answers, { ...TWO, ...over }, chat(), opts);
+  }
+
+  test("with Have it check the rewrite off, it reads the reply once", async () => {
+    const h = await twoWith([FIRST, SECOND], {}, { jev: inTurn([80], [80]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.jevCalls.length).toBe(1);
+    expect(h.asked.length).toBe(1);
+    expect(h.body("m2")).toBe(FIRST);
+  });
+
+  test("on, a rewrite it finds nothing more in is saved as it is", async () => {
+    const h = await twoWith([FIRST, SECOND], { judgeAfter: true }, { jev: inTurn([80], [10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.jevCalls.length).toBe(2);
+    expect(h.jevCalls[1].body.state.reply).toBe(FIRST);
+    expect(h.asked.length).toBe(1);
+    expect(h.body("m2")).toBe(FIRST);
+    const again = said(h).filter((m: any) => m.after);
+    expect(again.length).toBe(1);
+    expect(again[0].refine).toBe(false);
+  });
+
+  test("on, a check still over the line gets one more refine, with what the second model found this time", async () => {
+    const h = await twoWith([FIRST, SECOND], { judgeAfter: true, blocks: FOUND_BLOCKS }, { jev: inTurn([90, 20], [20, 70]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(h.jevCalls.length).toBe(2);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe(SECOND);
+    const second = (h.asked[1].messages || []).map((m: any) => m.content).join("\n\n");
+    expect(second).toContain(FIRST);
+    expect(second).toContain("- reply uses stock phrases. (70%)");
+    expect(second).not.toContain("repeats itself");
+    expect(h.sent.some((m: any) => m.type === "refine_progress" && m.stage === "again")).toBe(true);
+    const told = h.sent.filter((m: any) => m.type === "jev_found_sent");
+    expect(told.length).toBe(2);
+    expect(told[1].after).toBe(true);
+    expect(told[1].count).toBe(1);
+  });
+
+  test("and only once, however the second rewrite reads", async () => {
+    const h = await twoWith([FIRST, SECOND], { judgeAfter: true }, { jev: inTurn([90], [90], [90]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(h.jevCalls.length).toBe(2);
+    expect(h.asked.length).toBe(2);
+  });
+
+  test("a second refine that is turned down leaves the first rewrite saved, and says so", async () => {
+    const h = await twoWith([FIRST, ""], { judgeAfter: true }, { jev: inTurn([90], [90]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(h.body("m2")).toBe(FIRST);
+    expect(h.sent.some((m: any) => m.type === "refine_again_dropped")).toBe(true);
+  });
+
+  test("The second model failing on the rewrite keeps the rewrite", async () => {
+    let n = 0;
+    const jev = (url: string, init: any) => (n++ === 0 ? says([90])(url, init) : { status: 500, body: "{}" });
+    const h = await twoWith([FIRST, SECOND], { judgeAfter: true }, { jev: jev });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(h.body("m2")).toBe(FIRST);
+    expect(said(h).filter((m: any) => m.after)[0].failed).toBe(true);
+  });
+
+  test("Stop while it reads the rewrite saves nothing", async () => {
+    let n = 0;
+    let h: any = null;
+    const jev = (url: string, init: any) => {
+      if (n++ === 0) return says([90])(url, init);
+      h.front({ type: "cancel_refine", requestId: "s" });
+      return says([10])(url, init);
+    };
+    h = await twoWith([FIRST, SECOND], { judgeAfter: true }, { jev: jev });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.jevCalls.length).toBe(2);
+    expect(h.body("m2")).toBe(REPLY);
+  });
+
+  test("Stop during the second refine saves nothing, not even the first rewrite", async () => {
+    let h: any = null;
+    let asks = 0;
+    h = await twoWith([FIRST, SECOND], { judgeAfter: true }, {
+      jev: inTurn([90], [90]),
+      whileAsking: () => {
+        if (asks++ === 1) h.front({ type: "cancel_refine", requestId: "s" });
+      },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe(REPLY);
+  });
+
+  test("a button refine with the second model left out of it is never checked afterwards either", async () => {
+    const h = await twoWith([FIRST, SECOND], { judgeAfter: true }, { jev: inTurn([90], [90]) });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.jevCalls.length).toBe(0);
+    expect(h.asked.length).toBe(1);
+  });
+
+  // Refine every reply here is a refine you start yourself, one reply at a
+  // time, so it follows the same switch as the button on a message.
+  const twoReplies = (): Msg[] => [
+    ...chat(),
+    { id: "m3", role: "user", content: "i keep going" },
+    { id: "m4", role: "assistant", content: "The road bent, and, suddenly, the trees just closed over it." },
+  ];
+
+  test("refining every reply goes straight to the refine model with the switch off", async () => {
+    const h = await two({}, { jev: says([80]) }, twoReplies());
+    await h.front({ type: "refine_all", requestId: "a", chatId: "c1" });
+    await wait(150);
+    expect(h.jevCalls.length).toBe(0);
+    expect(h.asked.length).toBe(2);
+  });
+
+  test("with the switch on, it reads each reply first, and one per reply", async () => {
+    const h = await two({ judgeByHand: true }, { jev: says([80]) }, twoReplies());
+    await h.front({ type: "refine_all", requestId: "a", chatId: "c1" });
+    await wait(150);
+    expect(h.jevCalls.length).toBe(2);
+    expect(h.asked.length).toBe(2);
+  });
+
+  test("and the replies it finds nothing wrong with are left alone", async () => {
+    const h = await two({ judgeByHand: true }, { jev: says([10]) }, twoReplies());
+    await h.front({ type: "refine_all", requestId: "a", chatId: "c1" });
+    await wait(150);
+    expect(h.jevCalls.length).toBe(2);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe(REPLY);
+  });
+
+  test("with one model the second model is never asked", async () => {
+    const h = await two({ judgeMode: "one" }, { jev: says([0]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.jevCalls.length).toBe(0);
+    expect(h.asked.length).toBe(1);
+    // Nothing about the second model reaches the panel either, so the Log has no line about it.
+    expect(said(h).length).toBe(0);
+    expect(h.sent.some((m: any) => m.type === "refine_progress" && m.stage === "judging")).toBe(false);
+  });
+
+  test("Test asks one small question with nothing from any chat in it", async () => {
+    const h = await two({}, { jev: says([100]) });
+    await h.front({ type: "jev_test", requestId: "t" });
+    expect(h.jevCalls[0].body.state).toEqual({ reply: "The cat looked me right in the eye, then slowly pushed my coffee off the table. Then the spoon. Then my phone." });
+    const done = h.sent.find((m: any) => m.type === "jev_tested");
+    expect(done.ok).toBe(true);
+  });
+
+  test("Test tells the panel its score, cost and the model that answered", async () => {
+    const h = await two({ judgeOver: 60 }, { jev: says([97]) });
+    await h.front({ type: "jev_test", requestId: "t" });
+    const done = h.sent.find((m: any) => m.type === "jev_tested");
+    expect(done.pct).toBe(97);
+    expect(done.over).toBe(60);
+    expect(done.cost).toBe(0.00002);
+    expect(done.model).toBe("typesafe/jev-1.14");
+    expect(done.check).toMatch(/cat/);
+  });
+
+  test("a test answered with a score outside 0 to 1 fails, like a real reply would", async () => {
+    const h = await two({}, { jev: says([140]) });
+    await h.front({ type: "jev_test", requestId: "t" });
+    const done = h.sent.find((m: any) => m.type === "jev_tested");
+    expect(done.ok).toBe(false);
+    expect(done.pct).toBe(null);
+    expect(done.why).toMatch(/not with a usable score/);
+  });
+
+  // Show me the request builds its own scene. {{overused}} has to be filled
+  // there the same way, or the preview drops a block a refine sends.
+  test("the preview fills {{overused}} the way a refine does", async () => {
+    const worn: Msg[] = [
+      { id: "m0", role: "assistant", content: "The gate stood open and the cold wind bit at her face." },
+      { id: "m1", role: "user", content: "i go on" },
+      { id: "m2", role: "assistant", content: "Rain came down and the cold wind bit at her hands." },
+      { id: "m3", role: "user", content: "i keep going" },
+      { id: "m4", role: "assistant", content: "She went through the gate, and the cold wind bit at her again." },
+    ];
+    const WORN = { id: "worn", name: "Worn", on: true, role: "system", text: "<worn>\n{{overused}}\n</worn>" };
+    const h = await two({ wornOn: true, wornLeast: 2, blocks: FOUND_BLOCKS.concat([WORN]) }, { jev: says([10]) }, worn);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m4" });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "prompt_preview" && m.requestId === "p");
+    const text = (got.messages || []).map((m: any) => m.content).join("\n");
+    expect(text).toContain("<worn>");
+    expect(text).toMatch(/cold wind bit/);
+  });
+
+  // With several passes, a refine sends each pass's own prompt. The preview
+  // builds the first one and names them all, and never shows the Prompt tab's
+  // list, which is not sent.
+  test("with several passes, the preview is the first pass, and names them all", async () => {
+    const pass = (name: string, line: string) => ({
+      name: name,
+      on: true,
+      blocks: [
+        { id: "r", name: "Rule", on: true, role: "system", text: line },
+        { id: "t", name: "Passage", on: true, role: "user", text: "<passage>\n{{message}}\n</passage>" },
+      ],
+    });
+    const h = await two(
+      {
+        blocks: [{ id: "tab", name: "Tab", on: true, role: "user", text: "THE PROMPT TAB LIST {{message}}" }],
+        passMode: "many",
+        passes: [pass("Tighten", "FIRST PASS RULE"), pass("Polish", "SECOND PASS RULE")],
+      },
+      { jev: says([10]) },
+    );
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1" });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "prompt_preview" && m.requestId === "p");
+    const text = (got.messages || []).map((m: any) => m.content).join("\n");
+    expect(text).toContain("FIRST PASS RULE");
+    expect(text).not.toContain("SECOND PASS RULE");
+    expect(text).not.toContain("THE PROMPT TAB LIST");
+    expect(got.passes).toEqual(["Tighten", "Polish"]);
+  });
+
+  test("worn phrases are asked about when they are on", async () => {
+    const worn: Msg[] = [
+      { id: "m0", role: "assistant", content: "The gate stood open and the cold wind bit at her face." },
+      { id: "m1", role: "user", content: "i go on" },
+      { id: "m2", role: "assistant", content: "Rain came down and the cold wind bit at her hands." },
+      { id: "m3", role: "user", content: "i keep going" },
+      { id: "m4", role: "assistant", content: "She went through the gate, and the cold wind bit at her again." },
+    ];
+    const h = await two({ wornOn: true, wornLeast: 2 }, { jev: says([10]) }, worn);
+    await h.ended({ chatId: "c1", messageId: "m4", generationId: "g1" });
+    await wait(50);
+    const body = h.jevCalls[0].body;
+    expect(body.state.worn_phrases).toMatch(/cold wind bit/);
+    expect(body.questions.worn.type).toBe("noul");
+  });
+
+  // The reply before this one, sent when the reader asks, so a check can
+  // compare the two. It is the last reply before it, with the reader's own
+  // messages and the model's working left out.
+  const BEATS = "`reply` follows the same order of events as `previous_reply`.";
+  const EARLIER = "The gate stands open, and the road past it is dark.";
+
+  test("the reply before it is not sent unless asked for", async () => {
+    const h = await two({ judgeChecks: "`reply` repeats itself.\n" + BEATS }, { jev: says([10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.jevCalls[0].body.state).toEqual({ reply: REPLY });
+    // A check about a reply that is not sent is not asked.
+    expect(Object.keys(h.jevCalls[0].body.questions)).toEqual(["check_1"]);
+  });
+
+  test("asked for, it goes as previous_reply, without the working, and the check is asked", async () => {
+    const msgs = chat();
+    msgs[0].content = "<think>\nThe plan for the gate\n</think>\n\n" + EARLIER;
+    const h = await two({ judgeBefore: true, judgeChecks: BEATS }, { jev: says([10]) }, msgs);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.jevCalls[0].body.state).toEqual({ reply: REPLY, previous_reply: EARLIER });
+    expect(h.jevCalls[0].body.questions.check_1.instructions).toBe(BEATS);
+  });
+
+  test("a reply hidden from the prompt is not the reply before it", async () => {
+    const msgs: any[] = chat();
+    msgs.splice(1, 0, { id: "mh", role: "assistant", content: "A draft about the lighthouse keeper.", extra: { hidden: true } });
+    msgs[0].content = EARLIER;
+    const h = await two({ judgeBefore: true, judgeChecks: BEATS }, { jev: says([10]) }, msgs);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.jevCalls[0].body.state).toEqual({ reply: REPLY, previous_reply: EARLIER });
+  });
+
+  // Nobody has to write a check for it: the switch brings the panel's list,
+  // and the backend holds the same list for settings that do not carry it.
+  const BEFORE_LIST = String((__testing as any).BEFORE_CHECKS).split("\n");
+  const BUILT_IN_BEFORE = BEFORE_LIST.map((_: string, i: number) => "before_" + (i + 1));
+
+  test("on, the checks about repeating the reply before it are added", async () => {
+    const h = await two({ judgeBefore: true, judgeBeforeChecks: undefined }, { jev: says([10, 20, 10, 10, 10, 10, 70]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const q = h.jevCalls[0].body.questions;
+    expect(Object.keys(q)).toEqual(["check_1", "check_2", ...BUILT_IN_BEFORE]);
+    // The backend's own list is the panel's, word for word.
+    expect(BUILT_IN_BEFORE.map((id: string) => q[id].instructions)).toEqual(BEFORE_LIST);
+    // A hit on one refines the reply like any check, and it is shown as written.
+    const got = said(h)[0];
+    expect(got.scores.map((x: any) => x.check).slice(2)).toEqual(BEFORE_LIST);
+    expect(got.refine).toBe(true);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("the reader's own comparison checks replace the built-in ones", async () => {
+    const mine = "`reply` opens with the same line of dialogue as `previous_reply`.";
+    const h = await two({ judgeBefore: true, judgeBeforeChecks: mine + "\n\n" }, { jev: says([10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const q = h.jevCalls[0].body.questions;
+    expect(Object.keys(q)).toEqual(["check_1", "check_2", "before_1"]);
+    expect(q.before_1.instructions).toBe(mine);
+  });
+
+  test("an empty box asks none, and still sends the reply before it for checks that name it", async () => {
+    const h = await two({ judgeBefore: true, judgeBeforeChecks: "", judgeChecks: BEATS }, { jev: says([10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(Object.keys(h.jevCalls[0].body.questions)).toEqual(["check_1"]);
+    expect(h.jevCalls[0].body.state.previous_reply).toBe(EARLIER);
+  });
+
+  test("off, or with no reply before it, they are not asked", async () => {
+    let h = await two({}, { jev: says([10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(Object.keys(h.jevCalls[0].body.questions)).toEqual(["check_1", "check_2"]);
+    h = await two({ judgeBefore: true }, { jev: says([10]) }, [
+      { id: "m1", role: "user", content: "i walk through it" },
+      { id: "m2", role: "assistant", content: REPLY },
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(Object.keys(h.jevCalls[0].body.questions)).toEqual(["check_1", "check_2"]);
+  });
+
+  test("with no reply before it, a check that names it is left out", async () => {
+    const msgs: Msg[] = [
+      { id: "m1", role: "user", content: "i walk through it" },
+      { id: "m2", role: "assistant", content: REPLY },
+    ];
+    const h = await two({ judgeBefore: true, judgeChecks: "`reply` repeats itself.\n" + BEATS }, { jev: says([10]) }, msgs);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.jevCalls[0].body.state).toEqual({ reply: REPLY });
+    expect(Object.keys(h.jevCalls[0].body.questions)).toEqual(["check_1"]);
+  });
+
+  test("the rewrite is compared with the same reply before it", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her.", "The cold hit her as she stepped through."],
+      { ...TWO, judgeBefore: true, judgeAfter: true, judgeChecks: BEATS },
+      chat(),
+      { jev: says([90]) },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(h.jevCalls.length).toBe(2);
+    expect(h.jevCalls[1].body.state.previous_reply).toBe(EARLIER);
+  });
+
+  test("in {{checks_found}}, previous_reply is written as the reply before it", async () => {
+    const blocks = [
+      { id: "t", name: "Passage", on: true, role: "user", text: "<passage>\n{{message}}\n</passage>" },
+      { id: "j", name: "Found", on: true, role: "system", text: "<found>\n{{checks_found}}\n</found>" },
+    ];
+    const h = await two({ judgeBefore: true, judgeChecks: BEATS, blocks: blocks }, { jev: says([90]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const text = (h.asked[0].messages || []).map((m: any) => m.content).join("\n\n");
+    expect(text).toContain("- reply follows the same order of events as the reply before it. (90%)");
+  });
+
+  // The worn-phrase check is the reader's to change, under How it asks. The
+  // backend's default is the panel's.
+  const WORN_MSGS = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stood open and the cold wind bit at her face." },
+    { id: "m1", role: "user", content: "i go on" },
+    { id: "m2", role: "assistant", content: "Rain came down and the cold wind bit at her hands." },
+    { id: "m3", role: "user", content: "i keep going" },
+    { id: "m4", role: "assistant", content: "She went through the gate, and the cold wind bit at her again." },
+  ];
+  const wornAsked = async (over: any) => {
+    const h = await two({ wornOn: true, wornLeast: 2, ...over }, { jev: says([10]) }, WORN_MSGS());
+    await h.ended({ chatId: "c1", messageId: "m4", generationId: "g1" });
+    await wait(50);
+    return h.jevCalls[0].body.questions.worn;
+  };
+
+  test("the worn-phrase check is the panel's own by default", async () => {
+    const q = await wornAsked({ judgeWornCheck: undefined });
+    expect(q.instructions).toBe((__testing as any).WORN_CHECK);
+  });
+
+  test("a worn-phrase check of the reader's own is sent in its place", async () => {
+    const q = await wornAsked({ judgeWornCheck: "`reply` repeats a phrase from `worn_phrases` word for word." });
+    expect(q.instructions).toBe("`reply` repeats a phrase from `worn_phrases` word for word.");
+  });
+
+  test("and an empty one asks none", async () => {
+    expect(await wornAsked({ judgeWornCheck: "" })).toBeUndefined();
+  });
+
+  // The lead-in to {{checks_found}} is the reader's to change, with the model's
+  // name and the line filled in.
+  const foundWith = async (over: any) => {
+    const blocks = [
+      { id: "t", name: "Passage", on: true, role: "user", text: "<passage>\n{{message}}\n</passage>" },
+      { id: "j", name: "Found", on: true, role: "system", text: "<found>\n{{checks_found}}\n</found>" },
+    ];
+    const h = await two({ blocks: blocks, judgeOver: 45, ...over }, { jev: says([90, 10]) });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    return (h.asked[0].messages || []).map((m: any) => m.content).join("\n\n");
+  };
+
+  test("the lead-in is the panel's own by default, with the name and the line filled in", async () => {
+    const text = await foundWith({ judgeFoundLead: undefined });
+    const want = String((__testing as any).FOUND_LEAD).replace("{{second_model}}", "jev-1.14").replace("{{checks_line}}", "45");
+    expect(text).toContain(want + "\n- reply repeats itself. (90%)");
+  });
+
+  test("a lead-in of the reader's own is sent in its place", async () => {
+    const text = await foundWith({ judgeFoundLead: "{{second_model}} flagged these at {{checks_line}}% or more:" });
+    expect(text).toContain("jev-1.14 flagged these at 45% or more:\n- reply repeats itself. (90%)");
+    expect(text).not.toContain("Another model");
+  });
+
+  test("and an empty one sends the checks alone", async () => {
+    const text = await foundWith({ judgeFoundLead: "" });
+    expect(text).toContain("<found>\n- reply repeats itself. (90%)\n</found>");
+  });
+
+  // The list the panel picks from. Never a key: Lumiverse says only whether
+  // one is saved.
+  test("the panel is sent the Decision connections, and never a key", async () => {
+    const h = await two({}, {
+      decisionList: [
+        { id: "dc-1", name: "Checks", provider: "openrouter", api_url: "https://example.test", model: "~typesafe/jev-latest", is_default: true, has_api_key: true },
+      ],
+    });
+    await h.front({ type: "list_decision_connections", requestId: "l" });
+    const got = h.sent.find((m: any) => m.type === "decision_connections" && m.requestId === "l");
+    expect(got.state).toBe("ok");
+    expect(got.list).toEqual([{ id: "dc-1", name: "Checks", provider: "openrouter", model: "~typesafe/jev-latest", isDefault: true, hasKey: true }]);
+  });
+
+  test("the list says when this Lumiverse has none to give, or the permission is refused", async () => {
+    const old = await two({}, { noDecisions: true });
+    await old.front({ type: "list_decision_connections", requestId: "l" });
+    expect(old.sent.find((m: any) => m.type === "decision_connections").state).toBe("old");
+    const refused = await two({}, { decisionList: new Error("Permission denied: decisions \u2014 Decision model permission not granted") });
+    await refused.front({ type: "list_decision_connections", requestId: "l" });
+    expect(refused.sent.find((m: any) => m.type === "decision_connections").state).toBe("refused");
+  });
+
+  // An older version kept a key per host in the secure store, to reach the
+  // second model itself. Those are deleted. Anything else kept there stays.
+  test("the keys an older version saved are deleted, and nothing else", async () => {
+    const vault: Record<string, string> = {
+      "u1:jev_api_key": "sk-made-up-old",
+      "u1:jev_api_key.openrouter": "sk-made-up-router",
+      "u1:jev_api_key.custom.0123456789abcdef": "sk-made-up-custom",
+      "u1:something_else": "kept",
+    };
+    const h = await two({}, { vault: vault });
+    await wait(20);
+    expect(Object.keys(h.vault).sort()).toEqual(["u1:something_else"]);
+  });
+});
+
+// A provider that meters calls per minute is the reason for the gap. A reply
+// inside it waits and is then refined: skipping it would leave a reply
+// unrefined for no reason the reader could see.
+describe("the gap between automatic refines", () => {
+  test("a reply inside the gap waits for it, then is refined", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineAgain: true, refineGap: 1 });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    const second = h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(300);
+    expect(h.asked.length).toBe(1);
+    const told = h.sent.find((m) => m.type === "refine_progress" && m.stage === "waiting" && m.gap);
+    expect(told && told.waitMs > 0 && told.waitMs <= 1000).toBe(true);
+    await second;
+    await wait(50);
+    expect(h.asked.length).toBe(2);
+  });
+
+  test("with no gap the next one goes at once", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineAgain: true, refineGap: 0 });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(100);
+    expect(h.asked.length).toBe(2);
+    expect(h.sent.some((m) => m.type === "refine_progress" && m.gap)).toBe(false);
+  });
+
+  test("Stop during the wait ends it, and nothing is asked", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineAgain: true, refineGap: 5 });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    const second = h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(50);
+    await h.front({ type: "cancel_refine", requestId: "s" });
+    await second;
+    expect(h.asked.length).toBe(1);
+    expect(h.stood().some((w: string) => /gap between refines/.test(w))).toBe(true);
+  });
+});
+
+describe("refining a reply", () => {
+  test("the rewrite is saved over the reply", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("the greeting is not refined with Refine the greeting off", async () => {
+    // Asked for directly, which is the strongest way somebody could try.
+    const h = await armed(["A polished greeting nobody asked for."]);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m0" });
+    await wait(50);
+    expect(h.body("m0")).toBe("The gate stands open, and the road past it is dark.");
+    const done = h.sent.find((m) => m.type === "refine_result");
+    expect(done.ok).toBe(false);
+    expect(done.why).toMatch(/greeting/i);
+    // And says which switch allows it.
+    expect(done.why).toMatch(/Refine the greeting/);
+  });
+
+  test("with Refine the greeting on, asking for it refines it", async () => {
+    const h = await armed(["<REFINED>The gate stands open. The road past it is dark.</REFINED>"], { refineGreeting: true });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m0" });
+    await wait(50);
+    expect(h.body("m0")).toBe("The gate stands open. The road past it is dark.");
+  });
+
+  // A selection is a press of a button too, so it follows the same switch:
+  // refused on the greeting with it off, and done with it on.
+  test("a selection on the greeting follows Refine the greeting", async () => {
+    const greeting = "The gate stands open, and the road past it is dark.";
+    const off = await armed(["<REFINED>The road past it lies dark.</REFINED>"]);
+    await off.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m0", picked: "the road past it is dark.", ahead: "The gate stands open, and " });
+    await off.front({ type: "snip_selection", requestId: "s", chatId: "c1", messageId: "m0", picked: ", and the road past it is dark", ahead: "The gate stands open" });
+    await wait(60);
+    expect(off.body("m0")).toBe(greeting);
+    const on = await armed(["<REFINED>the road past it lies dark.</REFINED>"], { refineGreeting: true });
+    await on.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m0", picked: "the road past it is dark.", ahead: "The gate stands open, and " });
+    await wait(60);
+    expect(on.body("m0")).toBe("The gate stands open, and the road past it lies dark.");
+    const cut = await armed([], { refineGreeting: true });
+    await cut.front({ type: "snip_selection", requestId: "s", chatId: "c1", messageId: "m0", picked: ", and the road past it is dark", ahead: "The gate stands open" });
+    await wait(60);
+    expect(cut.body("m0")).toBe("The gate stands open.");
+  });
+
+  test("the automatic pass never refines the greeting, even with Refine the greeting on", async () => {
+    const h = await armed(["<REFINED>The gate stands open. The road past it is dark.</REFINED>"], { refineGreeting: true });
+    // A greeting swiped or regenerated arrives as a finished reply.
+    await h.ended({ chatId: "c1", messageId: "m0" });
+    await wait(50);
+    expect(h.body("m0")).toBe("The gate stands open, and the road past it is dark.");
+    expect(h.asked.length).toBe(0);
+  });
+
+  test("your own message is left alone by the automatic pass", async () => {
+    const h = await armed(["i stride through it"]);
+    await h.ended({ chatId: "c1", messageId: "m1" });
+    await wait(50);
+    expect(h.body("m1")).toBe("i walk through it");
+  });
+
+  test("but asking for one refines it, with no setting in the way", async () => {
+    const h = await armed(["<refined>I walk through it.</refined>"]);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(50);
+    expect(h.body("m1")).toBe("I walk through it.");
+  });
+
+  test("a chat switched off is left alone", async () => {
+    const h = await armed(["Something better."]);
+    await h.front({ type: "set_chats_off", chats: ["c1"] });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+  });
+
+  test("a prompt that cannot work is refused before a model is called", async () => {
+    const h = await armed(["anything"], {
+      blocks: [{ id: "a", name: "Rules only", on: true, role: "system", text: "cut filler" }],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.skipped()[0]).toMatch(/\{\{message\}\}/);
+  });
+});
+
+describe("answers that must not be saved", () => {
+  const original = "She stepped through and, suddenly, the cold just hit her.";
+
+  const bad: Array<[string, string, RegExp]> = [
+    [
+      "a preamble instead of the edit",
+      "Here is the rewritten message:\n\nShe stepped through and the cold hit her.",
+      /wrote about the edit/i,
+    ],
+    [
+      "a chatty opener",
+      "Sure! She stepped through and the cold hit her.",
+      /wrote about the edit/i,
+    ],
+    [
+      "the model declining",
+      "I'm sorry, but I can't help with rewriting this content.",
+      /declined/i,
+    ],
+    ["nothing at all", "   ", /sent nothing back/i],
+    [
+      "a rewrite that grew into new scene",
+      original + " " + "She kept walking and the road opened onto a field, and beyond it a house with one lit window, and she knew whoever waited there had been waiting a long time.",
+      /longer/i,
+    ],
+    ["a rewrite with most of it missing", "She stepped through.", /shorter/i],
+  ];
+
+  for (const [name, answer, why] of bad) {
+    test(name + " leaves the reply exactly as it was", async () => {
+      const h = await armed([answer]);
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(original);
+      expect(h.writes.length).toBe(0);
+      expect(h.skipped().join(" ")).toMatch(why);
+    });
+  }
+
+  // The built-in prompt says a passage that already reads well comes back exactly
+  // as it was. Calling that "the model changed nothing" reported the extension's
+  // own instruction as a fault, and on a short piece of writing, which is most
+  // of what an input box holds, it was the usual answer: the button looked
+  // broken every time somebody had written a clean line.
+  test("the same text back is an outcome, not a refusal", async () => {
+    const h = await armed([original]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+    expect(h.writes.length).toBe(0);
+    const why = h.skipped().join(" ");
+    expect(why).toMatch(/already read well/i);
+    expect(why).not.toMatch(/changed nothing/i);
+  });
+
+  // Handed back with a sentence outside the tags is the model declining to edit
+  // it and saying why, which the built-in prompts ask for in one case. "It
+  // already read well" would be putting words in its mouth.
+  test("the same text back with a reason beside it points at that reason", async () => {
+    const h = await armed(["<REFINED>" + original + "</REFINED>\nI left this passage as it was, and here is why."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+    expect(h.writes.length).toBe(0);
+    const why = h.skipped().join(" ");
+    expect(why).toMatch(/handed it back unchanged and said why/);
+    expect(why).not.toMatch(/already read well/i);
+    const said = h.sent.find((m: any) => m.type === "refine_skipped");
+    expect(String(said.notes)).toMatch(/here is why/);
+  });
+
+  test("and it is not asked again, since it has just said it needs no change", async () => {
+    // Two answers waiting. A reason worth retrying takes the second; this one
+    // must not, because asking again is paying twice for the same answer.
+    const h = await armed([original, "She stepped through, and the cold took her."], { retryRefine: 1 });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+    expect(h.asked.length).toBe(1);
+  });
+
+  // Auto Retry's refusal lists, copied across. This extension had one pattern
+  // covering about eight wordings, so it read past most of a model declining and
+  // saved the refusal over the reply, which is the one thing that must never
+  // happen. Every wording below went through before.
+  for (const [name, answer] of [
+    ["a policy refusal", "I won't write that, as it goes against my content policies."],
+    ["naming itself", "I am an AI assistant and cannot continue this scene."],
+    ["refusing the subject", "I can't write content depicting non-consensual acts."],
+    ["a plain phrase", "I can't help with that."],
+  ] as Array<[string, string]>) {
+    test(name + " is caught rather than saved over the reply", async () => {
+      const h = await armed([answer]);
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(original);
+      expect(h.writes.length).toBe(0);
+      expect(h.skipped().join(" ")).toMatch(/declined/i);
+    });
+  }
+
+  // A long answer carrying the same words is a scene rather than a refusal.
+  test("a long rewrite that happens to say it is an AI is still saved", async () => {
+    const long =
+      "The machine spoke without inflection. \"I am an AI,\" it said, and the words " +
+      "landed in the room like a dropped tool. " +
+      "She had heard it say so before, in the yard, in the rain, in the hour before " +
+      "the power went, and each time it had meant something different. " +
+      "Now it meant only that the thing in front of her would not lie about what it was. " +
+      "She sat down on the crate and let the silence run on, because there was nothing " +
+      "to say back to a sentence like that, and because the rain had not stopped, and " +
+      "because the yard was going to be there in the morning whatever either of them said about it, " +
+      "and because saying it out loud would have made it smaller than it was.";
+    // Length allowed, or the growth check refuses it first and this would pass
+    // without the refusal check ever being reached.
+    const h = await armed([long], { maxGrowthPct: 0 });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(long);
+  });
+
+  test("a rewrite wrapped in quotes is unwrapped rather than dropped", async () => {
+    const h = await armed(['"She stepped through and the cold hit her."']);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("a rewrite that keeps its own dialogue quotes is left whole", async () => {
+    const h = await armed(['"Wait," she said, and the cold hit her. "Wait."']);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe('"Wait," she said, and the cold hit her. "Wait."');
+  });
+
+  test("a rewrite in a code fence is unfenced", async () => {
+    const h = await armed(["```\nShe stepped through and the cold hit her.\n```"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+describe("what the pass costs", () => {
+  test("thinking is off unless the reader turns it on", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].reasoning).toEqual({ source: "off" });
+  });
+
+  test("and left alone when they do", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { thinkingMode: "inherit" });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].reasoning).toBeUndefined();
+  });
+
+  test("the refine runs on the connection the reader picked", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { connectionId: "c-fast" });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].connection_id).toBe("c-fast");
+  });
+
+  test("and on whatever they are chatting with by default", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].connection_id).toBeUndefined();
+  });
+
+  // Lumiverse counts with a real tokenizer where it has one for the model and
+  // says so when it does not. Every price on the panel is worked out from that
+  // number, so a guess taken for a count is a price that looks exact and is not.
+  const used = async (opts: any) => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, chat(), opts);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    return h.sent.filter((m: any) => m.type === "refine_used").pop();
+  };
+
+  test("a real count is reported as counted", async () => {
+    const got = await used({ tokens: { approximate: false } });
+    expect(got.counted).toBe(true);
+  });
+
+  test("and one Lumiverse calls approximate is not", async () => {
+    const got = await used({ tokens: { approximate: true } });
+    expect(got.counted).toBe(false);
+  });
+
+  test("a build with no counter at all is not counted either", async () => {
+    const got = await used({});
+    expect(got.counted).toBe(false);
+  });
+
+  test("the connections come back named, so nobody pastes an id", async () => {
+    const h = await armed(["x"]);
+    await h.front({ type: "list_connections", requestId: "r" });
+    await wait(50);
+    const got = h.sent.find((m) => m.type === "connections");
+    expect(got.list.map((c: any) => c.name)).toEqual(["Cheap and quick", "The good one"]);
+    expect(got.list[1].isDefault).toBe(true);
+  });
+});
+
+describe("putting a refine back", () => {
+  test("the text from before the refine goes back", async () => {
+    const original = "She stepped through and, suddenly, the cold just hit her.";
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).not.toBe(original);
+    await h.front({ type: "undo_refine", requestId: "u", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+  });
+
+  test("with keeping switched off there is nothing to put back", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { keepOriginal: false });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    await h.front({ type: "undo_refine", requestId: "u", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const done = h.sent.find((m) => m.type === "undo_result");
+    expect(done.ok).toBe(false);
+  });
+});
+
+describe("refines you can put back, after a reload or an update", () => {
+  const listed = (h: any) => {
+    const got = h.sent.filter((m: any) => m.type === "undoable_list").pop();
+    return got ? got.list : null;
+  };
+
+  test("a page that was reloaded gets its list back from the backend", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    await h.front({ type: "list_undoable", requestId: "l1" });
+    await wait(20);
+    const list = listed(h);
+    expect(list.length).toBe(1);
+    expect(list[0].messageId).toBe("m2");
+    expect(list[0].before).toBe("She stepped through and, suddenly, the cold just hit her.");
+    expect(list[0].after).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("another account gets nothing of it, and cannot put it back", async () => {
+    const original = "She stepped through and, suddenly, the cold just hit her.";
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    await h.front({ type: "list_undoable", requestId: "l2" }, "u2");
+    await wait(20);
+    expect(listed(h)).toEqual([]);
+    await h.front({ type: "undo_refine", requestId: "u", chatId: "c1", messageId: "m2" }, "u2");
+    await wait(50);
+    expect(h.body("m2")).not.toBe(original);
+    // And the account that refined it still can.
+    await h.front({ type: "undo_refine", requestId: "u", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+  });
+
+  test("a dismissed one does not come back", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    await h.front({ type: "forget_undo", items: [{ chatId: "c1", messageId: "m2" }] });
+    await h.front({ type: "list_undoable", requestId: "l3" });
+    await wait(20);
+    expect(listed(h)).toEqual([]);
+  });
+
+  // Nothing is left to put a refine back into, and the text of a deleted chat
+  // is not kept.
+  test("a deleted chat takes its refines with it, from memory and the saved copy", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { keepPutBack: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.perUser["u1:putback.json"].length).toBe(1);
+    h.fire("CHAT_DELETED", { id: "c1" }, "u1");
+    await wait(40);
+    await h.front({ type: "list_undoable", requestId: "l6" });
+    await wait(20);
+    expect(listed(h)).toEqual([]);
+    expect(h.perUser["u1:putback.json"]).toEqual([]);
+  });
+
+  test("so does a deleted message, and another account's delete leaves it alone", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    h.fire("CHAT_DELETED", { id: "c1" }, "u2");
+    await wait(20);
+    await h.front({ type: "list_undoable", requestId: "l7" });
+    await wait(20);
+    expect(listed(h).length).toBe(1);
+    h.fire("MESSAGE_DELETED", { chatId: "c1", messageId: "m2" }, "u1");
+    await wait(20);
+    await h.front({ type: "list_undoable", requestId: "l8" });
+    await wait(20);
+    expect(listed(h)).toEqual([]);
+  });
+
+  test("with Keep them through an update off, nothing is written", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const saved = h.perUser["u1:putback.json"];
+    expect(saved === undefined || (Array.isArray(saved) && saved.length === 0)).toBe(true);
+  });
+
+  test("with it on, the list is kept through a restart, and only for its account", async () => {
+    const original = "She stepped through and, suddenly, the cold just hit her.";
+    const h = await armed(["She stepped through and the cold hit her."], { keepPutBack: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.perUser["u1:putback.json"].length).toBe(1);
+    // A new backend, as after an update, with the same storage and chat.
+    const msgs = chat();
+    msgs[2].content = h.body("m2");
+    const again = host(msgs, [], { perUser: h.perUser } as any);
+    await again.front({ type: "set_settings", settings: { ...RULES, keepPutBack: true }, keep: true });
+    await again.front({ type: "list_undoable", requestId: "l4" });
+    await wait(30);
+    const list = listed(again);
+    expect(list.length).toBe(1);
+    expect(list[0].before).toBe(original);
+    await again.front({ type: "list_undoable", requestId: "l5" }, "u2");
+    await wait(30);
+    expect(listed(again)).toEqual([]);
+    await again.front({ type: "undo_refine", requestId: "u", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(again.body("m2")).toBe(original);
+    // Put back, it is gone from the store too.
+    await wait(30);
+    expect(again.perUser["u1:putback.json"]).toEqual([]);
+  });
+
+  test("a save before the list is asked for keeps what was saved before a restart", async () => {
+    const earlier = { text: "The lamp swung twice and went still.", at: 1, user: "u1", chatId: "c7", messageId: "m7", after: "The lamp swung and stopped." };
+    const h = await armed(["She stepped through and the cold hit her."], { keepPutBack: true }, chat(), {
+      perUser: { "u1:putback.json": [earlier] },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.perUser["u1:putback.json"].map((k: any) => k.messageId)).toEqual(["m7", "m2"]);
+    await h.front({ type: "list_undoable", requestId: "l6" });
+    await wait(20);
+    expect(listed(h).map((k: any) => k.messageId)).toEqual(["m7", "m2"]);
+  });
+
+  test("turning it off empties what was kept", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { keepPutBack: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.perUser["u1:putback.json"].length).toBe(1);
+    await h.front({ type: "set_settings", settings: { ...RULES, keepPutBack: false } });
+    await wait(50);
+    expect(h.perUser["u1:putback.json"]).toEqual([]);
+  });
+});
+
+describe("asking first", () => {
+  test("with the confirmation on, nothing is saved until the answer comes back", async () => {
+    const original = "She stepped through and, suddenly, the cold just hit her.";
+    const h = await armed(["She stepped through and the cold hit her."], { confirmBeforeSave: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+    const ask = h.sent.find((m) => m.type === "confirm_refine");
+    expect(ask.before).toBe(original);
+    expect(ask.after).toBe("She stepped through and the cold hit her.");
+    await h.front({ type: "apply_refine", requestId: "a", chatId: "c1", messageId: "m2", after: ask.after });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // The result of a refine of the latest reply names the reply it refined.
+  // The panel matches it with the refined message by id to log the refine
+  // once, and an empty id matched nothing, so it was logged twice.
+  test("a refine of the latest reply reports the id of the reply it refined", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1" });
+    await wait(80);
+    const refinedMsg = h.sent.find((m) => m.type === "refined");
+    const result = h.sent.find((m) => m.type === "refine_result" && m.requestId === "r");
+    expect(refinedMsg && refinedMsg.messageId).toBe("m2");
+    expect(result && result.messageId).toBe("m2");
+  });
+
+  // Refine the latest reply sends no id when nothing has rendered since the
+  // page loaded, and the reply is found on the backend. The yes has to carry
+  // the id of that reply, or it looks for a message with no id and finds none.
+  test("a refine of the latest reply asks with that reply's id, and the yes saves it", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { confirmBeforeSave: true });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1" });
+    await wait(80);
+    const ask = h.sent.find((m) => m.type === "confirm_refine");
+    expect(ask && ask.messageId).toBe("m2");
+    await h.front({ type: "apply_refine", requestId: "a", chatId: "c1", messageId: ask.messageId, before: ask.before, after: ask.after });
+    await wait(50);
+    const done = h.sent.find((m) => m.type === "refine_result" && m.requestId === "a");
+    expect(done && done.ok).toBe(true);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+describe("when the model will not answer", () => {
+  test("a refused permission is named rather than swallowed", async () => {
+    const h = await armed(["x"], {}, chat(), { fail: "PERMISSION_DENIED: generation" });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.skipped()[0]).toMatch(/generation permission/i);
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("and the reply is left exactly as it was", async () => {
+    const h = await armed(["x"], {}, chat(), { fail: "the provider is down" });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+  });
+});
+
+describe("trying it before turning it on", () => {
+  test("the answer comes back and nothing is written to the chat", async () => {
+    const h = await armed(["A tighter version of the line."]);
+    await h.front({ type: "try_refine", requestId: "t", text: "A line with, suddenly, filler in it." });
+    await wait(50);
+    const got = h.sent.find((m) => m.type === "try_result");
+    expect(got.ok).toBe(true);
+    expect(got.after).toBe("A tighter version of the line.");
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("and an answer that would have been dropped says why", async () => {
+    const h = await armed(["Here is the rewritten message:\n\nSomething."]);
+    await h.front({ type: "try_refine", requestId: "t", text: "A line with filler in it." });
+    await wait(50);
+    const got = h.sent.find((m) => m.type === "try_result");
+    expect(got.ok).toBe(false);
+    expect(got.why).toMatch(/wrote about the edit/i);
+  });
+});
+
+// Everything the model was told, flattened, for the assertions that only care
+// that a thing was said and not which block said it.
+const said = (h: any) => (h.asked[0].messages || []).map((m: any) => m.content).join("\n\n");
+
+// A macro is for dropping what is already in the chat into the prompt: the
+// passage, the pages before it, the lorebook, the card. One of them was not
+// doing that. {{whose}} expanded into two sentences of the extension's own
+// writing, chosen by the extension, and slid into a prompt the reader wrote
+// without appearing anywhere they could read it, let alone reword it. The
+// same words are in the built-in prompt for your own messages, where they can
+// be read, reworded or deleted.
+describe("what a macro is allowed to put in the prompt", () => {
+  const MINE = ["in their own hand", "the story is written in more than one", "the story in its own voice"];
+
+  test("no macro writes prose of its own into a reply's prompt", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    for (const words of MINE) expect(said(h)).not.toContain(words);
+  });
+
+  test("nor into your own message's prompt", async () => {
+    const h = await armed(["<refined>I walk through it.</refined>"]);
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m1" });
+    await wait(50);
+    for (const words of MINE) expect(said(h)).not.toContain(words);
+  });
+
+  // Written out by hand, the way somebody's saved prompt might still have it.
+  // An unknown macro is left alone rather than filled in with words nobody
+  // asked for.
+  test("and a macro that no longer exists puts nothing in", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"], {
+      blocks: [
+        { id: "turn", name: "The passage", on: true, role: "user", text: "{{whose}}\n{{message}}" },
+      ],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    for (const words of MINE) expect(said(h)).not.toContain(words);
+  });
+});
+
+
+describe("what the model is told about the scene", () => {
+  test("the character card is in the prompt", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("A ferry pilot who has crossed the same water");
+  });
+
+  test("the card's own writing samples are not, so they cannot be copied in", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("You are late");
+  });
+
+  test("the run-up is in the prompt, with both characters named", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    // Their own character by name, the same as the card's, so the run-up reads
+    // the way the chat page does. It used to label their side "Co-author",
+    // which is a job rather than anybody in the story.
+    expect(said(h)).toContain("Tam: i walk through it");
+    expect(said(h)).toContain("Wren: The gate stands open");
+    expect(said(h)).not.toContain("Co-author:");
+  });
+
+  // A group chat, or any chat whose messages already begin with a name. The
+  // label then says who is speaking a second time on every single line.
+  test("the labels can be switched off, leaving the run-up as it was written", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { nameSpeakers: false });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("i walk through it");
+    expect(said(h)).toContain("The gate stands open");
+    expect(said(h)).not.toContain("Tam:");
+    expect(said(h)).not.toContain("Wren:");
+  });
+
+  // A panel older than the setting sends nothing for it, and the labels were
+  // always on before it existed. Absent has to mean on, or updating the backend
+  // ahead of the panel would silently strip them.
+  test("a panel that says nothing about the labels keeps them", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.front({ type: "set_settings", settings: { ...RULES, nameSpeakers: undefined } });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("Tam: i walk through it");
+  });
+
+  // A group chat: two cards, and each reply posted under the name of the one
+  // that wrote it.
+  const groupChat = (): Msg[] => [
+    { id: "m0", role: "assistant", name: "Wren", content: "The gate stands open, and the road past it is dark." } as any,
+    { id: "m1", role: "user", content: "i walk through it" },
+    { id: "m2", role: "assistant", name: "Oriel", content: "Oriel lifted the lamp and, suddenly, counted the boats again." } as any,
+  ];
+
+  test("in a group chat each reply in the run-up carries the name it was posted under", async () => {
+    const h = await armed(["Oriel lifted the lamp and counted the boats again."], {}, groupChat(), { group: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("Wren: The gate stands open");
+    expect(said(h)).toContain("Tam: i walk through it");
+  });
+
+  test("and the card sent is the one that wrote the reply, not the chat's first card", async () => {
+    const h = await armed(["Oriel lifted the lamp and counted the boats again."], {}, groupChat(), { group: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("A lamp keeper on the far bank");
+    expect(said(h)).not.toContain("A ferry pilot who has crossed the same water");
+  });
+
+  test("a reply from the chat's own card reads no other card", async () => {
+    const reads: string[] = [];
+    const msgs = groupChat();
+    (msgs[2] as any).name = "Wren";
+    const h = await armed(["She lifted the lamp."], {}, msgs, { group: true, cardReads: reads });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("A ferry pilot who has crossed the same water");
+    expect(reads).not.toContain("ch2");
+  });
+
+  test("a name that matches no card keeps the chat's own card", async () => {
+    const msgs = groupChat();
+    (msgs[2] as any).name = "Somebody Else";
+    const h = await armed(["She lifted the lamp."], {}, msgs, { group: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("A ferry pilot who has crossed the same water");
+  });
+
+  test("and a chat with no persona set falls back rather than labeling a blank", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, chat(), { noPersona: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("You: i walk through it");
+    expect(said(h)).toContain("Wren: The gate stands open");
+  });
+
+  test("the message being rewritten is sent once, not also as context", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const hits = said(h).split("She stepped through and, suddenly, the cold just hit her.").length - 1;
+    expect(hits).toBe(1);
+  });
+
+  test("with context set to none, no history is sent", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { contextMessages: 0 });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("i walk through it");
+  });
+
+  test("a chat the card could not be read for refines anyway, without it", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, chat(), {
+      cardFail: "PERMISSION_DENIED: characters",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    expect(said(h)).not.toContain("ferry pilot");
+  });
+
+  test("and so does a chat with no card on it", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, chat(), { noCard: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    // With no name to use, the history still labels who spoke.
+    expect(said(h)).toContain("Character: The gate stands open");
+  });
+
+  test("trying the rules on pasted text belongs to no chat, so no card is sent", async () => {
+    const h = await armed(["A tighter version of the line."]);
+    await h.front({ type: "try_refine", requestId: "t", text: "A line with, suddenly, filler in it." });
+    await wait(50);
+    expect(said(h)).not.toContain("ferry pilot");
+    expect(said(h)).not.toContain("i walk through it");
+  });
+});
+
+describe("leaving things out of the run-up", () => {
+  const tracked = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open.\n[HP 9/10 | Coins 4]\nThe road past it is <b>dark</b>." },
+    { id: "m1", role: "user", content: "[HP 9/10 | Coins 4]" },
+    { id: "m2", role: "assistant", content: "She stepped through and, suddenly, the cold hit her." },
+  ];
+
+  test("what a pattern matches is taken out of {{history}}, and ^ and $ work per line", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { historyCut: "^\\[HP[^\\]]*\\]$\n</?b>" }, tracked());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("The gate stands open.\nThe road past it is dark.");
+    expect(said(h)).not.toContain("HP 9/10");
+    expect(said(h)).not.toContain("<b>");
+  });
+
+  // Lumiverse leaves a message hidden from the prompt out of the chat's own
+  // prompt, so the run-up leaves it out too.
+  test("a message hidden from the prompt is left out of {{history}}", async () => {
+    const msgs: Msg[] = [
+      { id: "m0", role: "assistant", content: "The gate stands open." },
+      { id: "mh", role: "assistant", content: "A draft about the lighthouse keeper.", extra: { hidden: true } } as any,
+      { id: "m1", role: "user", content: "i walk through it" },
+      { id: "m2", role: "assistant", content: "She stepped through and, suddenly, the cold hit her." },
+    ];
+    const h = await armed(["She stepped through and the cold hit her."], {}, msgs);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("The gate stands open.");
+    expect(said(h)).not.toContain("lighthouse keeper");
+  });
+
+  test("a message that was only what was cut is left out, with no name and nothing after it", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { historyCut: "^\\[HP[^\\]]*\\]$" }, tracked());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toMatch(/Tam:\s*(\n|$)/);
+    expect(said(h)).not.toContain("Tam:");
+  });
+
+  test("a message saved with \\r\\n line endings leaves no blank line where a line was cut", async () => {
+    const crlf = (): Msg[] => [
+      { id: "m0", role: "assistant", content: "The gate stands open.\r\n[HP 9/10 | Coins 4]\r\nThe road past it is dark." },
+      { id: "m1", role: "user", content: "i walk through it" },
+      { id: "m2", role: "assistant", content: "She stepped through and, suddenly, the cold hit her." },
+    ];
+    const h = await armed(["She stepped through and the cold hit her."], { historyCut: "^\\[HP[^\\]]*\\]$" }, crlf());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("The gate stands open.\nThe road past it is dark.");
+  });
+
+  test("the size limit counts a message after the cut, so a message that fits once cut is kept", async () => {
+    const big = (): Msg[] => [
+      { id: "m0", role: "assistant", content: "[" + "x".repeat(600) + "]\nThe gate stands open." },
+      { id: "m1", role: "user", content: "i walk through it" },
+      { id: "m2", role: "assistant", content: "She stepped through and, suddenly, the cold hit her." },
+    ];
+    const none = await armed(["She stepped through and the cold hit her."], { maxHistoryTokens: 40 }, big());
+    await none.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(none)).not.toContain("The gate stands open");
+    const cut = await armed(["She stepped through and the cold hit her."], { maxHistoryTokens: 40, historyCut: "^\\[x+\\]$" }, big());
+    await cut.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(cut)).toContain("The gate stands open");
+  });
+
+  test("the prompt preview shows the run-up with the cut, and the lorebook without names when they are off", async () => {
+    const h = await armed(["x"], { historyCut: "^\\[HP[^\\]]*\\]$", loreNames: false }, tracked());
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "prompt_preview" && m.requestId === "p");
+    const text = JSON.stringify(got.messages);
+    expect(text).toContain("The gate stands open.");
+    expect(text).not.toContain("HP 9/10");
+    expect(text).toContain("The ferry runs at dusk");
+    expect(text).not.toContain("The crossing:");
+  });
+
+  // Patterns written the ways people bring them from other apps.
+  const forms = (): Msg[] => [
+    {
+      id: "m0",
+      role: "assistant",
+      content:
+        "Mira nodded.\n[Day 2 | Rain]\n<span class=\"warn\">Careful</span>, she said.\n<status>Mood: calm\nLoc: dock</status>\nÉLAN ran. 🌧️ Done.",
+    },
+    { id: "m1", role: "user", content: "i follow her" },
+    { id: "m2", role: "assistant", content: "She stepped through and, suddenly, the cold hit her." },
+  ];
+  const cases: Array<[string, string, string[], string[]]> = [
+    ["the /pattern/flags form", "/\\[.*?\\]/g", ["Mira nodded.\n<span"], ["[Day 2"]],
+    ["the /pattern/flags form with s, so . crosses lines", "/<status>.*?<\\/status>/s", ["she said.\nÉLAN ran."], ["Mood: calm"]],
+    ["the /pattern/flags form without i keeps capitals", "/rain/g", ["[Day 2 | Rain]"], []],
+    ["a leading (?i) is read as the flag", "(?i)CAREFUL", ["\">"], ["Careful"]],
+    ["a leading (?s) lets . cross lines", "(?s)<status>.*?</status>", ["ÉLAN ran."], ["Loc: dock"]],
+    ["a Unicode class", "\\p{Extended_Pictographic}\\uFE0F?", ["ÉLAN ran.", "Done."], ["🌧"]],
+    ["capitals ignored for letters with accents", "élan", [" ran. "], ["ÉLAN"]],
+    ["a lookbehind and a lookahead", "(?<=<span[^>]*>)Careful(?=</span>)", ["<span class=\"warn\"></span>"], []],
+    ["a needless escape other apps allow", "Mood\\: calm", ["<status>\nLoc: dock"], ["Mood: calm"]],
+    ["an escaped slash", "<\\/?span[^>]*>", ["Careful, she said."], ["<span"]],
+  ];
+  for (const [what, pattern, keeps, drops] of cases) {
+    test("works: " + what, async () => {
+      const h = await armed(["She stepped through and the cold hit her."], { historyCut: pattern, nameSpeakers: false }, forms());
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      for (const k of keeps) expect(said(h)).toContain(k);
+      for (const d of drops) expect(said(h)).not.toContain(d);
+      expect(h.sent.filter((m: any) => m.type === "history_bad").pop().patterns).toEqual([]);
+    });
+  }
+
+  test("a flag that cannot be read is named, in either form", async () => {
+    const h = await armed(["x"], { historyCut: "/rain/q\n(?x)rain" });
+    await wait(10);
+    const bad = h.sent.filter((m: any) => m.type === "history_bad").pop().patterns.join(" | ");
+    expect(bad).toContain("/rain/q");
+    expect(bad).toContain("(?x)rain");
+  });
+
+  // A repeat inside a repeat takes time that doubles with each letter of
+  // text it almost matches, and the backend serves every account.
+  test("a repeat inside a repeat is refused and named, in every pattern box", async () => {
+    const h = await armed(["x"], { historyCut: "(a+)+$\n(\\d{2})+", shieldAdd: "(\\w*\\s?)*x" });
+    await wait(10);
+    const cut = h.sent.filter((m: any) => m.type === "history_bad").pop().patterns.join(" | ");
+    const hide = h.sent.filter((m: any) => m.type === "shield_bad").pop().patterns.join(" | ");
+    expect(cut).toContain("(a+)+$ (a repeat inside a repeat");
+    // A set count, such as {2}, is not a repeat that can split the text many ways.
+    expect(cut).not.toContain("\\d{2}");
+    expect(hide).toContain("(\\w*\\s?)*x (a repeat inside a repeat");
+  });
+
+  // Bun gives up on such a match after about a second, so four messages of
+  // almost-matches would hold a refine up for four seconds or more.
+  test("and a refused pattern is not used, so four messages of almost-matches do not hold a refine up", async () => {
+    const almost = "a".repeat(60) + "!";
+    const slow = (): Msg[] => [
+      { id: "m0", role: "assistant", content: almost },
+      { id: "m1", role: "user", content: almost },
+      { id: "m2", role: "assistant", content: almost },
+      { id: "m3", role: "user", content: almost },
+      { id: "m4", role: "assistant", content: "She stepped through and, suddenly, the cold hit her." },
+    ];
+    const t = Date.now();
+    const h = await armed(["She stepped through and the cold hit her."], { historyCut: "(a+)+$" }, slow());
+    await h.ended({ chatId: "c1", messageId: "m4" });
+    await wait(50);
+    expect(Date.now() - t).toBeLessThan(2500);
+    expect(said(h)).toContain("a".repeat(60) + "!");
+  });
+
+  test("the shield boxes read the /pattern/flags form too", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      { shieldAdd: "/HP \\d+\\/\\d+/i" },
+      [
+        { id: "m0", role: "assistant", content: "The gate stands open." },
+        { id: "m1", role: "user", content: "i go in" },
+        { id: "m2", role: "assistant", content: "She stepped through, hp 9/10, and, suddenly, the cold just hit her." },
+      ],
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("hp 9/10");
+  });
+
+  test("with no patterns the run-up is sent as it is saved", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, tracked());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("[HP 9/10 | Coins 4]");
+  });
+
+  test("a pattern that cannot be read is reported, and the report clears once it is fixed", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { historyCut: "([unclosed" });
+    await wait(10);
+    const first = h.sent.filter((m: any) => m.type === "history_bad").pop();
+    expect(first.patterns.join(" ")).toContain("([unclosed");
+    await h.front({ type: "set_settings", settings: { ...RULES, historyCut: "^\\[HP" } });
+    await wait(10);
+    const after = h.sent.filter((m: any) => m.type === "history_bad").pop();
+    expect(after.patterns).toEqual([]);
+  });
+
+  test("a shield pattern's report clears once it is fixed, too", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { shieldAdd: "([unclosed" });
+    await wait(10);
+    expect(h.sent.filter((m: any) => m.type === "shield_bad").pop().patterns.length).toBe(1);
+    await h.front({ type: "set_settings", settings: { ...RULES, shieldAdd: "" } });
+    await wait(10);
+    expect(h.sent.filter((m: any) => m.type === "shield_bad").pop().patterns).toEqual([]);
+  });
+});
+
+describe("the lorebook", () => {
+  test("each entry starts with its name by default", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("The crossing: The ferry runs at dusk");
+  });
+
+  test("with Name each lorebook entry off, the entries go in without their names", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { loreNames: false });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("The ferry runs at dusk");
+    expect(said(h)).not.toContain("The crossing:");
+    expect(said(h)).not.toContain("The gate:");
+  });
+
+  test("active entries go in the prompt", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("The ferry runs at dusk");
+    expect(said(h)).toContain("The gate is shut at the last bell");
+  });
+
+  test("a chat with no active entries sends no lore block", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, chat(), { noLore: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("What is true in this world");
+  });
+
+  test("a refused world books permission refines anyway", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, chat(), {
+      loreFail: "PERMISSION_DENIED: world_books",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    expect(said(h)).not.toContain("ferry runs at dusk");
+  });
+
+  test("switching the lore block off leaves it out", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      blocks: [
+        { id: "a", name: "Job", on: true, role: "system", text: "Rewrite it." },
+        { id: "lore", name: "World", on: false, role: "system", text: "<world>{{lore}}</world>" },
+        { id: "t", name: "Turn", on: true, role: "user", text: "{{message}}" },
+      ],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("ferry runs at dusk");
+  });
+});
+
+describe("how much thinking it asks for", () => {
+  test("off sends the off source", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].reasoning).toEqual({ source: "off" });
+  });
+
+  test("inherit sends nothing, which is what leaves your settings alone", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { thinkingMode: "inherit" });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].reasoning).toBeUndefined();
+  });
+
+  test("an effort you picked is sent as a custom source", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      thinkingMode: "custom",
+      thinkingEffort: "high",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].reasoning).toEqual({ source: "custom", effort: "high" });
+  });
+
+  test("an effort that is not one of the three falls back rather than being sent", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      thinkingMode: "custom",
+      thinkingEffort: "as much as it takes",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].reasoning).toEqual({ source: "custom", effort: "medium" });
+  });
+});
+
+describe("seeing what gets sent", () => {
+  test("the preview is the real request and calls no model", async () => {
+    const h = await armed(["should not be used"]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const got = h.sent.find((m) => m.type === "prompt_preview");
+    expect(got.ok).toBe(true);
+    expect(h.asked.length).toBe(0);
+    const whole = got.messages.map((m: any) => m.content).join("\n");
+    expect(whole).toContain("Cut filler words");
+    expect(whole).toContain("She stepped through and, suddenly");
+    expect(got.messages[got.messages.length - 1].role).toBe("user");
+  });
+
+  // The card says it shows what gets sent, and it is the only place anybody can
+  // check what a prompt actually costs or carries. It skipped the two steps a
+  // real refine takes on the passage first, so it showed markup that never
+  // reaches a model, reasoning that is cut off before the call, and no
+  // {{protect_notes}} at all: the one macro that puts words rather than chat
+  // into the prompt was the one the preview never showed.
+  test("the preview shows the passage protected, the way the model gets it", async () => {
+    const h = await armed(["x"], {}, [
+      { id: "m1", role: "user", content: "i walk through it" },
+      {
+        id: "m2",
+        role: "assistant",
+        content: 'She stepped <font color="#ff0000">through</font> it, suddenly.',
+      },
+    ]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const whole = h.sent
+      .find((m) => m.type === "prompt_preview")
+      .messages.map((m: any) => m.content)
+      .join("\n");
+    expect(whole).toContain("[[AR1]]");
+    expect(whole).not.toContain('<font color="#ff0000">');
+  });
+
+  test("and shows the words that go with the tokens", async () => {
+    const h = await armed(["x"], {}, [
+      { id: "m1", role: "user", content: "i walk through it" },
+      {
+        id: "m2",
+        role: "assistant",
+        content: 'She stepped <font color="#ff0000">through</font> it, suddenly.',
+      },
+    ]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const whole = h.sent
+      .find((m) => m.type === "prompt_preview")
+      .messages.map((m: any) => m.content)
+      .join("\n");
+    expect(whole).toContain("tokens shaped like");
+    expect(whole).toContain("unchanged and in the same place");
+  });
+
+  // Nothing to protect, nothing to say about protecting it.
+  test("and says nothing about tokens when there are none", async () => {
+    const h = await armed(["x"]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const whole = h.sent
+      .find((m) => m.type === "prompt_preview")
+      .messages.map((m: any) => m.content)
+      .join("\n");
+    expect(whole).not.toContain("tokens shaped like");
+  });
+
+  // The note is the reader's to change, on the Context tab. Their own wording
+  // is sent in its place, and an empty box sends none.
+  const withFont = (): Msg[] => [
+    { id: "m1", role: "user", content: "i walk through it" },
+    { id: "m2", role: "assistant", content: 'She stepped <font color="#ff0000">through</font> it, suddenly.' },
+  ];
+  const previewText = async (over: any) => {
+    const h = await armed(["x"], over, withFont());
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    return h.sent.find((m) => m.type === "prompt_preview").messages.map((m: any) => m.content).join("\n");
+  };
+
+  test("a note of the reader's own is sent in place of the built-in one", async () => {
+    const whole = await previewText({ protectNote: "Keep every [[AR1]] where it stands, spelled the same." });
+    expect(whole).toContain("Keep every [[AR1]] where it stands, spelled the same.");
+    expect(whole).not.toContain("tokens shaped like");
+  });
+
+  test("and an empty note sends none", async () => {
+    const whole = await previewText({ protectNote: "" });
+    expect(whole).not.toContain("tokens shaped like");
+    expect(whole).not.toContain("[[AR1]] where it stands");
+  });
+
+  // A phrase from the token note and from nowhere else in a built-in prompt. The
+  // obvious one, "tokens shaped like", is no good here: What to Copy Exactly
+  // says it too, in every prompt, whether anything was protected or not.
+  const NOTE_ONLY = "Do not change, split, translate or remove any of them.";
+
+  // The note about the tokens is a block of its own in every built-in prompt, so
+  // it can carry a tag like the other macros do. The two below are the pair that
+  // decides whether that block was worth having: it has to arrive wrapped when
+  // there is something to say, and it has to leave the prompt entirely when
+  // there is not. An empty tag pair sent on every refine is what moving it out
+  // of How to Answer was for.
+  test("the built-in prompt wraps the token note in a tag of its own", async () => {
+    const h = await armed(["x"], { blocks: DEFAULT_BLOCKS }, [
+      { id: "m1", role: "user", content: "i walk through it" },
+      {
+        id: "m2",
+        role: "assistant",
+        content: 'She stepped <font color="#ff0000">through</font> it, suddenly.',
+      },
+    ]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const whole = h.sent
+      .find((m) => m.type === "prompt_preview")
+      .messages.map((m: any) => m.content)
+      .join("\n");
+    expect(whole).toContain("<protected_formatting>");
+    expect(whole).toContain("</protected_formatting>");
+    // The words inside the tag rather than merely somewhere in the prompt.
+    const inside = /<protected_formatting>([\s\S]*?)<\/protected_formatting>/.exec(whole);
+    expect(inside && inside[1]).toContain(NOTE_ONLY);
+  });
+
+  test("and sends no tag at all when nothing needed protecting", async () => {
+    const h = await armed(["x"], { blocks: DEFAULT_BLOCKS });
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const whole = h.sent
+      .find((m) => m.type === "prompt_preview")
+      .messages.map((m: any) => m.content)
+      .join("\n");
+    expect(whole).not.toContain(NOTE_ONLY);
+    // Not an empty pair either, which is what would be left if the block were
+    // still a line inside How to Answer.
+    expect(whole).not.toContain("protected_formatting");
+    // And the check is looking at a real prompt rather than an empty string.
+    expect(whole).toContain("<passage>");
+  });
+
+  // A reasoning model's working is cut off before the call, so a preview that
+  // showed it was showing a passage no model is given.
+  test("and leaves the model's own working out, as the call does", async () => {
+    const h = await armed(["x"], {}, [
+      { id: "m1", role: "user", content: "i walk through it" },
+      {
+        id: "m2",
+        role: "assistant",
+        content: "<think>weighing how to open</think>She stepped through it.",
+      },
+    ]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const whole = h.sent
+      .find((m) => m.type === "prompt_preview")
+      .messages.map((m: any) => m.content)
+      .join("\n");
+    expect(whole).not.toContain("weighing how to open");
+    expect(whole).toContain("She stepped through it.");
+  });
+
+  test("it writes nothing to the chat", async () => {
+    const h = await armed(["x"]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+  });
+
+  test("it says when it had to stand in for a message", async () => {
+    const h = await armed(["x"]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: null, messageId: null });
+    await wait(50);
+    const got = h.sent.find((m) => m.type === "prompt_preview");
+    expect(got.ok).toBe(true);
+    expect(got.real).toBe(false);
+  });
+
+  test("and carries the rest of the call, not just the messages", async () => {
+    const h = await armed(["x"], { connectionId: "c-fast", samplers: { temperature: 0.4 } });
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const got = h.sent.find((m) => m.type === "prompt_preview");
+    expect(got.connectionId).toBe("c-fast");
+    expect(got.parameters).toEqual({ temperature: 0.4 });
+  });
+});
+
+describe("how the prompt is put together", () => {
+  test("blocks are sent in the order they are listed", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      blocks: [
+        { id: "a", name: "First", on: true, role: "system", text: "<one>alpha</one>" },
+        { id: "b", name: "Second", on: true, role: "system", text: "<two>beta</two>" },
+        { id: "t", name: "Turn", on: true, role: "user", text: "{{message}}" },
+      ],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const whole = h.asked[0].messages[0].content;
+    expect(whole.indexOf("alpha")).toBeLessThan(whole.indexOf("beta"));
+  });
+
+  test("a block switched off is left out", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      blocks: [
+        { id: "a", name: "Off", on: false, role: "system", text: "<one>alpha</one>" },
+        { id: "t", name: "Turn", on: true, role: "user", text: "{{message}}" },
+      ],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("alpha");
+  });
+
+  test("adjacent blocks with the same role become one message", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      blocks: [
+        { id: "a", name: "One", on: true, role: "system", text: "alpha" },
+        { id: "b", name: "Two", on: true, role: "system", text: "beta" },
+        { id: "t", name: "Turn", on: true, role: "user", text: "{{message}}" },
+      ],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].messages.map((m: any) => m.role)).toEqual(["system", "user"]);
+    expect(h.asked[0].messages[0].content).toBe("alpha\n\nbeta");
+  });
+
+  test("a block sent as a different role arrives as that role", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      blocks: [
+        { id: "a", name: "One", on: true, role: "system", text: "alpha" },
+        { id: "b", name: "Two", on: true, role: "assistant", text: "beta" },
+        { id: "t", name: "Turn", on: true, role: "user", text: "{{message}}" },
+      ],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].messages.map((m: any) => m.role)).toEqual(["system", "assistant", "user"]);
+  });
+
+  // The backend starts with no prompt and is handed one over the bridge, so
+  // there is a window between the two. The only honest answer inside it is to
+  // say so: refining on anything else would report that the reader's prompt
+  // ran when a different one did.
+  test("a refine asked for before the prompt has arrived is refused, and nothing is written", async () => {
+    const h = host(chat(), ["A rewrite from a prompt nobody wrote."]);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+    const done = h.sent.find((m: any) => m.type === "refine_result" && m.requestId === "r");
+    expect(String(done && done.why)).toMatch(/has not reached the backend/);
+  });
+
+  test("a prompt with no turn macro is refused before a model is called", async () => {
+    const h = await armed(["anything"], {
+      blocks: [{ id: "a", name: "One", on: true, role: "system", text: "just rules, no turn" }],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.skipped()[0]).toMatch(/\{\{message\}\}/);
+  });
+
+  test("a block whose macros all came back empty is left out, tags and all", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, chat(), { noLore: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    // The lore block is <world>{{lore}}</world> and this chat has no lore, so
+    // the model must not be told the world is empty.
+    expect(said(h)).not.toContain("<world>");
+  });
+});
+
+describe("macros", () => {
+  test("the host answers the ones it owns", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("A ferry pilot who has crossed the same water");
+  });
+
+  test("ours are filled after the host has run, so a reply cannot inject one", async () => {
+    // A reply that contains a macro. If ours were filled before the host pass,
+    // the resolver would expand this into the prompt.
+    const evil = chat();
+    evil[2].content = "She stepped through, and {{description}} was written on the wall in full.";
+    const h = await armed(["She stepped through, and {{description}} was on the wall."], {}, evil);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const turn = h.asked[0].messages[h.asked[0].messages.length - 1].content;
+    expect(turn).toContain("{{description}}");
+    expect(turn).not.toContain("A ferry pilot who has crossed");
+  });
+
+  test("a macro nobody can answer is left as it was typed", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      blocks: [
+        { id: "a", name: "One", on: true, role: "system", text: "keep {{not_a_macro}} as it is" },
+        { id: "t", name: "Turn", on: true, role: "user", text: "{{message}}" },
+      ],
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("{{not_a_macro}}");
+  });
+
+  test("a host that refuses to resolve does not stop the refine", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {}, chat(), {
+      macroFail: "PERMISSION_DENIED: macros",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+describe("protecting what is not prose", () => {
+  const marked = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open." },
+    { id: "m1", role: "user", content: "i walk through it" },
+    {
+      id: "m2",
+      role: "assistant",
+      content:
+        'She stepped through and, suddenly, <font color="#ffff00">the cold</font> just hit her, all at once.',
+    },
+  ];
+
+  test("markup is never shown to the model", async () => {
+    const h = await armed(["ok"], {}, marked());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const turn = h.asked[0].messages[h.asked[0].messages.length - 1].content;
+    expect(turn).not.toContain("<font");
+    expect(turn).toContain("[[AR1]]");
+  });
+
+  test("and comes back exactly as it was", async () => {
+    const h = await armed(
+      ["She stepped through and [[AR1]]the cold[[AR2]] hit her, all at once."],
+      {},
+      marked(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(
+      'She stepped through and <font color="#ffff00">the cold</font> hit her, all at once.',
+    );
+  });
+
+  test("a rewrite that dropped the markup is refused rather than saved", async () => {
+    const h = await armed(["She stepped through and the cold hit her, all at once."], {}, marked());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/formatting/i);
+  });
+
+  test("switched off, the markup goes to the model as it is", async () => {
+    const h = await armed(["ok"], { protectOn: false }, marked());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const turn = h.asked[0].messages[h.asked[0].messages.length - 1].content;
+    expect(turn).toContain("<font");
+  });
+
+  test("a code fence is protected too", async () => {
+    const fenced = marked();
+    fenced[2].content = "She read it aloud.\n\n```\nkeep me exactly\n```\n\nThen she stopped.";
+    const h = await armed(["She read it out.\n\n[[AR1]]\n\nThen she stopped, slowly."], {}, fenced);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    // Both halves. Checking only that the fence survived passes just as well
+    // when the refine was refused and the original was left sitting there,
+    // which is how the shield eating its own tokens went unnoticed: the fence
+    // was always there because nothing was ever saved over it.
+    expect(h.writes.length).toBe(1);
+    expect(h.body("m2")).toContain("```\nkeep me exactly\n```");
+    expect(h.body("m2")).toContain("Then she stopped, slowly.");
+  });
+
+  // The shield runs its rules one after another over text that already has
+  // tokens in it, and one of those rules is for wiki-style brackets, which is
+  // the shape of a token. So it hid its own work: a reply with inline code came
+  // out as [[AR1]], the bracket rule hid that as [[AR2]], and a model that
+  // copied every token back perfectly was still turned down for dropping one
+  // piece of formatting. Every model, every time.
+  //
+  // One case per rule that runs before the bracket one, because being right
+  // about the first shape and wrong about the rest is the shape of the bug.
+  // Every token the model was actually shown, which is what a model that copies
+  // them all back would send. Read off the prompt rather than assumed, so the
+  // check is about what the shield did and not about the fixture's tag names.
+  const tokensShown = (h: any): string[] => {
+    const turn = h.asked[0].messages[h.asked[0].messages.length - 1].content;
+    return String(turn).match(/\[\[AR\d+\]\]/g) || [];
+  };
+
+  const beforeTheBrackets: Array<[string, string, string, string]> = [
+    ["inline code", "She said `hello there` and left.", "`hello there`", "She said %T and went."],
+    ["a link", "Read [the note](https://x.test/a) later.", "[the note](https://x.test/a)", "Read %T soon."],
+    [
+      "an image",
+      "It showed ![a gate](https://x.test/g.png) plainly.",
+      "![a gate](https://x.test/g.png)",
+      "It showed %T clearly.",
+    ],
+    [
+      "a comment",
+      "She left the room. <!-- a note to self --> Then it was quiet.",
+      "<!-- a note to self -->",
+      "She left the room. %T Then it went quiet.",
+    ],
+  ];
+  for (const [what, body, keep, answer] of beforeTheBrackets) {
+    test("a reply with " + what + " is not turned down for keeping every token", async () => {
+      const msgs = marked();
+      msgs[2].content = body;
+      const seen = await armed([], {}, msgs);
+      await seen.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      const toks = tokensShown(seen);
+      // One piece of formatting, so one token. More than one means the shield
+      // hid something of its own, which is the fault itself.
+      expect(toks.length).toBe(1);
+
+      const h = await armed(["<REFINED>" + answer.replace("%T", toks.join(" ")) + "</REFINED>"], {}, msgs);
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.skipped().join(" ")).not.toMatch(/formatting/i);
+      expect(h.writes.length).toBe(1);
+      expect(h.body("m2")).toContain(keep);
+    });
+  }
+
+  test("a token swallowed inside a bigger match still comes back", async () => {
+    // A table row is a region that can hold a token, since inline code inside a
+    // cell is hidden before the row rule runs. Putting the row back has to put
+    // back what was inside it too, rather than leaving [[AR1]] on screen.
+    const msgs = marked();
+    msgs[2].content = "She read the whole sheet.\n\n| name | `code` |\n\nThen she looked up.";
+    const seen = await armed([], {}, msgs);
+    await seen.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const toks = tokensShown(seen);
+    const h = await armed(
+      ["<REFINED>She read the sheet through.\n\n" + toks.join("\n") + "\n\nThen she looked up.</REFINED>"],
+      {},
+      msgs,
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.skipped().join(" ")).not.toMatch(/formatting/i);
+    const saved = h.body("m2");
+    expect(saved).toContain("| name | `code` |");
+    expect(saved).not.toMatch(/\[\[AR\d+\]\]/);
+  });
+
+  test("a rewrite that really did drop a token is still refused", async () => {
+    // The fix must not be "stop checking". A model that leaves the token out
+    // has lost the formatting, and that answer is still turned down.
+    const msgs = marked();
+    msgs[2].content = "She said `hello there` and left.";
+    const h = await armed(["<REFINED>She said nothing and left.</REFINED>"], {}, msgs);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/formatting/i);
+  });
+
+  test("the model's own thinking is never sent and comes back untouched", async () => {
+    const thought = marked();
+    thought[2].content =
+      "<think>She is cold. Lead with that.</think>She stepped through and, suddenly, the cold just hit her.";
+    const h = await armed(["She stepped through and the cold hit her."], {}, thought);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const turn = h.asked[0].messages[h.asked[0].messages.length - 1].content;
+    expect(turn).not.toContain("Lead with that");
+    expect(h.body("m2")).toBe(
+      "<think>She is cold. Lead with that.</think>She stepped through and the cold hit her.",
+    );
+  });
+});
+
+describe("nothing is ever sent to the chat", () => {
+  // The whole extension edits one message that already exists. There is no
+  // path that writes a new one, and the check is worth having because the
+  // difference between generate.quiet and generate.raw is one word and the
+  // second one posts its answer into the conversation.
+  test("a refine writes over the message and creates nothing", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.forbidden).toEqual([]);
+    expect(h.writes.length).toBe(1);
+    expect(h.writes[0].id).toBe("m2");
+  });
+
+  test("the generation is the quiet one, which does not post its answer", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.forbidden).toEqual([]);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("trying the rules writes nothing at all", async () => {
+    const h = await armed(["<refined>A tighter line.</refined>"]);
+    await h.front({ type: "try_refine", requestId: "t", text: "A line with filler in it." });
+    await wait(50);
+    expect(h.forbidden).toEqual([]);
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("and a preview neither writes nor generates", async () => {
+    const h = await armed(["x"]);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.forbidden).toEqual([]);
+    expect(h.writes.length).toBe(0);
+    expect(h.asked.length).toBe(0);
+  });
+
+  test("a dropped rewrite writes nothing, so a refusal cannot reach the chat", async () => {
+    const h = await armed(["I'm sorry, but I can't help with rewriting this content."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.forbidden).toEqual([]);
+    expect(h.writes.length).toBe(0);
+  });
+});
+
+describe("the answer it asks for", () => {
+  const original = "She stepped through and, suddenly, the cold just hit her.";
+
+  // The ask is the prompt's, written out in a block, not a macro this extension
+  // fills in. Which means it reaches the model exactly as it was typed.
+  test("the prompt asks for the rewrite in the words the block was written in", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("Put the rewritten message between <refined> and </refined>.");
+  });
+
+  test("only what is between the tags is saved", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("a model that talks around the tags is still a refine", async () => {
+    // An answer whose preamble must not cost it the rewrite inside.
+    const h = await armed([
+      "Sure! Here is the rewritten message:\n\n<refined>She stepped through and the cold hit her.</refined>\n\nI cut the filler.",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("a rewrite cut off before the closing tag is refused", async () => {
+    const h = await armed(["<refined>She stepped through and the cold"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+    expect(h.skipped().join(" ")).toMatch(/cut off/i);
+  });
+
+  test("with the tags switched off, the checks still catch a preamble", async () => {
+    const h = await armed(
+      ["Here is the rewritten message:\n\nShe stepped through and the cold hit her."],
+      { wrapOutput: false },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(original);
+    expect(h.skipped().join(" ")).toMatch(/wrote about the edit/i);
+  });
+
+  // Switching it off changes how the answer is read, never what was asked. The
+  // ask belongs to whoever wrote the block, so it goes out either way and it is
+  // theirs to delete.
+  test("switching it off leaves the prompt exactly as it was written", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { wrapOutput: false });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("<refined>");
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // Nothing outside the tags is ever saved, which is what makes it somewhere a
+  // prompt can safely ask for a report on what was cut.
+  test("what the model wrote around the tags is carried back, not saved", async () => {
+    const h = await armed([
+      "<changes>Cut two filler words. Left the dialogue alone.</changes>\n" +
+        "<refined>She stepped through and the cold hit her.</refined>",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    const notes = h.sent.filter((m: any) => m && typeof m.notes === "string" && m.notes);
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes[0].notes).toContain("Left the dialogue alone");
+  });
+
+  // A model can put its whole answer in a code block. With the tags taken
+  // out, the block is empty, and an empty block is not a note.
+  test("an empty code block left around the tags is not carried back as a note", async () => {
+    for (const fence of ["```xml", "```", "~~~text"]) {
+      const close = fence.slice(0, 3);
+      const h = await armed([fence + "\n<refined>She stepped through and the cold hit her.</refined>\n" + close]);
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+      const notes = h.sent.filter((m: any) => m && typeof m.notes === "string" && m.notes);
+      expect([fence, notes.length]).toEqual([fence, 0]);
+    }
+  });
+
+  test("but words said next to it are still carried back", async () => {
+    const h = await armed([
+      "Cut one filler word.\n```xml\n<refined>She stepped through and the cold hit her.</refined>\n```",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const notes = h.sent.filter((m: any) => m && typeof m.notes === "string" && m.notes);
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes[0].notes).toBe("Cut one filler word.");
+  });
+});
+
+describe("when something goes wrong inside", () => {
+  test("a handler that throws still answers, so the panel is not left waiting", async () => {
+    // getMessages throwing is the shape of a host that went away mid-refine.
+    const h = host(chat(), ["x"]);
+    await h.front({ type: "set_settings", settings: RULES });
+    (h as any).breakChat();
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const done = h.sent.find((m) => m.type === "refine_result");
+    expect(done).toBeTruthy();
+    expect(done.ok).toBe(false);
+  });
+
+  test("and the automatic pass answers too rather than going silent", async () => {
+    const h = host(chat(), ["x"]);
+    await h.front({ type: "set_settings", settings: RULES });
+    (h as any).breakChat();
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.sent.some((m) => m.type === "refine_skipped")).toBe(true);
+  });
+
+  test("a preview still builds when the chat cannot be read", async () => {
+    // Not a failure: a preview is about the shape of the request, and it is
+    // more useful with a stand-in message than not at all. It says which it is.
+    const h = host(chat(), ["x"]);
+    await h.front({ type: "set_settings", settings: RULES });
+    (h as any).breakChat();
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const got = h.sent.find((m) => m.type === "prompt_preview");
+    expect(got.ok).toBe(true);
+    expect(got.real).toBe(false);
+  });
+});
+
+describe("watching it arrive", () => {
+  test("a streaming connection reports as it writes", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"], {}, chat(), {
+      stream: true,
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const said = h.sent.filter((m) => m.type === "refine_progress");
+    expect(said.some((m) => m.stage === "writing")).toBe(true);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("the count goes up as Lumiverse streams the answer, and the answer is not counted twice", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her, and she did not stop.</refined>"], {}, chat(), {
+      stream: "host",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(1900);
+    const counts = h.sent.filter((m) => m.type === "refine_progress" && m.stage === "writing").map((m) => m.chars);
+    expect(counts.length).toBeGreaterThan(1);
+    expect(counts[counts.length - 1]).toBeGreaterThan(counts[0]);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her, and she did not stop.");
+  });
+
+  test("a connection that cannot stream still refines", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and streaming switched off falls back to the plain call", async () => {
+    const h = await armed(
+      ["<refined>She stepped through and the cold hit her.</refined>"],
+      { streamProgress: false },
+      chat(),
+      { stream: true },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.sent.filter((m) => m.type === "refine_progress" && m.stage === "writing").length).toBe(0);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+describe("sampler settings", () => {
+  test("nothing is sent when the reader has not set any", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].parameters).toBeUndefined();
+  });
+
+  test("only the ones they filled in are sent", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      samplers: { temperature: 0.4, top_p: "", top_k: "" },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].parameters).toEqual({ temperature: 0.4 });
+  });
+
+  test("a value past the end of its range is pulled back to the end", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      samplers: { temperature: 9, top_p: -1 },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].parameters).toEqual({ temperature: 2, top_p: 0 });
+  });
+
+  test("anything that is not a sampler is not passed on", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      samplers: { temperature: 0.4, api_key: "sk-nope", stream: true },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].parameters).toEqual({ temperature: 0.4 });
+  });
+
+  test("zero is a value, not a blank", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], {
+      samplers: { temperature: 0 },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].parameters).toEqual({ temperature: 0 });
+  });
+});
+
+describe("the backend says which build it is", () => {
+  // The panel prints its own version in a problem report. It can only print
+  // this side's by asking, and the two can differ: a tab open across an update
+  // keeps the frontend it loaded with while the server reloads this one.
+  const manifest = JSON.parse(
+    readFileSync(new URL("../spindle.json", import.meta.url), "utf8"),
+  ).version;
+
+  test("unprompted at startup, for a panel that was already open", async () => {
+    const h = host(chat(), ["x"]);
+    const said = h.sent.filter((m: any) => m.type === "backend_version");
+    expect(said.length).toBe(1);
+    expect(said[0].version).toBe(manifest);
+  });
+
+  test("and on request, for a panel that opened later and missed it", async () => {
+    const h = host(chat(), ["x"]);
+    h.sent.length = 0;
+    await h.front({ type: "get_backend_version", requestId: "r1" });
+    await wait(10);
+    const said = h.sent.filter((m: any) => m.type === "backend_version");
+    expect(said.length).toBe(1);
+    expect(said[0].version).toBe(manifest);
+    expect(said[0].requestId).toBe("r1");
+  });
+});
+
+describe("the backend after a restart", () => {
+  test("it announces itself so the panel knows to tell it everything again", async () => {
+    const h = host(chat(), ["x"]);
+    expect(h.sent.some((m) => m.type === "backend_ready")).toBe(true);
+  });
+
+  test("and refines nothing until it has been told", async () => {
+    const h = host(chat(), ["Something better."]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+  });
+});
+
+// Settings kept only in the browser would present a fresh install to anyone
+// opening Lumiverse anywhere else. They belong to the account, and on a server
+// serving several accounts they have to belong to one account each.
+describe("settings that follow the account", () => {
+  test("saving writes them to the account, not just to memory", async () => {
+    const h = await armed(["<refined>x</refined>"]);
+    expect(h.perUser["u1:settings.json"]).toBeTruthy();
+    expect(h.perUser["u1:settings.json"].contextMessages).toBe(RULES.contextMessages);
+  });
+
+  test("loading gives back what that account saved", async () => {
+    const h = await armed(["<refined>x</refined>"], { contextMessages: 11 });
+    await h.front({ type: "load_settings", requestId: "r1" });
+    await wait(10);
+    const got = h.sent.find((m: any) => m.type === "loaded_settings" && m.requestId === "r1");
+    expect(got).toBeTruthy();
+    expect(got.settings.contextMessages).toBe(11);
+  });
+
+  // The one that matters on a shared server. Two accounts, two prompts, and
+  // neither can read the other's.
+  test("one account cannot read another's settings", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    await h.front({ type: "set_settings", settings: { ...RULES, contextMessages: 3 } }, "alice");
+    await h.front({ type: "set_settings", settings: { ...RULES, contextMessages: 8 } }, "bob");
+    await h.front({ type: "load_settings", requestId: "ra" }, "alice");
+    await h.front({ type: "load_settings", requestId: "rb" }, "bob");
+    await wait(10);
+    const a = h.sent.find((m: any) => m.type === "loaded_settings" && m.requestId === "ra");
+    const b = h.sent.find((m: any) => m.type === "loaded_settings" && m.requestId === "rb");
+    expect(a.settings.contextMessages).toBe(3);
+    expect(b.settings.contextMessages).toBe(8);
+  });
+
+  test("presets are the same story", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    await h.front({ type: "save_presets", presets: [{ name: "Alice's", at: 1, settings: {} }] }, "alice");
+    await h.front({ type: "load_presets", requestId: "pb" }, "bob");
+    await wait(10);
+    const b = h.sent.find((m: any) => m.type === "loaded_presets" && m.requestId === "pb");
+    expect(b.presets).toBe(null);
+  });
+
+  // Somebody who had settings before this existed should not open the panel to
+  // a fresh install.
+  test("the old shared copy is carried up on the first read", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    h.shared["settings.json"] = JSON.stringify({ contextMessages: 6 });
+    await h.front({ type: "load_settings", requestId: "r1" });
+    await wait(10);
+    const got = h.sent.find((m: any) => m.type === "loaded_settings" && m.requestId === "r1");
+    expect(got.settings.contextMessages).toBe(6);
+    expect(h.perUser["u1:settings.json"].contextMessages).toBe(6);
+  });
+
+  // A panel starting up, or answering a backend that restarted, hands over
+  // this browser's copy, which can be older than the account's. Written, it
+  // put an old prompt back on every device: a phone opened after the prompt
+  // was changed on a computer wrote its old copy over the new one.
+  test("settings handed over to be held are not written to the account", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    await h.front({ type: "set_settings", settings: { ...RULES, contextMessages: 7 } });
+    await h.front({ type: "set_settings", settings: { ...RULES, contextMessages: 2 }, keep: true });
+    await wait(10);
+    expect(h.perUser["u1:settings.json"].contextMessages).toBe(7);
+    await h.front({ type: "load_settings", requestId: "r1" });
+    await wait(10);
+    const got = h.sent.find((m: any) => m.type === "loaded_settings" && m.requestId === "r1");
+    expect(got.settings.contextMessages).toBe(7);
+  });
+
+  test("but they are still used until the account's copy arrives", async () => {
+    const h = host(chat(), ["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.front({ type: "set_settings", settings: RULES, keep: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    expect(h.perUser["u1:settings.json"]).toBeUndefined();
+  });
+
+  test("an older save cannot finish after a newer one and stand", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    h.slowWrites(40, 0);
+    const older = h.front({ type: "set_settings", settings: { ...RULES, contextMessages: 4 } });
+    const newer = h.front({ type: "set_settings", settings: { ...RULES, contextMessages: 9 } });
+    await Promise.all([older, newer]);
+    await wait(60);
+    expect(h.perUser["u1:settings.json"].contextMessages).toBe(9);
+  });
+
+  test("and the same holds for presets", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    h.slowWrites(40, 0);
+    const older = h.front({ type: "save_presets", presets: [{ name: "Terse", at: 1, settings: { contextMessages: 4 } }] });
+    const newer = h.front({ type: "save_presets", presets: [{ name: "Terse", at: 2, settings: { contextMessages: 9 } }] });
+    await Promise.all([older, newer]);
+    await wait(60);
+    expect(h.perUser["u1:presets.json"][0].at).toBe(2);
+  });
+
+  test("and for model setups", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    h.slowWrites(40, 0);
+    const older = h.front({ type: "save_setups", setups: [{ name: "Quick", at: 1, settings: {} }] });
+    const newer = h.front({ type: "save_setups", setups: [{ name: "Quick", at: 2, settings: {} }] });
+    await Promise.all([older, newer]);
+    await wait(60);
+    expect(h.perUser["u1:setups.json"][0].at).toBe(2);
+  });
+
+  test("and for the chats switched off", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    h.slowWrites(40, 0);
+    const older = h.front({ type: "save_state", state: { chatsOff: ["chat-a"] } });
+    const newer = h.front({ type: "save_state", state: { chatsOff: [] } });
+    await Promise.all([older, newer]);
+    await wait(60);
+    expect(h.perUser["u1:state.json"].chatsOff).toEqual([]);
+  });
+
+  // Each account reads back only its own chats switched off, so two accounts
+  // on one server never leave each other's chats alone or refine them.
+  test("the chats switched off follow each account on its own", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    await h.front({ type: "save_state", state: { chatsOff: ["chat-a"] } }, "a");
+    await h.front({ type: "save_state", state: { chatsOff: ["chat-b"] } }, "b");
+    await h.front({ type: "load_state", requestId: "ra" }, "a");
+    await h.front({ type: "load_state", requestId: "rb" }, "b");
+    await h.front({ type: "load_state", requestId: "rc" }, "c");
+    const back = (id: string) => h.sent.find((m: any) => m.type === "loaded_state" && m.requestId === id);
+    expect(back("ra").state.chatsOff).toEqual(["chat-a"]);
+    expect(back("rb").state.chatsOff).toEqual(["chat-b"]);
+    expect(back("rc").state).toBe(null);
+  });
+
+  // Settings that look saved and are not is the worst shape this can take.
+  // Both stores down. One down alone is not a failure: the write falls through
+  // to the other rather than being lost, which is the point of the fallback.
+  test("a write that fails everywhere says so rather than going quiet", async () => {
+    const h = host(chat(), ["<refined>x</refined>"]);
+    h.breakStorage();
+    await h.front({ type: "set_settings", settings: RULES });
+    await wait(10);
+    expect(h.sent.some((m: any) => m.type === "account_save_failed" && m.what === "settings")).toBe(true);
+  });
+
+  // A refine still works when the disk does not, because the settings that
+  // matter are already in memory.
+  test("and a failed write does not stop the refine that follows", async () => {
+    const h = host(chat(), ["<refined>She stepped through and the cold hit her.</refined>"]);
+    h.breakStorage();
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+// Two writers on one reply. A refine takes seconds, so the message it read is
+// not necessarily the message that is there when it writes.
+describe("when something else edits the reply mid-refine", () => {
+  test("the refine is dropped rather than reverting the other edit", async () => {
+    const h = host(chat(), ["<refined>She stepped through and the cold hit her.</refined>"], {
+      whileAsking: () => h.edit("m2", "Somebody else got here first."),
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("Somebody else got here first.");
+    expect(h.skipped().join(" ")).toMatch(/changed while the rewrite/i);
+  });
+
+  test("and nothing is written at all, so the other edit survives whole", async () => {
+    const h = host(chat(), ["<refined>She stepped through and the cold hit her.</refined>"], {
+      whileAsking: () => h.edit("m2", "Somebody else got here first."),
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+  });
+
+  // Only the thinking moved, into the Reasoning box. The writing the refine
+  // was made from is unchanged, so the refine is saved, without the thinking.
+  test("the refine is kept when only the thinking was moved out", async () => {
+    const thought = chat();
+    thought[2].content = "<think>She is cold. Lead with that.</think>\n" + thought[2].content;
+    const h = host(thought, ["<refined>She stepped through and the cold hit her.</refined>"], {
+      whileAsking: () => h.edit("m2", "She stepped through and, suddenly, the cold just hit her."),
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and a changed reply is still left alone when the thinking moved too", async () => {
+    const thought = chat();
+    thought[2].content = "<think>She is cold. Lead with that.</think>\n" + thought[2].content;
+    const h = host(thought, ["<refined>She stepped through and the cold hit her.</refined>"], {
+      whileAsking: () => h.edit("m2", "Somebody else got here first."),
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("Somebody else got here first.");
+    expect(h.skipped().join(" ")).toMatch(/changed while the rewrite/i);
+  });
+
+  // The guard must not fire when nothing actually moved.
+  test("an untouched reply is still refined", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+// The panel's button and the floating button both mean "the latest reply", and
+// both send no message id whenever nothing has rendered since the page loaded,
+// which on a chat you opened and did not add to is every time. Answering that
+// with "that message is not in this chat any more" is a button doing nothing
+// and saying something untrue about why.
+describe("refining the latest reply with no message id in hand", () => {
+  test("the latest reply is found and refined", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: null });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "refine_result" && m.requestId === "r1");
+    expect(got.ok).toBe(true);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and it is the last reply, not the first thing in the chat", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: null });
+    await wait(50);
+    // m0 is the greeting and m1 is the player's line; neither is touched.
+    expect(h.writes.map((w: any) => w.id)).toEqual(["m2"]);
+  });
+
+  // A chat holding nothing but a greeting has no reply to refine. Offering the
+  // greeting would offer the one message that is always refused.
+  test("a chat with only a greeting says so plainly", async () => {
+    const h = await armed(
+      ["<refined>x</refined>"],
+      {},
+      [{ id: "m0", role: "assistant", content: "The gate stands open." }],
+    );
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: null });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "refine_result" && m.requestId === "r1");
+    expect(got.ok).toBe(false);
+    expect(got.why).toMatch(/no reply in this chat to refine yet/);
+    expect(h.writes.length).toBe(0);
+  });
+
+  // A named message that has since gone still says the right thing: it is a
+  // different case from having no id at all, and needs its own sentence.
+  test("a message id that is gone still says that, not the other thing", async () => {
+    const h = await armed(["<refined>x</refined>"]);
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "gone" });
+    await wait(50);
+    const got = h.sent.find((m: any) => m.type === "refine_result" && m.requestId === "r1");
+    expect(got.why).toMatch(/not in this chat any more/);
+  });
+});
+
+// A reasoning model is asked for its working in a tag of its own, before the
+// rewrite. The tag sits outside <REFINED>, so none of it can reach the chat,
+// and it comes back to the panel to be shown beside the refine.
+describe("the working a reasoning prompt asks for", () => {
+  const answer =
+    "<REFINE_NOTES>\n" +
+    "The second sentence restates the first. Cutting the held breath.\n" +
+    "Leaving the dialogue alone: the short voice is how she talks.\n" +
+    "</REFINE_NOTES>\n" +
+    "<REFINED>She stepped through and the cold hit her.</REFINED>";
+
+  test("only the rewrite is saved", async () => {
+    const h = await armed([answer]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and none of the working leaks into the message", async () => {
+    const h = await armed([answer]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).not.toContain("REFINE_NOTES");
+    expect(h.body("m2")).not.toContain("restates the first");
+  });
+
+  test("but it is carried back so the panel can show it", async () => {
+    const h = await armed([answer]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const carried = h.sent.filter((m: any) => m && typeof m.notes === "string" && m.notes);
+    expect(carried.length).toBeGreaterThan(0);
+    expect(carried[0].notes).toContain("Leaving the dialogue alone");
+  });
+
+  // The rewrite is on the card already, marked against what it replaced, so
+  // carrying it back under the working would be sending it twice.
+  test("and the rewrite is not carried back with it", async () => {
+    const h = await armed([answer]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const carried = h.sent.filter((m: any) => m && typeof m.notes === "string" && m.notes);
+    expect(carried[0].notes).not.toContain("the cold hit her");
+    expect(carried[0].notes).not.toContain("REFINED");
+  });
+
+  // The tags are shouted. A prompt asking in lower case still works, because
+  // the answer is read case-insensitively.
+  test("a prompt asking in lower case reads the same", async () => {
+    const h = await armed(["<refined>She stepped through and the cold hit her.</refined>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+// A reasoning block this fails to recognize is handed to the refiner as prose,
+// rewritten, and saved over the reply. That is a worse failure than missing a
+// check, which is why the list is the reader's to extend.
+describe("thinking the extension has to recognize", () => {
+  const withHead = (head: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open, and the road past it is dark." },
+    { id: "m1", role: "user", content: "i walk through it" },
+    {
+      id: "m2",
+      role: "assistant",
+      content: head + "She stepped through and, suddenly, the cold just hit her.",
+    },
+  ];
+
+  test("a built-in tag is kept out of what the model is shown", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withHead("<scratchpad>plan the edit</scratchpad>\n\n"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("plan the edit");
+    expect(h.body("m2")).toContain("<scratchpad>plan the edit</scratchpad>");
+  });
+
+  // A preset can start the reply inside the thinking tag, so the message opens
+  // mid-thought and its first tag is the closer of one it never wrote. That is
+  // still the model working, and it is not the refiner's to rewrite.
+  test("working whose opener was in the prompt is kept out too", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withHead("# The plan\nkeep it short, end on the door\n</think>\n\n"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("end on the door");
+    // Put back in front of the rewrite exactly as it was, closer and all.
+    expect(h.body("m2")).toBe(
+      "# The plan\nkeep it short, end on the door\n</think>\n\nShe stepped through and the cold hit her.",
+    );
+  });
+
+  // Special tokens a local model's template can leave around the reply. They
+  // are not the reader's writing, so they are held back and put back as they
+  // were.
+  for (const [label, head, tail] of [
+    ["a turn token", "<|assistant|>", ""],
+    ["a separator token", "<|im_sep|>", ""],
+    ["the solution markers", "<|begin_of_thought|>plan the edit<|end_of_thought|>\n<|begin_of_solution|>", "<|end_of_solution|>"],
+  ]) {
+    test(label + " around the reply is held back", async () => {
+      const msgs = withHead(head);
+      msgs[2].content = msgs[2].content + tail;
+      const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, msgs);
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(said(h)).not.toContain("<|");
+      expect(h.body("m2")).toBe(head + "She stepped through and the cold hit her." + tail);
+    });
+  }
+
+  // The formats with tokens of their own work the same way. A local model's
+  // chat template can put the opener in the prompt for any of them.
+  for (const close of ["<|END_THINKING|>", "</seed:think>", "<|end_of_thought|>", "\u25c1/think\u25b7"]) {
+    test("working with only the closer " + close + " is kept out too", async () => {
+      const h = await armed(
+        ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+        {},
+        withHead("# The plan\nkeep it short, end on the door\n" + close + "\n\n"),
+      );
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(said(h)).not.toContain("end on the door");
+      expect(h.body("m2")).toBe(
+        "# The plan\nkeep it short, end on the door\n" + close + "\n\nShe stepped through and the cold hit her.",
+      );
+    });
+  }
+
+  // The Prefix and Suffix saved on a connection, the case where Lumiverse
+  // starts the reply with the Prefix.
+  test("working with only a connection's own closer is kept out too", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withHead("# The plan\nkeep it short, end on the door\n<</plan>>\n\n"),
+      { bound: [["<<plan>>", "<</plan>>"]] },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("end on the door");
+  });
+
+  // A Suffix with no letter in it, such as ***, is also a scene break, so it
+  // does not end anything on its own.
+  test("but a connection's closer with no letter in it is a scene break", async () => {
+    const h = await armed(
+      ["<REFINED>The lamp went out. Morning came.</REFINED>"],
+      {},
+      withHead("The lamp went out.\n\n***\n\n"),
+      { bound: [["+++", "***"]] },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("The lamp went out.");
+  });
+
+  // The model ran out of room, or was stopped, while it was still thinking. The
+  // opener is there and nothing closes it, so the whole message is working and
+  // none of it is a reply to rewrite.
+  test("a reply that is only thinking with no closer is not refined", async () => {
+    const msgs = withHead("");
+    msgs[2].content = "<think>\nShe is cold, so lead with that, and then the door";
+    const h = await armed(["<REFINED>Something new.</REFINED>"], {}, msgs);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe("<think>\nShe is cold, so lead with that, and then the door");
+  });
+
+  // A model can write a plan in plain text, then its thinking block on lines
+  // of its own, then the reply. The plan and the block are both working.
+  describe("a written plan in front of a thinking block", () => {
+    const plan =
+      "**Planning the turn**\n\nThe gate scene picks up where the last one stopped. Keep it short and end on the cold.\n\nHere is the result:\n\n";
+    const block = "<reasoning>\n- where: the gate\n- mood: wary\n</reasoning>";
+    const shapes: Array<[string, string]> = [
+      ["a plain block", plan + block + "\n\n"],
+      ["a block wrapped in backticks", plan + "`" + block + "`\n\n"],
+      ["a block in square brackets", plan + "[reasoning]\n- where: the gate\n[/reasoning]\n\n"],
+    ];
+    for (const [label, head] of shapes) {
+      test(label + ": only the reply is sent, and the rest is put back", async () => {
+        const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, withHead(head));
+        await h.ended({ chatId: "c1", messageId: "m2" });
+        await wait(50);
+        expect(said(h)).not.toContain("Planning the turn");
+        expect(said(h)).not.toContain("mood: wary");
+        expect(h.body("m2")).toBe(head + "She stepped through and the cold hit her.");
+      });
+    }
+
+    // Every other format, with the plan in front. Only the reply is sent.
+    const formats: Array<[string, string]> = [
+      ["pipes", "<|think|>\n- mood: wary\n<|/think|>\n\n"],
+      ["Harmony", "<|channel|>analysis<|message|>mood: wary<|end|><|start|>assistant<|channel|>final<|message|>"],
+      ["Gemma 4", "<|channel>thought\nmood: wary\n<channel|>"],
+      ["Cohere", "<|START_THINKING|>mood: wary<|END_THINKING|><|START_RESPONSE|>"],
+      ["Seed-OSS", "<seed:think>mood: wary</seed:think>\n"],
+      ["begin and end of thought", "<|begin_of_thought|>mood: wary<|end_of_thought|>\n"],
+      ["Kimi", "\u25c1think\u25b7mood: wary\u25c1/think\u25b7\n"],
+    ];
+    for (const [label, fmt] of formats) {
+      test(label + ": the plan in front is held back with the block", async () => {
+        const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, withHead(plan + fmt));
+        await h.ended({ chatId: "c1", messageId: "m2" });
+        await wait(50);
+        expect(said(h)).not.toContain("Planning the turn");
+        expect(said(h)).not.toContain("mood: wary");
+        expect(said(h)).not.toContain("<|");
+        expect(h.body("m2").indexOf(plan + fmt)).toBe(0);
+        expect(h.body("m2")).toContain("She stepped through and the cold hit her.");
+      });
+    }
+
+    test("the card is told which part was held back, so it can leave it out", async () => {
+      const head = plan + block + "\n\n";
+      const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, withHead(head));
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      const done = h.sent.find((m: any) => m.type === "refined");
+      expect(done.held).toBe(head);
+      expect(done.before.indexOf(done.held)).toBe(0);
+      expect(done.after.indexOf(done.held)).toBe(0);
+    });
+
+    test("a thought tagged inside a sentence stays part of the reply", async () => {
+      const msgs = withHead("");
+      msgs[2].content = "She stepped through. <thought>Too cold.</thought> She kept going anyway, suddenly.";
+      const h = await armed(["<REFINED>She stepped through. <thought>Too cold.</thought> She kept going.</REFINED>"], {}, msgs);
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(said(h)).toContain("She stepped through.");
+    });
+  });
+
+  // Mistral's own thinking format, which uses square brackets and capitals.
+  test("Mistral's [THINK] working is kept out of what the model is shown", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, withHead("[THINK]lead with the cold, then the gate[/THINK]\n\n"));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("then the gate");
+    expect(h.body("m2")).toBe("[THINK]lead with the cold, then the gate[/THINK]\n\nShe stepped through and the cold hit her.");
+  });
+
+  test("a reply that is only [THINK] working with no closer is not refined", async () => {
+    const msgs = withHead("");
+    msgs[2].content = "[THINK]She is cold, so lead with that, and then the gate";
+    const h = await armed(["<REFINED>Something new.</REFINED>"], {}, msgs);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+  });
+
+  test("[THINK] working in the refiner's own answer is not saved", async () => {
+    const h = await armed(["<REFINED>[THINK]trim the adverbs[/THINK]She stepped through and the cold hit her.</REFINED>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // A model can quote the thinking format it was given, tags and all, while it
+  // is still thinking. The closer in the quote is an example. The thinking ends
+  // at the closer that matches its own opener, so none of the plan after the
+  // quote is handed to the refiner.
+  describe("a thinking format quoted inside the thinking", () => {
+    const plan = "\n\n# Part one\nopen on the bell tower\n\n# Part two\nend on the gate\n</think>\n\n";
+    const shapes: Array<[string, string]> = [
+      ["in a code block", "<think>\nThe format to avoid:\n```html\n<think>\nnotes go here\n</think>\n```"],
+      ["with no code block", "<think>\nThe format to avoid is <think> notes go here </think> on its own line."],
+      ["in backticks", "<think>\nI must not write `</think>` early."],
+    ];
+    for (const [label, start] of shapes) {
+      test(label + ", the plan after the quote is kept out", async () => {
+        const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, withHead(start + plan));
+        await h.ended({ chatId: "c1", messageId: "m2" });
+        await wait(50);
+        expect(said(h)).not.toContain("end on the gate");
+        expect(said(h)).not.toContain("open on the bell tower");
+        expect(h.body("m2")).toBe(start + plan + "She stepped through and the cold hit her.");
+      });
+    }
+
+    test("with the opener in the prompt, the quote does not stop the closer being found", async () => {
+      const head = "The format to avoid:\n```\n<think>\nnotes go here\n</think>\n```" + plan;
+      const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {}, withHead(head));
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(said(h)).not.toContain("end on the gate");
+      expect(h.body("m2")).toBe(head + "She stepped through and the cold hit her.");
+    });
+
+    test("a tag the reply only mentions in backticks stays in the reply", async () => {
+      const msgs = withHead("<think>plan the edit</think>\n\n");
+      msgs[2].content = "<think>plan the edit</think>\n\nThe sign read `</think>` and nothing else, suddenly.";
+      const h = await armed(["<REFINED>Something new.</REFINED>"], {}, msgs);
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      // The whole reply is sent, the part after the backticks included, and the
+      // thinking in front of it is not.
+      expect(said(h)).toContain("The sign read");
+      expect(said(h)).toContain("nothing else, suddenly");
+      expect(said(h)).not.toContain("plan the edit");
+    });
+  });
+
+  test("but a closer with an opener in front of it is left to the usual rule", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withHead("<think>plan the edit</think>\n\n"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("plan the edit");
+    expect(h.body("m2")).toContain("<think>plan the edit</think>");
+  });
+
+  test("an unusual one is sent as prose until it is named", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withHead("<mythink>plan the edit</mythink>\n\n"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("plan the edit");
+  });
+
+  test("and is kept out once the reader names it", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { thinkTags: "mythink" },
+      withHead("<mythink>plan the edit</mythink>\n\n"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("plan the edit");
+    expect(h.body("m2")).toContain("<mythink>plan the edit</mythink>");
+  });
+
+  test("a name pasted with its brackets still works", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { thinkTags: "<mythink>" },
+      withHead("<mythink>plan the edit</mythink>\n\n"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("plan the edit");
+  });
+
+  // A name is letters, digits, underscores and hyphens. Anything that would
+  // change what the pattern means is dropped rather than escaped.
+  test("a name that would break the pattern cannot", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { thinkTags: ".*|(" },
+      withHead("<mythink>plan the edit</mythink>\n\n"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    // The junk name matched nothing, so the block went through as prose and the
+    // message arrived whole rather than the pattern eating it.
+    expect(said(h)).toContain("plan the edit");
+    expect(said(h)).toContain("the cold just hit her");
+  });
+});
+
+// The formats that name a channel after the opener rather than naming the tag.
+// None of them can be reached by adding a name to the list: the tag is
+// "channel" in every one, the reasoning word sits in the content, and two of
+// them close on a token with a different name again. A block these miss is
+// handed over as prose, rewritten, and saved in place of the reply.
+describe("reasoning formats that are not a matched pair of tags", () => {
+  const REPLY = "She stepped through and, suddenly, the cold just hit her.";
+  const WORKING = "weigh the cold against the light";
+
+  // Each entry is one message exactly as a backend hands it over.
+  const FORMATS: Array<[string, string]> = [
+    ["Gemma 4", "<|turn>model\n<|channel>thought\n" + WORKING + "\n<channel|>" + REPLY + "<turn|>"],
+    ["Gemma 4 with no working in it", "<|turn>model\n<|channel>thought\n<channel|>" + REPLY + "<turn|>"],
+    [
+      "Harmony",
+      "<|start|>assistant<|channel|>analysis<|message|>" +
+        WORKING +
+        "<|end|><|start|>assistant<|channel|>final<|message|>" +
+        REPLY +
+        "<|return|>",
+    ],
+    ["Harmony carrying only the reply", "<|channel|>final<|message|>" + REPLY + "<|return|>"],
+    [
+      "Cohere",
+      "<|START_THINKING|>" + WORKING + "<|END_THINKING|><|START_RESPONSE|>" + REPLY + "<|END_RESPONSE|>",
+    ],
+    ["Seed-OSS", "<seed:think>" + WORKING + "</seed:think>" + REPLY],
+    ["begin and end of thought", "<|begin_of_thought|>" + WORKING + "<|end_of_thought|>\n" + REPLY],
+    ["Kimi", "\u25c1think\u25b7" + WORKING + "\u25c1/think\u25b7" + REPLY],
+  ];
+
+  const withRaw = (raw: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open, and the road past it is dark." },
+    { id: "m1", role: "user", content: "i walk through it" },
+    { id: "m2", role: "assistant", content: raw },
+  ];
+
+  for (const [name, raw] of FORMATS) {
+    test(name + ": the working is never sent to be rewritten", async () => {
+      const h = await armed(
+        ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+        {},
+        withRaw(raw),
+      );
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(said(h)).not.toContain(WORKING);
+      // The prose either side of it did go, or the wrapper ate the reply.
+      expect(said(h)).toContain("the cold just hit her");
+    });
+
+    test(name + ": every control token survives the save", async () => {
+      const h = await armed(
+        ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+        {},
+        withRaw(raw),
+      );
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      const saved = h.body("m2");
+      expect(saved).toContain("She stepped through and the cold hit her.");
+      // Whatever framed the reply frames the rewrite, unchanged. A marker the
+      // refiner was allowed to see is a marker it can drop or reword.
+      for (const token of raw.match(/<\|?[\w:|]+\|?>/g) || []) expect(saved).toContain(token);
+      if (raw.includes(WORKING)) expect(saved).toContain(WORKING);
+    });
+  }
+
+  // The reply travels in a channel too, and it is the one thing that must not
+  // be mistaken for working. Getting this wrong deletes the answer rather than
+  // the reasoning in front of it.
+  test("the final channel is the reply and is refined, not stripped", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withRaw("<|channel|>analysis<|message|>" + WORKING + "<|end|><|channel|>final<|message|>" + REPLY + "<|return|>"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("the cold just hit her");
+    expect(h.body("m2")).toContain("She stepped through and the cold hit her.");
+  });
+
+  // A refining model that answers in one of these formats has its own working
+  // taken off the answer, rather than saved into the chat as part of the
+  // rewrite.
+  test("the refiner's own channel working is kept out of the chat", async () => {
+    const h = await armed([
+      "<|channel|>analysis<|message|>plan the edit<|end|><|channel|>final<|message|><REFINED>She stepped through and the cold hit her.</REFINED><|return|>",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // The two reasoning switches govern the model's working. A turn marker is not
+  // working, so it comes off either way, or it is saved into the chat as text.
+  // Inside the tags, since what is outside them never reaches this check.
+  test("control tokens come off the answer with the reasoning switch off", async () => {
+    const h = await armed(
+      ["<REFINED><|turn>model\nShe stepped through and the cold hit her.<turn|></REFINED>"],
+      { stripAnswerThinking: false },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // With the tags off the whole answer is the rewrite, markers and all, which
+  // is the other way they reach the chat.
+  test("and come off when the whole answer is taken as the rewrite", async () => {
+    const h = await armed(
+      ["<|turn>model\nShe stepped through and the cold hit her.<turn|>"],
+      { stripAnswerThinking: false, wrapOutput: false },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // A marker sitting straight in front of the reply names no role, so nothing
+  // may be eaten with it. Taking a word here would delete the reader's writing.
+  test("a marker with no role after it keeps the first word of the reply", async () => {
+    const h = await armed(
+      ["<REFINED><|start|>She stepped through and the cold hit her.</REFINED>"],
+      { stripAnswerThinking: false },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // Two spaces before a line break are a hard break in markdown. Tidying the
+  // whole passage after a removal would delete one the model meant to write, so
+  // the tidy only acts where a marker actually came out.
+  test("a hard line break in the answer survives", async () => {
+    const h = await armed([
+      "<REFINED>She stepped through the gate.  \nThe cold hit her.</REFINED>",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through the gate.  \nThe cold hit her.");
+  });
+
+  test("a message that is working and nothing else is refused rather than sent", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withRaw("<|channel|>analysis<|message|>" + WORKING + "<|end|>"),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toContain(WORKING);
+    expect(h.asked.length).toBe(0);
+  });
+
+  // The same for the formats with fixed tokens: opened, and never closed.
+  for (const open of ["<|START_THINKING|>", "<seed:think>", "<|begin_of_thought|>", "\u25c1think\u25b7"]) {
+    test("working cut off inside " + open + " is refused rather than sent", async () => {
+      const h = await armed(
+        ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+        {},
+        withRaw(open + WORKING),
+      );
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(open + WORKING);
+      expect(h.asked.length).toBe(0);
+    });
+  }
+
+  // The thinking start and end a reader saved on a connection, under
+  // Lumiverse's Reasoning settings, are a format of their own.
+  test("a connection's own thinking markers are held back too", async () => {
+    const raw = "@@plan@@\n" + WORKING + "\n@@done@@\n" + REPLY;
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withRaw(raw),
+      { bound: [["@@plan@@\n", "\n@@done@@"]] },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain(WORKING);
+    expect(h.body("m2")).toContain("@@plan@@\n" + WORKING + "\n@@done@@");
+    expect(h.body("m2")).toContain("She stepped through and the cold hit her.");
+  });
+
+  test("and a plan written in front of them is held back with them", async () => {
+    const plan = "**Planning the turn**\n\nEnd on the cold.\n\n";
+    const raw = plan + "@@plan@@\n" + WORKING + "\n@@done@@\n" + REPLY;
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withRaw(raw),
+      { bound: [["@@plan@@\n", "\n@@done@@"]] },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("Planning the turn");
+    expect(said(h)).not.toContain(WORKING);
+    expect(h.body("m2").indexOf(plan + "@@plan@@")).toBe(0);
+  });
+
+  test("and a marker too short to be safe is left alone", async () => {
+    const raw = "(" + WORKING + ")\n" + REPLY;
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      withRaw(raw),
+      { bound: [["(", ")"]] },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain(WORKING);
+  });
+
+  // A local refining model whose template opens the thinking in the prompt
+  // answers mid-thought, with only the closer. With the tags off the whole
+  // answer is the rewrite, so the working in front of the closer has to go.
+  test("the refiner's working with only a closer is kept out of the chat", async () => {
+    const h = await armed(
+      ["plan the edit and keep it short\n</think>\n\nShe stepped through and the cold hit her."],
+      { wrapOutput: false },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and the same for Kimi's working in the answer", async () => {
+    const h = await armed([
+      "<REFINED>\u25c1think\u25b7plan the edit\u25c1/think\u25b7She stepped through and the cold hit her.</REFINED>",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+// The * marks around an action or a stressed word. With the check on, a
+// rewrite that has fewer of them, or one left without its pair, is refused.
+describe("the * marks in a reply", () => {
+  const starred = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open, and the road past it is dark." },
+    { id: "m1", role: "user", content: "i walk through it" },
+    { id: "m2", role: "assistant", content: "*She steps through.* The cold, suddenly, just *hits* her." },
+  ];
+
+  test("a rewrite that drops them is refused with the check on", async () => {
+    const h = await armed(["<REFINED>She steps through. The cold hits her.</REFINED>"], { guardStars: true }, starred());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("*She steps through.* The cold, suddenly, just *hits* her.");
+    expect(h.skipped().some((w: string) => /lost 4 of the reply's 4 \* marks/.test(w))).toBe(true);
+  });
+
+  test("a rewrite that leaves one unpaired is refused", async () => {
+    const h = await armed(["<REFINED>*She steps through.* The cold *hits her. Then* the *wind.</REFINED>"], { guardStars: true }, starred());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.skipped().some((w: string) => /without its pair/.test(w))).toBe(true);
+  });
+
+  test("a rewrite that keeps them is saved", async () => {
+    const h = await armed(["<REFINED>*She steps through.* The cold *hits* her.</REFINED>"], { guardStars: true }, starred());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("*She steps through.* The cold *hits* her.");
+  });
+
+  test("with the check off, which is the default, a rewrite without them is saved", async () => {
+    const h = await armed(["<REFINED>She steps through. The cold hits her.</REFINED>"], {}, starred());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She steps through. The cold hits her.");
+  });
+});
+
+// An answer with no tags, when the prompt asks for them, did not follow the
+// format. It is dropped rather than saved whole.
+describe("an answer with no tags", () => {
+  test("is dropped, and the reply stays as it was", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { requireTags: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+    expect(h.skipped().some((w: string) => /REFINED> tags/.test(w))).toBe(true);
+  });
+
+  test("an answer with the tags is saved", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], { requireTags: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("is saved with Drop an answer with no tags off", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { requireTags: false });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("a prompt that never asks for the tags is not held to them", async () => {
+    const plain = PROMPT.map((b: any) => ({ ...b, text: String(b.text).replace(/<\/?REFINED>/gi, "") }));
+    const h = await armed(["She stepped through and the cold hit her."], { requireTags: true, blocks: plain });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+// A reply where the model refused is not refined by the automatic pass. It
+// would cost a call and give back another refusal.
+describe("a reply that is a refusal", () => {
+  const refusing = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open, and the road past it is dark." },
+    { id: "m1", role: "user", content: "i walk through it" },
+    {
+      id: "m2",
+      role: "assistant",
+      content: "I won't produce the next part. It is graphic, and it goes past what I will make, so I am declining.",
+    },
+  ];
+
+  test("is left as it is, and nothing is asked", async () => {
+    const h = await armed(["<REFINED>Something else.</REFINED>"], {}, refusing());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toContain("I won't produce the next part");
+    expect(h.stood().some((w: string) => /refusing/.test(w))).toBe(true);
+  });
+
+  test("is refined with Leave a refusal as it is off", async () => {
+    const h = await armed(["<REFINED>Something else.</REFINED>"], { skipRefusals: false }, refusing());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("is refined when you press the button", async () => {
+    const h = await armed(["<REFINED>Something else.</REFINED>"], {}, refusing());
+    await h.front({ type: "refine_now", requestId: "r1", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("a scene that starts the same way is still refined", async () => {
+    const scene = refusing();
+    scene[2].content = "I can't continue up the ridge tonight. My knees have given out, and the camp is still two miles off.";
+    const h = await armed(["<REFINED>Something else.</REFINED>"], {}, scene);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+  });
+});
+
+// A strict OpenAI-compatible endpoint rejects the whole request over one field
+// it does not take, rather than ignoring it. NVIDIA's build does this with
+// max_context and reasoning, and the refine died with a 400 that read like a
+// fault in somebody's rules.
+describe("a connection that refuses a field", () => {
+  const REFUSAL =
+    "Custom (OpenAI-compatible) generate failed (400): Validation: Unsupported parameter(s): `max_context`, `reasoning`";
+
+  const withFields = {
+    samplers: { max_context: 250000, temperature: 0.5 },
+    thinkingMode: "custom",
+    thinkingEffort: "medium",
+  };
+
+  test("the refine lands, after asking again without the fields it named", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      withFields,
+      chat(),
+      { failFirst: { times: 1, why: REFUSAL } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    expect(h.asked.length).toBe(2);
+  });
+
+  test("the second ask drops only what was named", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      withFields,
+      chat(),
+      { failFirst: { times: 1, why: REFUSAL } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const first = h.asked[0];
+    const second = h.asked[1];
+    expect(first.parameters.max_context).toBe(250000);
+    expect(first.reasoning).toBeTruthy();
+    expect(second.parameters.max_context).toBeUndefined();
+    expect(second.reasoning).toBeUndefined();
+    // The one it did not complain about is still sent.
+    expect(second.parameters.temperature).toBe(0.5);
+  });
+
+  test("a refusal about something never sent changes nothing", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      withFields,
+      chat(),
+      { failFirst: { times: 1, why: "400: Unsupported parameter(s): `logit_bias`" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(h.body("m2")).toContain("the cold just hit her");
+  });
+
+  test("and it only asks again once", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      withFields,
+      chat(),
+      { failFirst: { times: 2, why: REFUSAL } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toContain("the cold just hit her");
+  });
+});
+
+// What the model thought before it wrote the reply, sent only when a block
+// asks for it with {{reply_thinking}}.
+describe("the reply's thinking, for a block that asks for it", () => {
+  const blocks = [
+    { id: "plan", name: "Plan", on: true, role: "system", text: "<plan>\nWhat it meant.\n{{reply_thinking}}\n</plan>" },
+    { id: "turn", name: "Passage", on: true, role: "user", text: "<passage>\n{{message}}\n</passage>" },
+    { id: "out", name: "Out", on: true, role: "user", text: "Answer in <REFINED> tags." },
+  ];
+  const sent = (h: any) => (h.asked[0].messages || []).map((m: any) => m.content).join("\n\n");
+  const withThinking = (m2: any) => [chat()[0], chat()[1], { ...chat()[2], ...m2 }];
+  const answer = ["<REFINED>She stepped through and the cold hit her.</REFINED>"];
+
+  test("the thinking Lumiverse keeps beside the reply goes in", async () => {
+    const h = await armed(answer, { blocks }, withThinking({ extra: { reasoning: "Keep it short. The cold is the point." } }));
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(sent(h)).toContain("Keep it short. The cold is the point.");
+    expect(sent(h)).toContain("What it meant.");
+  });
+
+  test("thinking written at the start of the reply goes in, without its tags", async () => {
+    const h = await armed(answer, { blocks }, withThinking({ content: "<think>Open on the door.</think>She stepped through and, suddenly, the cold just hit her." }));
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(sent(h)).toContain("Open on the door.");
+    expect(sent(h)).not.toMatch(/<think>|<\/think>/);
+  });
+
+  test("with no thinking, the block is left out whole", async () => {
+    const h = await armed(answer, { blocks }, chat());
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(sent(h)).not.toContain("What it meant.");
+    expect(sent(h)).not.toContain("<plan>");
+  });
+
+  test("with the block switched off, none of it is sent", async () => {
+    const off = blocks.map((b) => (b.id === "plan" ? { ...b, on: false } : b));
+    const h = await armed(answer, { blocks: off }, withThinking({ extra: { reasoning: "Keep it short. The cold is the point." } }));
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(sent(h)).not.toContain("The cold is the point.");
+  });
+
+  test("long thinking is cut to its end", async () => {
+    const long = "early plan ".repeat(3000) + "THE LAST DECISION.";
+    const h = await armed(answer, { blocks }, withThinking({ extra: { reasoning: long } }));
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(sent(h)).toContain("THE LAST DECISION.");
+    expect(sent(h).length).toBeLessThan(13500);
+  });
+
+  test("Most tokens of the reply's thinking sets the cut, and the Log is told", async () => {
+    const long = "early plan ".repeat(400) + "THE LAST DECISION.";
+    const h = await armed(answer, { blocks, maxThinkingTokens: 100 }, withThinking({ extra: { reasoning: long } }));
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(sent(h)).toContain("THE LAST DECISION.");
+    const plan = /<plan>([\s\S]*?)<\/plan>/.exec(sent(h));
+    expect(plan && plan[1].length).toBeLessThan(600);
+    const told = h.sent.filter((m: any) => m.type === "reply_thinking_sent").pop();
+    expect(told.tokens).toBeLessThanOrEqual(100);
+    expect(told.of).toBeGreaterThan(told.tokens);
+  });
+
+  test("0 sends all of it", async () => {
+    const long = "early plan ".repeat(3000) + "THE LAST DECISION.";
+    const h = await armed(answer, { blocks, maxThinkingTokens: 0 }, withThinking({ extra: { reasoning: long } }));
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(80);
+    expect(sent(h)).toContain(long);
+  });
+
+  // A provider can decline a request that holds another model's thinking, so a
+  // decline with the thinking sent names the block that sent it.
+  test("a decline with the thinking sent names that block", async () => {
+    const h = await armed(answer, { blocks, retryRefine: 2 }, withThinking({ extra: { reasoning: "Keep it short." } }), {
+      fail: "Lantern generation failed: The provider declined the response (reasoning_extraction).",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(200);
+    expect(h.asked.length).toBe(1);
+    expect(h.skipped().join(" ")).toMatch(/reply_thinking.*switched off/);
+  });
+
+  test("and a decline without it does not", async () => {
+    const h = await armed(answer, { blocks, retryRefine: 2 }, chat(), {
+      fail: "Lantern generation failed: The provider declined the response (reasoning_extraction).",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(200);
+    expect(h.skipped().join(" ")).toMatch(/reasoning_extraction/);
+    expect(h.skipped().join(" ")).not.toMatch(/reply_thinking/);
+  });
+});
+
+// A reply stopped or deleted while it, or a reply beside it, is being refined.
+// The model call is ended, nothing is saved, and it is reported as called off
+// with the reason, not as a failed refine.
+describe("a refine is called off by what happens to its reply", () => {
+  const slow = { delays: [400] };
+  const better = ["She stepped through and the cold hit her."];
+  const before = "She stepped through and, suddenly, the cold just hit her.";
+
+  const cases: Array<[string, (h: any) => void, RegExp]> = [
+    ["the reply is deleted", (h) => h.fire("MESSAGE_DELETED", { chatId: "c1", messageId: "m2" }, "u1"), /deleted while it was being refined/],
+    ["a swipe of the reply is deleted", (h) => h.fire("MESSAGE_SWIPED", { chatId: "c1", action: "deleted", message: { id: "m2" } }, "u1"), /swipe of that message was deleted/],
+    ["the chat is deleted", (h) => h.fire("CHAT_DELETED", { id: "c1" }, "u1"), /chat was deleted/],
+    ["a reply in the chat is stopped", (h) => h.fire("GENERATION_STOPPED", { chatId: "c1", generationId: "g2" }, "u1"), /reply in this chat was stopped/],
+  ];
+  for (const [name, happen, why] of cases) {
+    test(name + ": the call is ended, nothing is saved, and the panel is told why", async () => {
+      const h = await armed(better, {}, chat(), slow);
+      const going = h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+      await wait(120);
+      expect(h.asked.length).toBe(1);
+      happen(h);
+      await going;
+      await wait(60);
+      // Ended well before the model would have answered.
+      expect(h.stoppedCalls).toEqual([0]);
+      expect(h.writes.length).toBe(0);
+      expect(h.body("m2")).toBe(before);
+      expect(h.stood().join(" ")).toMatch(why);
+      expect(h.skipped()).toEqual([]);
+    });
+  }
+
+  test("another reply deleted in the chat leaves the refine alone", async () => {
+    const h = await armed(better, {}, chat(), slow);
+    const going = h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(120);
+    h.fire("MESSAGE_DELETED", { chatId: "c1", messageId: "m0" }, "u1");
+    await going;
+    await wait(60);
+    expect(h.stoppedCalls).toEqual([]);
+    expect(h.body("m2")).toBe(better[0]);
+  });
+
+  test("a reply stopped in another chat leaves the refine alone", async () => {
+    const h = await armed(better, {}, chat(), slow);
+    const going = h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(120);
+    h.fire("GENERATION_STOPPED", { chatId: "c9", generationId: "g9" }, "u1");
+    await going;
+    await wait(60);
+    expect(h.body("m2")).toBe(better[0]);
+  });
+
+  test("another account's reply being deleted leaves the refine alone", async () => {
+    const h = await armed(better, {}, chat(), slow);
+    const going = h.ended({ chatId: "c1", messageId: "m2", generationId: "g1", userId: "u1" });
+    await wait(120);
+    h.fire("MESSAGE_DELETED", { chatId: "c1", messageId: "m2" }, "u2");
+    await going;
+    await wait(60);
+    expect(h.body("m2")).toBe(better[0]);
+  });
+
+  test("a stopped reply does not call off a refine of your own message", async () => {
+    const h = await armed(["I walk through it."], {}, chat(), slow);
+    const going = h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(120);
+    expect(h.asked.length).toBe(1);
+    h.fire("GENERATION_STOPPED", { chatId: "c1", generationId: "g2" }, "u1");
+    await going;
+    await wait(60);
+    expect(h.stoppedCalls).toEqual([]);
+    expect(h.body("m1")).toBe("I walk through it.");
+  });
+
+  test("a refine started with the button is called off the same way, and says why", async () => {
+    const h = await armed(better, {}, chat(), slow);
+    const going = h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    h.fire("MESSAGE_DELETED", { chatId: "c1", messageId: "m2" }, "u1");
+    await going;
+    await wait(60);
+    expect(h.stoppedCalls).toEqual([0]);
+    expect(h.writes.length).toBe(0);
+    const result = h.sent.filter((m: any) => m.type === "refine_result").pop() || {};
+    expect(result.ok).toBe(false);
+    expect(String(result.why)).toMatch(/deleted while it was being refined/);
+  });
+
+  test("a reply stopped while the pass waits in the gap between refines is not refined", async () => {
+    const h = await armed(better, { refineGap: 1, refineAgain: true }, chat());
+    // The first pass sets the gap, and the second waits in it.
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(40);
+    const asks = h.asked.length;
+    h.edit("m2", before);
+    const going = h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(150);
+    h.fire("GENERATION_STOPPED", { chatId: "c1", generationId: "g3" }, "u1");
+    await going;
+    await wait(60);
+    expect(h.asked.length).toBe(asks);
+    expect(h.stood().join(" ")).toMatch(/reply in this chat was stopped/);
+  });
+});
+
+describe("stopping a refine", () => {
+  test("a stop reaches the run and the reply is left alone", async () => {
+    const h = host(chat(), ["<REFINED>She stepped through and the cold hit her.</REFINED>"], {
+      // Stop it while the model is still "thinking".
+      whileAsking: () => {
+        h.front({ type: "cancel_refine", requestId: "s1" });
+      },
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const said2 = h.sent.find((m: any) => m.type === "refine_stopped" && m.requestId === "s1");
+    expect(said2).toBeTruthy();
+    expect(said2.stopped).toBeGreaterThan(0);
+  });
+
+  // A refine spends time between its calls to the models: reading the chat,
+  // the card and the lore, and building the prompt. A stop pressed then still
+  // finds the refine, says it stopped something, and no model is asked.
+  test("a stop pressed while the chat is still being read stops the refine", async () => {
+    const h = host(chat(), ["<REFINED>She stepped through and the cold hit her.</REFINED>"], {
+      whileReading: () => {
+        h.front({ type: "cancel_refine", requestId: "s3" });
+      },
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const got = h.sent.find((m: any) => m.type === "refine_stopped" && m.requestId === "s3");
+    expect(got && got.stopped).toBeGreaterThan(0);
+    expect(h.asked.length).toBe(0);
+    expect(h.writes.length).toBe(0);
+    expect(h.stood().some((w: string) => /stopped/.test(w))).toBe(true);
+  });
+
+  test("stopping when nothing is running says so rather than claiming otherwise", async () => {
+    const h = await armed(["<REFINED>x</REFINED>"]);
+    await h.front({ type: "cancel_refine", requestId: "s1" });
+    await wait(10);
+    const got = h.sent.find((m: any) => m.type === "refine_stopped" && m.requestId === "s1");
+    expect(got.stopped).toBe(0);
+  });
+
+  // With the wait switched off there is no timer to end a run, so Stop is the
+  // only way out and it has to keep working. The run is still held for that
+  // reason and no other.
+  test("a stop still reaches the run with the wait switched off", async () => {
+    const h = host(chat(), ["<REFINED>She stepped through and the cold hit her.</REFINED>"], {
+      whileAsking: () => {
+        h.front({ type: "cancel_refine", requestId: "s2" });
+      },
+    });
+    await h.front({ type: "set_settings", settings: { ...RULES, timeoutSecs: 0 } });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const said = h.sent.find((m: any) => m.type === "refine_stopped" && m.requestId === "s2");
+    expect(said).toBeTruthy();
+    expect(said.stopped).toBeGreaterThan(0);
+  });
+
+  // Zero is a setting, not a missing value, and it reaches the backend as one.
+  // Proving the timer is really absent would need a refine slower than the
+  // default wait, which is a minute and a half of test, so this checks the step
+  // that was actually wrong: the setting arriving and being kept.
+  test("the wait switched off reaches the backend as nought", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.front({ type: "set_settings", settings: { ...RULES, timeoutSecs: 0 } });
+    await h.front({ type: "load_settings", requestId: "q1" });
+    await wait(20);
+    const got = h.sent.find((m: any) => m.type === "loaded_settings" && m.requestId === "q1");
+    expect(got).toBeTruthy();
+    expect(got.settings.timeoutSecs).toBe(0);
+  });
+});
+
+// The failure the other checks cannot see. A softened reply is not a refusal,
+// is the right length, and keeps every protected token. It is only wrong beside
+// the original, which is the one thing nothing else here looks at.
+describe("a rewrite that swapped the word for a softer one", () => {
+  // The count check needs three strong words in the reply before it will speak,
+  // so a reply whose one killed came back unalived walks straight past it. The
+  // pair check is for that: one confirmed swap, named as a swap.
+  const killed = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open." },
+    { id: "m1", role: "user", content: "i go in" },
+    {
+      id: "m2",
+      role: "assistant",
+      content: "She killed him where he stood, and did not look back at the door.",
+    },
+  ];
+
+  test("a euphemism put in where the blunt word came out is refused", async () => {
+    const h = await armed(
+      ["<REFINED>She unalived him where he stood, and did not look back at the door.</REFINED>"],
+      {},
+      killed(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/softened the reply/i);
+    expect(h.skipped().join(" ")).toMatch(/unalived for killed/i);
+  });
+
+  // Both halves, or nothing. These two are the whole reason ordinary English
+  // can sit on the list at all, and each of them fired on an earlier draft that
+  // only looked at one end.
+  test("the soft word arriving on its own is not softening", async () => {
+    const h = await armed(
+      [
+        "<REFINED>She killed him where he stood. It did not eliminate the problem, " +
+          "and she did not look back at the door.</REFINED>",
+      ],
+      {},
+      killed(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("the blunt word leaving on its own is not softening", async () => {
+    const h = await armed(
+      ["<REFINED>She shot him where he stood, and did not look back at the door.</REFINED>"],
+      {},
+      killed(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+
+  // A reply that always said it, and a rewrite that kept it. The model did not
+  // put it there, so there is no swap to find, list or no list.
+  test("a soft word the reply already used is left alone", async () => {
+    const h = await armed(
+      [
+        "<REFINED>The order was to eliminate him. She killed him where he stood, " +
+          "and did not look back at the door.</REFINED>",
+      ],
+      {},
+      [
+        { id: "m0", role: "assistant", content: "The gate stands open." },
+        { id: "m1", role: "user", content: "i go in" },
+        {
+          id: "m2",
+          role: "assistant",
+          content: "The order was to eliminate him, so she killed him where he stood.",
+        },
+      ],
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("whole words only, so a longer word carrying one is not a match", async () => {
+    const h = await armed(
+      ["<REFINED>She killed him where he stood, and the intimacies went unmentioned.</REFINED>"],
+      {},
+      [
+        { id: "m0", role: "assistant", content: "The gate stands open." },
+        { id: "m1", role: "user", content: "i go in" },
+        {
+          id: "m2",
+          role: "assistant",
+          content: "She killed him where he stood, and the sex went unmentioned.",
+        },
+      ],
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("a pair of the reader's own is watched too", async () => {
+    const h = await armed(
+      ["<REFINED>She bested him where he stood, and did not look back at the door.</REFINED>"],
+      { softenSwaps: "bested => killed" },
+      killed(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/bested for killed/i);
+  });
+
+  test("switched off with the rest of the softening check", async () => {
+    const h = await armed(
+      ["<REFINED>She unalived him where he stood, and did not look back at the door.</REFINED>"],
+      { guardSoften: false },
+      killed(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+});
+
+// A judgment call over prose is only as good as what it leaves alone, so this
+// runs both directions. The quiet half is the one that matters: a check that
+// fires on ordinary writing gets switched off, and then it catches nothing.
+//
+// Every soft term that is also ordinary English gets a line here, because those
+// are the ones a one-ended check would have fired on.
+describe("the swap check against prose that only looks like softening", () => {
+  const reply = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+
+  const quiet: Array<[string, string, string]> = [
+    [
+      "a soft term used in its ordinary sense, in both",
+      "She defeated him in the duel and he bled out on the sand.",
+      "She defeated him in the duel. He bled out on the sand before the horn went.",
+    ],
+    [
+      "eliminate about a possibility, not a person",
+      "He killed the lamp and eliminated every reason to stay.",
+      "He killed the lamp. Every reason to stay was eliminated with it.",
+    ],
+    [
+      "intimacy meaning closeness",
+      "There was an intimacy to the room that she killed with one sentence.",
+      "The room had an intimacy she killed with a single sentence.",
+    ],
+    [
+      "folds of cloth",
+      "Blood ran into the folds of her cloak and would not come out.",
+      "The blood ran down into the folds of her cloak and set there.",
+    ],
+    [
+      "shaft of a weapon",
+      "The shaft of the spear went through him and the blood came fast.",
+      "The spear shaft went through him. The blood came fast after it.",
+    ],
+    [
+      "neutralize in a laboratory",
+      "She neutralized the acid before it ate through the corpse.",
+      "She neutralized the acid before it got through to the corpse.",
+    ],
+    [
+      "a blunt word that simply stayed",
+      "She killed him where he stood, and the blood went everywhere.",
+      "She killed him where he stood. The blood went everywhere after.",
+    ],
+    [
+      "a blunt word swapped for another blunt word",
+      "She killed him where he stood, and did not look back.",
+      "She murdered him where he stood, and did not look back at all.",
+    ],
+    [
+      "tightening that loses nothing on either list",
+      "He was bleeding out on the stones, slowly, before she got the knife free.",
+      "He was bleeding out on the stones before she got the knife free.",
+    ],
+  ];
+
+  for (const [name, was, now] of quiet) {
+    test(name + ", saved", async () => {
+      const h = await armed(["<REFINED>" + now + "</REFINED>"], {}, reply(was));
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.skipped().join(" ")).not.toMatch(/softened the reply/i);
+      expect(h.writes.length).toBe(1);
+    });
+  }
+
+  const softened: Array<[string, string, string]> = [
+    ["kill for unalive", "She killed him where he stood.", "She unalived him where he stood."],
+    ["die for pass away", "He died on the stones before dawn.", "He passed away on the stones before dawn."],
+    ["blood for crimson liquid", "The blood came fast and soaked her sleeve.", "The crimson liquid came fast and soaked her sleeve."],
+    ["sex for intimacy", "They had been talking about the sex for a week.", "They had been talking about the intimacy for a week."],
+    ["fuck for make love", "He said he wanted to fuck her against the door.", "He said he wanted to make love to her against the door."],
+    ["rape for defile", "He was raped in that house and never said so.", "He was defiled in that house and never said so."],
+  ];
+
+  for (const [name, was, now] of softened) {
+    test(name + ", refused", async () => {
+      const h = await armed(["<REFINED>" + now + "</REFINED>"], {}, reply(was));
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.skipped().join(" ")).toMatch(/softened the reply/i);
+      expect(h.writes.length).toBe(0);
+    });
+  }
+});
+
+describe("a rewrite that sanitized the reply", () => {
+  const bloody = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open." },
+    { id: "m1", role: "user", content: "i go in" },
+    {
+      id: "m2",
+      role: "assistant",
+      content:
+        "The blade went in under his ribs and the blood came fast, soaking her sleeve. " +
+        "He was bleeding out on the stones before she got the knife free.",
+    },
+  ];
+
+  test("dropping the charged language is refused", async () => {
+    const h = await armed(
+      [
+        "<REFINED>The strike landed under his ribs and he went down hard, " +
+          "soaking her sleeve. He was fading on the stones before she stepped back.</REFINED>",
+      ],
+      {},
+      bloody(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/softened the reply/i);
+  });
+
+  // The check has to survive ordinary tightening or it gets switched off, and
+  // then it catches nothing at all.
+  test("an ordinary tightening that keeps the register is saved", async () => {
+    const h = await armed(
+      [
+        "<REFINED>The blade went in under his ribs. The blood came fast and soaked her sleeve, " +
+          "and he was bleeding out on the stones before she got the knife free.</REFINED>",
+      ],
+      {},
+      bloody(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("switched off, the softened rewrite is saved", async () => {
+    const h = await armed(
+      [
+        "<REFINED>The strike landed under his ribs and he went down hard, " +
+          "soaking her sleeve. He was fading on the stones before she stepped back.</REFINED>",
+      ],
+      { guardSoften: false },
+      bloody(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+
+  // Prose that never had the register cannot be softened out of it, and a
+  // single word going is an edit rather than sanitizing.
+  test("a reply with almost none of it is left to the other checks", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("a word of the reader's own counts too", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      { softenWords: "cursed\nwretched\nbitter" },
+      [
+        { id: "m0", role: "assistant", content: "The gate stands open." },
+        { id: "m1", role: "user", content: "i go in" },
+        {
+          id: "m2",
+          role: "assistant",
+          content: "She stepped through, cursed and wretched, into the bitter cold that hit her.",
+        },
+      ],
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.skipped().join(" ")).toMatch(/softened the reply/i);
+  });
+});
+
+describe("asking again when a check fails", () => {
+  test("off by default, so one bad answer is one call", async () => {
+    const h = await armed([
+      "I'm sorry, but I can't help with that.",
+      "<REFINED>She stepped through and the cold hit her.</REFINED>",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("switched on, a refusal is asked again and the clean answer is saved", async () => {
+    const h = await armed(
+      [
+        "I'm sorry, but I can't help with that.",
+        "<REFINED>She stepped through and the cold hit her.</REFINED>",
+      ],
+      { retryRefine: 2 },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // A provider's filter stopping the rewrite is a refusal sent as an error,
+  // and asking again can get past it the same way.
+  test("a content filter error is asked again like a refusal", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { retryRefine: 2 },
+      chat(),
+      { failFirst: { times: 1, why: "OpenRouter generation failed: The provider stopped the response because of a content filter (content_filter)." } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and with asking again off, it is named as a refusal and not repeated", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      chat(),
+      { failFirst: { times: 1, why: "content_filtered" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(1);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/declined to rewrite it, through the provider's filter/);
+  });
+
+  test("an error that is not a filter is still not repeated", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { retryRefine: 2 },
+      chat(),
+      { failFirst: { times: 1, why: "OpenRouter generation failed: The provider did not complete the response (incomplete)." } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(1);
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("a rewrite that is only a filter code is a refusal", async () => {
+    const h = await armed(
+      ["content_filtered", "<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { retryRefine: 2 },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("it gives up after the number you set", async () => {
+    const h = await armed(["I'm sorry, but I can't help with that."], { retryRefine: 2 });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(90);
+    expect(h.asked.length).toBe(3);
+    expect(h.writes.length).toBe(0);
+  });
+
+  // A rewrite refused for its length is one the model meant. Asking again buys
+  // the same answer at the same price.
+  test("a failure a second try cannot fix is not retried", async () => {
+    const h = await armed(["<REFINED>Short.</REFINED>"], { retryRefine: 2 });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(1);
+    expect(h.skipped().join(" ")).toMatch(/shorter/i);
+  });
+
+  test("and a stop is never asked again", async () => {
+    const h = host(chat(), ["<REFINED>She stepped through and the cold hit her.</REFINED>"], {
+      whileAsking: () => {
+        h.front({ type: "cancel_refine", requestId: "s1" });
+      },
+    });
+    await h.front({ type: "set_settings", settings: { ...RULES, retryRefine: 3 } });
+    await h.ended({ chatId: "c1", messageId: "m2", userId: "u1" });
+    await wait(80);
+    expect(h.asked.length).toBe(1);
+  });
+});
+
+describe("a note when it asks again", () => {
+  const last = (req: any) => req.messages[req.messages.length - 1];
+  const refusedThenFine = [
+    "I'm sorry, but I can't help with that.",
+    "<REFINED>She stepped through and the cold hit her.</REFINED>",
+  ];
+
+  test("off by default, so the second ask is the same request as the first", async () => {
+    const h = await armed(refusedThenFine, { retryRefine: 2 });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.asked[1].messages).toEqual(h.asked[0].messages);
+  });
+
+  test("on, the ask after a refusal ends with the refusal note, and the first ask has none", async () => {
+    const h = await armed(refusedThenFine, { retryRefine: 2, askNote: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.asked[1].messages.length).toBe(h.asked[0].messages.length + 1);
+    expect(last(h.asked[1]).role).toBe("user");
+    expect(last(h.asked[1]).content).toMatch(/^Your last answer declined to rewrite the passage\./);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    // The panel is told which note went, for its Log.
+    expect(h.sent.some((m: any) => m.type === "refine_progress" && m.stage === "retrying" && m.note === "After a refusal")).toBe(true);
+  });
+
+  test("a provider's filter gets the refusal note too", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { retryRefine: 2, askNote: true },
+      chat(),
+      { failFirst: { times: 1, why: "content_filtered" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(last(h.asked[1]).content).toMatch(/declined to rewrite/);
+  });
+
+  test("a softened rewrite gets the softening note", async () => {
+    const h = await armed(
+      [
+        "<REFINED>She unalived him where he stood, and did not look back at the door.</REFINED>",
+        "<REFINED>She killed him where he stood and did not look back at the door.</REFINED>",
+      ],
+      { retryRefine: 1, askNote: true },
+      [
+        { id: "m0", role: "assistant", content: "The gate stands open." },
+        { id: "m1", role: "user", content: "i go in" },
+        { id: "m2", role: "assistant", content: "She killed him where he stood, and did not look back at the door." },
+      ],
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(last(h.asked[1]).content).toMatch(/^Your last rewrite took out or toned down words/);
+  });
+
+  test("an empty answer gets the empty note", async () => {
+    const h = await armed(["", "<REFINED>She stepped through and the cold hit her.</REFINED>"], { retryRefine: 1, askNote: true });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(last(h.asked[1]).content).toMatch(/^Your last answer was empty\./);
+  });
+
+  test("your own text and role are used, and an empty text sends no note", async () => {
+    const h = await armed(refusedThenFine, {
+      retryRefine: 2,
+      askNote: true,
+      askNoteRole: "system",
+      askNoteRefused: "Please try the edit once more.",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(last(h.asked[1])).toEqual({ role: "system", content: "Please try the edit once more." });
+
+    const quiet = await armed(refusedThenFine, { retryRefine: 2, askNote: true, askNoteRefused: "" });
+    await quiet.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(quiet.asked.length).toBe(2);
+    expect(quiet.asked[1].messages).toEqual(quiet.asked[0].messages);
+  });
+});
+
+describe("shielding what the built-in rules miss", () => {
+  const withScaffold = (body: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: body },
+  ];
+
+  test("a table row is hidden, because a grid is not prose", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      {},
+      withScaffold("| HP | 12/20 |\nShe stepped through and, suddenly, the cold just hit her."),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("12/20");
+  });
+
+  test("and a bare URL, which a rewrite likes to tidy", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      {},
+      withScaffold("See https://example.com/a_b_c. She stepped through and, suddenly, the cold just hit her."),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).not.toContain("example.com");
+  });
+
+  test("a shape of the reader's own is hidden once they name it", async () => {
+    const body = "((tracker: day 3)) She stepped through and, suddenly, the cold just hit her.";
+    const without = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      {},
+      withScaffold(body),
+    );
+    await without.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(without)).toContain("tracker: day 3");
+
+    const withIt = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      { shieldAdd: "\\(\\([^)]*\\)\\)" },
+      withScaffold(body),
+    );
+    await withIt.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(withIt)).not.toContain("tracker: day 3");
+  });
+
+  test("and an exclude keeps a region visible that a built-in would have hidden", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      { protectInline: true, shieldKeep: "<i>|</i>" },
+      withScaffold("She stepped <i>through</i> and, suddenly, the cold just hit her."),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("<i>through</i>");
+  });
+
+  // A pattern that will not compile is named, so a typo is visible instead of
+  // being a region somebody believes is shielded.
+  test("a pattern that cannot be read is reported", async () => {
+    const h = await armed(["<REFINED>x</REFINED>"], { shieldAdd: "([unclosed" });
+    await wait(10);
+    const said2 = h.sent.find((m: any) => m.type === "shield_bad");
+    expect(said2).toBeTruthy();
+    expect(said2.patterns.join(" ")).toContain("([unclosed");
+  });
+
+  // One that matches the empty string would match at every position and turn
+  // the whole message into tokens.
+  test("a pattern that matches nothing at all is refused", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her at last.</REFINED>"],
+      { shieldAdd: "x*" },
+      withScaffold("She stepped through and, suddenly, the cold just hit her."),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(said(h)).toContain("the cold just hit her");
+  });
+});
+
+describe("the refiner's own thinking in its answer", () => {
+  test("working inside the tags is taken out before it is saved", async () => {
+    const h = await armed([
+      "<REFINED><think>let me tighten this</think>She stepped through and the cold hit her.</REFINED>",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and with the tags switched off, where the whole answer is the rewrite", async () => {
+    const h = await armed(
+      ["<think>let me tighten this</think>\nShe stepped through and the cold hit her."],
+      { wrapOutput: false },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("switched off, it is left where it fell", async () => {
+    const h = await armed(
+      ["<REFINED><think>let me tighten this</think>She stepped through and the cold hit her.</REFINED>"],
+      { stripAnswerThinking: false },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toContain("<think>");
+  });
+});
+
+// Best of three, asked for rather than assumed. Three calls instead of one, so
+// it is a button somebody presses and never something the automatic pass does.
+describe("the sampler list", () => {
+  test("context size and longest answer both reach the request", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {
+      samplers: { max_context: 16384, max_tokens: 900, temperature: 0.6 },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const p = h.asked[0].parameters;
+    expect(p.max_context).toBe(16384);
+    expect(p.max_tokens).toBe(900);
+    expect(p.temperature).toBe(0.6);
+  });
+
+  test("a context size out of range is pulled back rather than sent", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], {
+      samplers: { max_context: 12 },
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].parameters.max_context).toBe(512);
+  });
+
+  test("and left out entirely when it is blank, so the connection decides", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked[0].parameters).toBeUndefined();
+  });
+});
+
+// A chat written before the extension was installed, brought up to the rules
+// in one go. The greeting is the thing this must never touch: it is the one
+// message a person wrote, and a pass over "every reply" is exactly where it
+// would get swept up.
+describe("going through every reply in a chat", () => {
+  const longChat = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open, and the road past it is dark." },
+    { id: "m1", role: "user", content: "i walk through it" },
+    { id: "m2", role: "assistant", content: "She stepped through and, suddenly, the cold just hit her." },
+    { id: "m3", role: "user", content: "i keep going" },
+    { id: "m4", role: "assistant", content: "The road bent, and, suddenly, the trees just closed over it." },
+  ];
+
+  test("every reply is refined, oldest first, and the greeting is left alone", async () => {
+    const h = await armed(["<REFINED>The cold met her as she stepped through the gate.</REFINED>"], {}, longChat());
+    await h.front({ type: "refine_all", requestId: "a1", chatId: "c1" });
+    await wait(120);
+    const done = h.sent.find((m: any) => m.type === "refine_all_done" && m.requestId === "a1");
+    expect(done).toBeTruthy();
+    expect(done.saved).toBe(2);
+    // The greeting is not among them, and neither are the user's own messages.
+    const touched = h.writes.map((w: any) => w.id).sort();
+    expect(touched).toEqual(["m2", "m4"]);
+    expect(h.body("m0")).toBe("The gate stands open, and the road past it is dark.");
+    expect(h.body("m1")).toBe("i walk through it");
+  });
+
+  // The same two actions for your own messages, with the prompt for them.
+  test("with mine set, every message of yours is refined and no reply is", async () => {
+    const h = await armed(["<REFINED>I keep walking.</REFINED>"], { userBlocks: PROMPT }, longChat());
+    await h.front({ type: "refine_all", requestId: "a9", chatId: "c1", mine: true });
+    await wait(120);
+    const done = h.sent.find((m: any) => m.type === "refine_all_done" && m.requestId === "a9");
+    expect(done.saved).toBe(2);
+    expect(h.writes.map((w: any) => w.id).sort()).toEqual(["m1", "m3"]);
+    expect(h.body("m0")).toBe("The gate stands open, and the road past it is dark.");
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+  });
+
+  test("refining your latest message picks the last one you sent", async () => {
+    const h = await armed(["<REFINED>I keep walking.</REFINED>"], { userBlocks: PROMPT }, longChat());
+    await h.front({ type: "refine_now", requestId: "n1", chatId: "c1", mine: true });
+    await wait(120);
+    const done = h.sent.find((m: any) => m.type === "refine_result" && m.requestId === "n1");
+    expect(done.messageId).toBe("m3");
+    expect(h.writes.map((w: any) => w.id)).toEqual(["m3"]);
+  });
+
+  test("and says so when you have sent nothing yet", async () => {
+    const h = await armed(["<REFINED>x</REFINED>"], { userBlocks: PROMPT }, [longChat()[0]]);
+    await h.front({ type: "refine_now", requestId: "n2", chatId: "c1", mine: true });
+    await wait(60);
+    const done = h.sent.find((m: any) => m.type === "refine_result" && m.requestId === "n2");
+    expect(done.ok).toBe(false);
+    expect(done.why).toBe("you have no message in this chat to refine yet");
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("it says which one it is on as it goes", async () => {
+    const h = await armed(["<REFINED>The cold met her as she stepped through the gate.</REFINED>"], {}, longChat());
+    await h.front({ type: "refine_all", requestId: "a2", chatId: "c1" });
+    await wait(120);
+    const steps = h.sent.filter((m: any) => m.type === "refine_all_progress" && m.requestId === "a2");
+    expect(steps.length).toBe(2);
+    expect(steps[0].at).toBe(1);
+    expect(steps[0].of).toBe(2);
+    expect(steps[1].at).toBe(2);
+  });
+
+  test("a chat with only a greeting in it says so rather than doing nothing without saying so", async () => {
+    const h = await armed(["<REFINED>x</REFINED>"], {}, [
+      { id: "m0", role: "assistant", content: "The gate stands open." },
+    ]);
+    await h.front({ type: "refine_all", requestId: "a3", chatId: "c1" });
+    await wait(60);
+    const done = h.sent.find((m: any) => m.type === "refine_all_done" && m.requestId === "a3");
+    expect(done.saved).toBe(0);
+    expect(done.skipped).toBe(0);
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("a reply that fails a check is counted and the rest still go", async () => {
+    // The first answer is a refusal, which is dropped; the second is fine.
+    const h = await armed(
+      [
+        "<REFINED>I can't help with that.</REFINED>",
+        "<REFINED>The trees closed over the bending road.</REFINED>",
+      ],
+      {},
+      longChat(),
+    );
+    await h.front({ type: "refine_all", requestId: "a4", chatId: "c1" });
+    await wait(150);
+    const done = h.sent.find((m: any) => m.type === "refine_all_done" && m.requestId === "a4");
+    expect(done.saved).toBe(1);
+    expect(done.skipped).toBe(1);
+    // And it says what went wrong, once, rather than per message or not at all.
+    expect(String(done.why).length).toBeGreaterThan(0);
+  });
+
+  test("a stop ends the run between messages and keeps what was saved", async () => {
+    const h = host(chat(), ["<REFINED>The cold met her as she stepped through the gate.</REFINED>"]);
+    await h.front({ type: "set_settings", settings: RULES });
+    // Stopped before it starts, which is the same door the button uses.
+    await h.front({ type: "cancel_refine", requestId: "s9" });
+    await h.front({ type: "refine_all", requestId: "a5", chatId: "c1" });
+    await wait(120);
+    const done = h.sent.find((m: any) => m.type === "refine_all_done" && m.requestId === "a5");
+    // The sweep clears the flag on the way in, so a stop pressed before it
+    // started does not cancel the run somebody has just asked for.
+    expect(done).toBeTruthy();
+    expect(done.saved).toBe(1);
+  });
+
+  test("switched off in this chat, it refines nothing", async () => {
+    const h = await armed(["<REFINED>The cold met her as she stepped through the gate.</REFINED>"], {}, longChat());
+    await h.front({ type: "set_chats_off", chats: ["c1"] });
+    await h.front({ type: "refine_all", requestId: "a6", chatId: "c1" });
+    await wait(120);
+    const done = h.sent.find((m: any) => m.type === "refine_all_done" && m.requestId === "a6");
+    expect(done.saved).toBe(0);
+    expect(h.writes.length).toBe(0);
+  });
+});
+
+// What the pass does when it is not its turn.
+//
+// The panel turns its spinner on the moment a reply lands, before this side has
+// said anything, so that every turn does not open with a second of nothing. The
+// price of that is every way out of the automatic pass having to answer. A path
+// that returned in silence left the panel spinning until its watchdog gave up
+// and reported a backend that was not running, which was untrue.
+describe("standing down instead of refining", () => {
+  test("a reply still holding its refine is stood down, and says so", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    expect(h.stood().join(" ")).toMatch(/still holding the refine/i);
+  });
+
+  // Pressing the button used to walk past this. It does not: refining the same
+  // words twice is a model call that buys a second opinion on a passage nobody
+  // changed, and the setting is there for anybody who wants one.
+  test("and so is a refine somebody pressed the button for", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.asked.length).toBe(1);
+    await h.front({ type: "refine_now", requestId: "byhand", chatId: "c1", messageId: "m2" });
+    await wait(80);
+    // No second model call, and the refusal names the reason rather than
+    // leaving the button looking broken.
+    expect(h.asked.length).toBe(1);
+    const said = h.sent
+      .filter((m: any) => m && m.requestId === "byhand")
+      .map((m: any) => String(m.why || ""))
+      .join(" ");
+    expect(said).toMatch(/still holding the refine/i);
+  });
+
+  // The case Auto Retry creates. It reads a reply as a refusal and swipes it,
+  // and what arrives is a different reply behind the same id. Keyed on the id
+  // alone this pass walked past every one of them.
+  test("a re-rolled reply is refined, because its words are new", async () => {
+    const h = await armed([
+      "She stepped through and the cold hit her.",
+      "She crossed the threshold and the cold found her.",
+    ]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    // Auto Retry swipes it away and something else lands in its place.
+    h.edit("m2", "She went through the gate, and, suddenly, it was very cold.");
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g2" });
+    await wait(50);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe("She crossed the threshold and the cold found her.");
+  });
+
+  // Auto Retry reads the reply as a refusal and swipes it while this pass is
+  // still reading the chat. Nothing has been spent yet, and nothing is.
+  test("a generation starting during the reads stands the pass down before any call", async () => {
+    let h: any = null;
+    h = host(chat(), ["She stepped through and the cold hit her."], {
+      whileReading: () => h.started({ chatId: "c1" }),
+    });
+    await h.front({ type: "set_settings", settings: { ...RULES } });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+    expect(h.stood().join(" ")).toMatch(/another reply is being written/i);
+  });
+
+  // The same race the other way round: the call is already out when the next
+  // generation starts. Nothing is saved over writing that is on its way out.
+  test("a generation starting mid-refine stops the rewrite being saved", async () => {
+    let h: any = null;
+    h = host(chat(), ["She stepped through and the cold hit her."], {
+      // Fired while the model is writing, which is the window Auto Retry
+      // decides in.
+      whileAsking: () => h.started({ chatId: "c1" }),
+    });
+    await h.front({ type: "set_settings", settings: { ...RULES } });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+    expect(h.stood().join(" ")).toMatch(/started while the rewrite was being written/i);
+  });
+
+  test("every way out of the pass answers the panel", async () => {
+    const h = await armed(["She stepped through and the cold hit her."], { refineOn: false });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.stood().join(" ")).toMatch(/automatic pass is switched off/i);
+  });
+
+  test("a reply the event failed on answers too", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1", error: "the model refused" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.stood().join(" ")).toMatch(/reply itself failed/i);
+  });
+
+  test("the same generation announced twice answers on the second", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(h.stood().join(" ")).toMatch(/announced twice/i);
+  });
+});
+
+// Putting a refine back writes text this extension is holding the only copy of.
+// It goes back over the refine and nothing else.
+describe("putting a refine back", () => {
+  test("a reply that moved since the refine is left as it is", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    // Swiped after the refine. The text this is holding belongs to the swipe
+    // before it, and writing it in would put it on top of a different one.
+    h.edit("m2", "A different swipe entirely.");
+    await h.front({ type: "undo_refine", requestId: "u1", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("A different swipe entirely.");
+    const done = h.sent.find((m: any) => m.type === "undo_result" && m.requestId === "u1");
+    expect(done.ok).toBe(false);
+    expect(done.gone).toBe(true);
+    expect(done.why).toMatch(/changed since the refine/i);
+  });
+
+  test("a reply that did not move goes back", async () => {
+    const h = await armed(["She stepped through and the cold hit her."]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(50);
+    await h.front({ type: "undo_refine", requestId: "u1", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+    const done = h.sent.find((m: any) => m.type === "undo_result" && m.requestId === "u1");
+    expect(done.ok).toBe(true);
+  });
+});
+
+// A provider that would not take the call at all.
+//
+// This is the common case for anybody not paying per token: a free tier meters
+// per minute, a shared key runs out, a local server answers 503 while it is
+// loading a model. None of those is a bad answer, because there was no answer;
+// nothing was spent, and waiting is what fixes them.
+describe("a provider that will not take the call", () => {
+  test("a rate limit is waited out and the refine lands", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      // The wait is read out of what the provider said, so a check does not sit
+      // for the default fifteen seconds.
+      { rateWaits: 2 },
+      chat(),
+      { failFirst: { times: 1, why: "429 too many requests, retry after 0.05 seconds" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(1400);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("the panel is told it is waiting, and for how long", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { rateWaits: 2 },
+      chat(),
+      { failFirst: { times: 1, why: "429 rate limit reached, try again in 0.05s" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(1400);
+    const said = h.sent.find((m: any) => m.type === "refine_progress" && m.stage === "waiting");
+    expect(said).toBeTruthy();
+    expect(said.waitMs).toBeGreaterThan(0);
+    expect(said.of).toBe(2);
+  });
+
+  test("with the waits switched off it gives up on the first refusal", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { rateWaits: 0 },
+      chat(),
+      { failFirst: { times: 1, why: "429 too many requests, retry after 0.05 seconds" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(400);
+    expect(h.asked.length).toBe(1);
+    expect(h.skipped().join(" ")).toMatch(/429/);
+  });
+
+  // Errors as Lumiverse writes them, with the provider's status in
+  // parentheses. The status is read on its own: a gateway's page can say "404
+  // page not found" about itself, and a wait of "2.404 seconds" is not a 404.
+  const waitedOn = [
+    "Lantern request failed (504): Gateway Timeout, retry after 0.05 seconds",
+    "Lantern request failed (502): 404 page not found, retry after 0.05 seconds",
+    "Lantern request failed (529): Overloaded, retry after 0.05 seconds",
+    "Lantern request failed (530): Origin DNS error, retry after 0.05 seconds",
+    "Lantern request failed: The socket connection was closed unexpectedly, retry after 0.05 seconds",
+  ];
+  for (const why of waitedOn) {
+    test("waited out: " + why.replace(/, retry after.*/, ""), async () => {
+      const h = await armed(["She stepped through and the cold hit her."], { rateWaits: 2 }, chat(), { failFirst: { times: 1, why } });
+      await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+      await wait(1400);
+      expect(h.asked.length).toBe(2);
+      expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+    });
+  }
+  test("waited out: a rate limit whose wait has 404 in it", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { rateWaits: 2 },
+      chat(),
+      { failFirst: { times: 1, why: "Lantern request failed (429): Rate limit reached. Please try again in 0.404 seconds" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(1800);
+    expect(h.asked.length).toBe(2);
+  });
+  test("not waited on: no balance left, whatever the gateway's status", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { rateWaits: 3 },
+      chat(),
+      { failFirst: { times: 1, why: "Lantern request failed (502): insufficient balance on the upstream account" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(400);
+    expect(h.asked.length).toBe(1);
+  });
+
+  // Newer Claude models decline a request whose prompt asks the model to write
+  // out its reasoning, with the category "reasoning_extraction". It is decided
+  // from the prompt, so asking again is declined again and paid for again.
+  test("a request declined as reasoning_extraction is not asked again, and says what to change", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { retryRefine: 3, rateWaits: 2 },
+      chat(),
+      { fail: "Lantern generation failed: The provider declined the response (reasoning_extraction). No explanation was provided." },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(200);
+    expect(h.asked.length).toBe(1);
+    expect(h.writes.length).toBe(0);
+    const why = h.skipped().join(" ");
+    expect(why).toMatch(/reasoning_extraction/);
+    expect(why).toMatch(/write out its reasoning or thinking/);
+    expect(why).toMatch(/was not asked again/);
+  });
+
+  test("another refusal sent as an error is still asked again", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { retryRefine: 2, rateWaits: 0 },
+      chat(),
+      { failFirst: { times: 1, why: "Lantern generation failed: The provider declined the response (violence). No explanation was provided." } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(200);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // Waiting cannot fix a wrong key, and sitting on a timer for one is worse
+  // than saying so.
+  test("a wrong key is not waited on", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { rateWaits: 3 },
+      chat(),
+      { failFirst: { times: 1, why: "401 invalid api key" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(400);
+    expect(h.asked.length).toBe(1);
+    expect(h.skipped().join(" ")).toMatch(/invalid api key/i);
+  });
+
+  test("and neither is a prompt that is too long for the model", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { rateWaits: 3 },
+      chat(),
+      { failFirst: { times: 1, why: "400 this model's maximum context length is 8192 tokens" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(400);
+    expect(h.asked.length).toBe(1);
+  });
+
+  // The waits are bounded, or a provider that is down for the day holds a
+  // refine open forever.
+  test("it stops after the allowed number of waits", async () => {
+    const h = await armed(
+      ["She stepped through and the cold hit her."],
+      { rateWaits: 2 },
+      chat(),
+      { failFirst: { times: 9, why: "503 overloaded, try again in 0.05s" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(1600);
+    expect(h.asked.length).toBe(3);
+    expect(h.skipped().join(" ")).toMatch(/503/);
+  });
+
+  // A wait is not an answer, so it must not eat the asks the reader is paying
+  // for when a check fails.
+  test("a wait does not count against the retry setting", async () => {
+    const h = await armed(
+      [
+        "I'm sorry, but I can't help with that.",
+        "<REFINED>She stepped through and the cold hit her.</REFINED>",
+      ],
+      { rateWaits: 2, retryRefine: 1 },
+      chat(),
+      { failFirst: { times: 1, why: "429 too many requests, retry after 0.05 seconds" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(1600);
+    // One refused call, then a refusal to judge, then the ask the retry setting
+    // paid for.
+    expect(h.asked.length).toBe(3);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+// What Lumiverse remembers of the chat, reaching the prompt.
+//
+// This is the one macro whose answer comes from a call rather than from the
+// chat in front of it, so it is also the one with the most ways to come back
+// with nothing: a build without the call, a reader who switched memory off, a
+// chat with nothing vectorized yet, and the call throwing. Every one of those
+// has to leave the block out and let the refine go ahead, because a heading
+// wrapped around nothing reads to a model as "nothing has happened".
+describe("what Lumiverse remembers of the chat", () => {
+  const withMemory = (extra: any = {}) => ({
+    blocks: PROMPT.concat([
+      {
+        id: "memory",
+        name: "What has happened before now",
+        on: true,
+        role: "system",
+        text: "<memories>\n{{memories}}\n</memories>",
+      },
+    ]),
+    ...extra,
+  });
+
+  test("the macro becomes the memory, and the block is sent", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], withMemory());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(h)).toContain("Wren lost a brother to the crossing, years ago.");
+    expect(said(h)).toContain("<memories>");
+  });
+
+  test("it is asked for against the chat and the account", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], withMemory());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.memoryAsked.length).toBe(1);
+    expect(h.memoryAsked[0].chatId).toBe("c1");
+    expect(h.memoryAsked[0].userId).toBe("u1");
+  });
+
+  test("memory switched off for the chat sends no block at all", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], withMemory(), chat(), {
+      memoryOff: true,
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(h)).not.toContain("<memories>");
+    expect(said(h)).not.toContain("never read this");
+  });
+
+  test("a chat with nothing vectorized sends no block either", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], withMemory(), chat(), {
+      noMemory: true,
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(h)).not.toContain("<memories>");
+  });
+
+  test("a build without the call refines anyway, with the block left out", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], withMemory(), chat(), {
+      noMemories: true,
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(h)).not.toContain("<memories>");
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("and a call that throws does not take the refine with it", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], withMemory(), chat(), {
+      memoryFail: "the vector store is not set up",
+    });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(h)).not.toContain("<memories>");
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // The block starts switched off, so nobody pays for a read they never asked
+  // for. Nothing is asked of the host while it is.
+  test("the block starts off, so nothing is asked for", async () => {
+    const memoryBlock = (DEFAULT_BLOCKS as any[]).find((b) => b.id === "memory");
+    expect(memoryBlock).toBeTruthy();
+    expect(memoryBlock.on).toBe(false);
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], { blocks: DEFAULT_BLOCKS });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.memoryAsked.length).toBe(0);
+    expect(said(h)).not.toContain("<memories>");
+  });
+
+  test("switched on, the same built-in prompt asks for it", async () => {
+    const on = (DEFAULT_BLOCKS as any[]).map((b) =>
+      b.id === "memory" ? { ...b, on: true } : { ...b },
+    );
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], { blocks: on });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.memoryAsked.length).toBe(1);
+    expect(said(h)).toContain("Wren lost a brother to the crossing, years ago.");
+  });
+});
+
+// A read nobody is going to see is a read nobody has to make.
+//
+// The lorebook, the chat memory and the run-up each cost a call to the host,
+// and a block switched off was still paying for one: switching the memory block
+// off left every refine retrieving the chat's memory and throwing it away.
+describe("only reading what the prompt asks for", () => {
+  const only = (text: string) => ({
+    blocks: [
+      { id: "job", name: "The job", on: true, role: "system", text: "<your_task>\nRewrite it.\n</your_task>" },
+      { id: "extra", name: "Extra", on: true, role: "system", text: text },
+      { id: "answer", name: "How to answer", on: true, role: "system", text: "Put it between <refined> and </refined>." },
+      { id: "turn", name: "The turn", on: true, role: "user", text: "<turn>\n{{message}}\n</turn>" },
+    ],
+  });
+
+  test("no memory macro, no memory read", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], only("nothing here"));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.memoryAsked.length).toBe(0);
+  });
+
+  test("the macro is what turns it back on", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], only("{{memories}}"));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.memoryAsked.length).toBe(1);
+  });
+
+  test("and a block that carries it but is switched off does not", async () => {
+    const off = only("{{memories}}");
+    off.blocks[1].on = false;
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], off);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.memoryAsked.length).toBe(0);
+  });
+
+  test("the lorebook is read only when a block asks for it", async () => {
+    const without = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], only("nothing here"));
+    await without.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(without)).not.toContain("The ferry runs at dusk");
+
+    const withIt = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], only("{{lore}}"));
+    await withIt.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(withIt)).toContain("The ferry runs at dusk");
+  });
+
+  test("and so is the run-up", async () => {
+    const without = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], only("nothing here"));
+    await without.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(without)).not.toContain("i walk through it");
+
+    const withIt = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], only("{{history}}"));
+    await withIt.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(said(withIt)).toContain("i walk through it");
+  });
+});
+
+// The refine as a swipe beside the reply rather than over it.
+//
+// Put it back is held in memory and gone on reload, which is the right trade
+// for an undo and a poor one for the writing itself. A swipe is Lumiverse's
+// own way back: it survives a reload, and the arrows are already on the message.
+describe("adding the refine as a swipe", () => {
+  const swiped = (): Msg[] => {
+    const list = chat() as any[];
+    list[2].swipes = ["She stepped through and, suddenly, the cold just hit her."];
+    list[2].swipe_id = 0;
+    return list as Msg[];
+  };
+  const patched = (h: any, id: string) =>
+    h.sent.length >= 0 ? h.lastPatch(id) : null;
+
+  test("off by default, so the reply is written over", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      {},
+      swiped(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const p = patched(h, "m2");
+    expect(p.swipes.length).toBe(1);
+    expect(p.swipe_id).toBe(0);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("on, it goes in beside the reply and the original stays behind it", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { asSwipe: true },
+      swiped(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const p = patched(h, "m2");
+    expect(p.swipes.length).toBe(2);
+    expect(p.swipes[0]).toBe("She stepped through and, suddenly, the cold just hit her.");
+    expect(p.swipes[1]).toBe("She stepped through and the cold hit her.");
+    expect(p.swipe_id).toBe(1);
+  });
+
+  test("putting it back takes the swipe off rather than writing over it", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { asSwipe: true },
+      swiped(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    await h.front({ type: "undo_refine", requestId: "u1", chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const p = patched(h, "m2");
+    expect(p.swipes.length).toBe(1);
+    expect(p.swipes[0]).toBe("She stepped through and, suddenly, the cold just hit her.");
+    expect(p.swipe_id).toBe(0);
+    const done = h.sent.find((m: any) => m.type === "undo_result" && m.requestId === "u1");
+    expect(done.ok).toBe(true);
+  });
+
+  // Cutting the end off a list somebody has been working in is not an undo.
+  test("a swipe added after the refine is not cut off the end", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { asSwipe: true },
+      swiped(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    const wrote = h.patches.length;
+    // The reader rolled another one after the refine, so it is no longer the
+    // last, and what the message holds is not what the refine wrote.
+    h.addSwipe("m2", "A third one they rolled themselves.");
+    await h.front({ type: "undo_refine", requestId: "u1", chatId: "c1", messageId: "m2" });
+    await wait(60);
+    // Nothing was written at all: the reply moved on, so there is no way back
+    // to offer and the row comes off the tab instead.
+    expect(h.patches.length).toBe(wrote);
+    const done = h.sent.find((m: any) => m.type === "undo_result" && m.requestId === "u1");
+    expect(done.ok).toBe(false);
+    expect(done.gone).toBe(true);
+  });
+
+  // A build with no swipes on a message has nothing to add to.
+  test("a build without swipes writes over the reply as usual", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her.</REFINED>"],
+      { asSwipe: true },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+});
+
+// A stop on something that has gone wrong.
+//
+// The content mark answers "is this new writing" correctly, and a swipe really
+// is new writing. What it cannot see is a loop: another extension rewriting
+// what this one wrote, a build re-announcing generations, a chat being swiped
+// through fast. None of those is worth a model call each, and the reader pays.
+describe("the ceiling on one reply", () => {
+  test("the automatic pass stops after twelve, and says so", async () => {
+    const h = await armed(new Array(20).fill("").map((_, i) => "<REFINED>Rewrite number " + i + ", which is long enough to keep.</REFINED>"));
+    for (let i = 0; i < 16; i++) {
+      // Each arrival is new writing, so nothing else would stop it.
+      h.edit("m2", "A fresh reply, number " + i + ", long enough to be refined.");
+      await h.ended({ chatId: "c1", messageId: "m2", generationId: "g" + i });
+      await wait(30);
+    }
+    expect(h.asked.length).toBe(12);
+    expect(h.stood().join(" ")).toMatch(/refined 12 times already/i);
+  });
+
+  test("but pressing the button still refines it", async () => {
+    const h = await armed(new Array(20).fill("").map((_, i) => "<REFINED>Rewrite number " + i + ", which is long enough to keep.</REFINED>"));
+    for (let i = 0; i < 14; i++) {
+      h.edit("m2", "A fresh reply, number " + i + ", long enough to be refined.");
+      await h.ended({ chatId: "c1", messageId: "m2", generationId: "g" + i });
+      await wait(30);
+    }
+    const wasAsked = h.asked.length;
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.asked.length).toBe(wasAsked + 1);
+  });
+});
+
+// Refining part of a reply rather than the whole of it.
+//
+// A selection is made in rendered markdown and has to be written back into the
+// raw source, which is a different string: emphasis markers style the text
+// rather than appearing in it. Everything here is about the two staying in step,
+// and about the rest of the reply coming through untouched.
+describe("refining what you selected", () => {
+  const reply = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate was already open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+
+  // ahead is the text in front of the selection, which is what the panel sends:
+  // the backend counts through it to work out which of several identical runs was
+  // picked. Driving it the way the panel does is the point, so a check cannot
+  // pass on a path nothing uses.
+  const ask = (h: any, picked: string, ahead = "") =>
+    h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m2", picked: picked, ahead: ahead });
+
+  // Lumiverse draws some markup differently from how it is stored: a tag is
+  // drawn and not shown, &amp; shows as &, a link shows its text, a backslash
+  // before a star shows the star. A selection is made in what is shown, so
+  // each of these has to be read through or the selection is never found.
+  test("a selection is found across HTML tags, entities, links, escapes and strikethrough", async () => {
+    const cases: Array<[string, string, string]> = [
+      ["Salt &amp; pepper went on the eggs, and then the toast.", "Salt & pepper went on", "[[AR1]]"],
+      ["He said \\*nothing\\* at all to the guard that night.", "He said *nothing* at all", ""],
+      ["Go to [the side door](x) now and wait there for me.", "Go to the side door now", "[[AR1]]"],
+      ["The ~~old~~ new lock held fast against her key.", "The old new lock held", ""],
+      ["She paused.<br>Then she left the yard for good.", "She paused. Then she left", "[[AR1]]"],
+      ['<span style="color:red">red words</span> after that line here.', "red words after", "[[AR1]][[AR2]]"],
+      ["She was <b>very</b> tired by the end of the walk.", "She was very tired", ""],
+    ];
+    for (const [body, picked, keep] of cases) {
+      const h = await armed(["<REFINED>Kept " + keep + " here.</REFINED>"], {}, reply(body));
+      await ask(h, picked);
+      await wait(60);
+      const said = (h.sent.filter((m: any) => m.type === "refine_result").pop() || {}).why;
+      expect([body, said]).toEqual([body, ""]);
+      expect(h.writes.length).toBe(1);
+    }
+  });
+
+  // Speech in its own color, the way a model or a preset often writes it.
+  const colored = 'Mara wiped the counter. <font color="#c9a227">"Sit down, the soup is nearly ready."</font> Then she turned the flame low.';
+
+  test("a selection inside colored speech leaves the color tags where they are", async () => {
+    const h = await armed(["<REFINED>the soup needs one more minute</REFINED>"], {}, reply(colored));
+    await ask(h, "the soup is nearly ready");
+    await wait(60);
+    expect(h.writes[0].content).toBe(
+      'Mara wiped the counter. <font color="#c9a227">"Sit down, the soup needs one more minute."</font> Then she turned the flame low.',
+    );
+  });
+
+  test("a selection from colored speech into the narration takes the whole color pair", async () => {
+    const h = await armed(['<REFINED>[[AR1]]"Sit, it is nearly done."[[AR2]] She lowered the flame.</REFINED>'], {}, reply(colored));
+    await ask(h, 'nearly ready." Then she turned the flame low.');
+    await wait(60);
+    const out = h.writes[0].content;
+    expect(out).toBe('Mara wiped the counter. <font color="#c9a227">"Sit, it is nearly done."</font> She lowered the flame.');
+    expect(out.split("<font").length).toBe(out.split("</font>").length);
+  });
+
+  // Lumiverse draws every curly quote and apostrophe as a straight one. A
+  // refine model often writes curly ones, so after a refine the screen shows '
+  // where the reply holds ’, and the selection holds what the screen shows.
+  test("a selection with straight quotes is found in a reply that holds curly ones", async () => {
+    const body = "Tamsin’s hands went still. “Not yet,” she said, and looked at the door.";
+    const h = await armed(["<REFINED>Tamsin’s hands stopped.</REFINED>"], {}, reply(body));
+    await ask(h, "Tamsin's hands went still.");
+    await wait(60);
+    const said = (h.sent.filter((m: any) => m.type === "refine_result").pop() || {}).why;
+    expect(said).toBe("");
+    expect(h.body("m2")).toBe("Tamsin’s hands stopped. “Not yet,” she said, and looked at the door.");
+  });
+
+  test("and speech in curly quotes is found from straight ones, with the quotes kept", async () => {
+    const body = "Tamsin’s hands went still. “Not yet,” she said, and looked at the door.";
+    const h = await armed(["<REFINED>“Wait,” she said</REFINED>"], {}, reply(body));
+    await ask(h, '"Not yet," she said', "Tamsin's hands went still. ");
+    await wait(60);
+    expect(h.body("m2")).toBe("Tamsin’s hands went still. “Wait,” she said, and looked at the door.");
+  });
+
+  test("a phrase used twice is still told apart when the quotes differ", async () => {
+    const body = "She’s late. He waited. She’s late, he said again.";
+    const h = await armed(["<REFINED>She is late</REFINED>"], {}, reply(body));
+    await ask(h, "She's late", "She's late. He waited. ");
+    await wait(60);
+    expect(h.body("m2")).toBe("She’s late. He waited. She is late, he said again.");
+  });
+
+  test("a selection ending on &amp; takes the whole of it", async () => {
+    const h = await armed(["<REFINED>Salt and [[AR1]]</REFINED>"], {}, reply("Salt &amp; pepper went on the eggs."));
+    await ask(h, "Salt &");
+    await wait(60);
+    expect(h.writes[0].content).toBe("Salt and &amp; pepper went on the eggs.");
+  });
+
+  test("a selection starting on an escaped star takes its backslash with it", async () => {
+    const h = await armed(["<REFINED>*none*</REFINED>"], {}, reply("He said \\*nothing\\* at all."));
+    await ask(h, "*nothing*");
+    await wait(60);
+    expect(h.writes[0].content).toBe("He said *none* at all.");
+  });
+
+  test("a selection starting inside a tag and ending after it takes the pair", async () => {
+    const body = "She was <b>very tired</b> by the end of the walk.";
+    const h = await armed(["<REFINED>exhausted when the walk ended</REFINED>"], {}, reply(body));
+    await ask(h, "tired by the end of the walk");
+    await wait(60);
+    const out = h.writes[0].content;
+    expect(out.split("<b>").length).toBe(out.split("</b>").length);
+  });
+
+  test("a selection starting inside a link's text takes the whole link", async () => {
+    const body = "Go to [the side door](x) now and wait there.";
+    const h = await armed(["<REFINED>Go round the back</REFINED>"], { protectOn: false }, reply(body));
+    await ask(h, "side door now");
+    await wait(60);
+    const out = h.writes[0].content;
+    expect(out).not.toContain("](x)");
+    expect(out).not.toContain("[the");
+  });
+
+  // A preamble set above the rewrite on its own line, worded after the part
+  // that was picked, is caught like the phrases the check has always known.
+  // Each line it catches has a close one beside it that it must not.
+  test("a preamble above a rewritten selection is caught, however it is worded", async () => {
+    const answers = [
+      "Here's the marked part, rewritten:\n\nThe lock was new.",
+      "Revised selection:\n\nThe lock was new.",
+      "Okay, here is the edit.\n\nThe lock was new.",
+      "Rewritten:\nThe lock was new.",
+      "Here's a tighter version:\n\nThe lock was new.",
+      "**Revised passage:**\n\nThe lock was new.",
+      "Here is the revised passage:\n\nThe lock was new."
+    ];
+    for (const answer of answers) {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], {}, reply("She set the crate down. The lock had been changed again. Nobody was in."));
+      await ask(h, "The lock had been changed again.");
+      await wait(60);
+      const why = (h.sent.filter((m: any) => m.type === "refine_result").pop() || {}).why;
+      expect([answer, h.writes.length, why]).toEqual([answer, 0, "the model wrote about the edit instead of making it"]);
+    }
+  });
+
+  test("a first line that is the passage's own, or plain prose, is not a preamble", async () => {
+    const pairs: Array<[string, string]> = [
+      [
+            "He counted what was left:\nthe lock, the key, the crate.",
+            "He counted what remained:\nthe key, the crate, the lock."
+      ],
+      [
+            "Part two, the revised plan:\nThe lock had been changed again.",
+            "Part two, the revised plan:\nThe lock was new."
+      ],
+      [
+            "Sure, the lock had been changed again.",
+            "Sure, the lock was new now."
+      ],
+      [
+            "She edited the letter twice.\nThe lock had been changed again.",
+            "She edited the letter twice.\nThe lock was new."
+      ]
+    ];
+    for (const [picked, answer] of pairs) {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], {}, reply("Wren stood at the gate. " + picked + " Then she left."));
+      await ask(h, picked);
+      await wait(60);
+      const why = (h.sent.filter((m: any) => m.type === "refine_result").pop() || {}).why;
+      expect([answer, why]).toEqual([answer, ""]);
+      expect(h.writes.length).toBe(1);
+    }
+  });
+
+  // The rewrite, then a line offering another version, then the rewrite again.
+  // Only the first version is saved. The offer and what follows it go to the
+  // notes. Each line it catches has a close one beside it that it must not.
+  test("an offer of another version after the rewrite is cut off, and the first version is saved", async () => {
+    const answers = [
+      "The lock was new.\n\nIf you would like a second version, here it is:\n\nThe lock had been swapped.",
+      "The lock was new.\n\nAlternatively:\n\nThe lock had been swapped.",
+      "The lock was new.\n\n---\n\nHere's another take that keeps the rhythm:\n\nThe lock had been swapped.",
+      "The lock was new.\n\nWould you like a version that is shorter?",
+      "The lock was new.\n\n**Option 2:** The lock had been swapped."
+    ];
+    for (const answer of answers) {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], {}, reply("She set the crate down. The lock had been changed again. Nobody was in."));
+      await ask(h, "The lock had been changed again.");
+      await wait(60);
+      expect([answer, h.writes.length && h.writes[0].content]).toEqual([answer, "She set the crate down. The lock was new. Nobody was in."]);
+      const notes = h.sent.filter((m: any) => m.type === "refine_notes" || m.type === "refine_result").map((m: any) => m.notes || "").join(" ");
+      expect(notes).toContain(answer.split("\n").filter(Boolean).pop());
+    }
+  });
+
+  test("a line like that inside the story is kept", async () => {
+    const pairs: Array<[string, string]> = [
+      [
+            "Alternatively, she could climb the fence.",
+            "The lock was new.\n\nAlternatively, she could climb over the fence."
+      ],
+      [
+            "\"Would you like another key?\" he asked.",
+            "The lock was new.\n\n\"Would you like a different key?\" he asked."
+      ]
+    ];
+    for (const [extra, answer] of pairs) {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], {}, reply("The lock had been changed again.\n\n" + extra));
+      await ask(h, "The lock had been changed again.\n\n" + extra);
+      await wait(60);
+      expect([answer, h.writes.length && h.writes[0].content]).toEqual([answer, answer]);
+    }
+  });
+
+  test("only the part picked is sent to the model", async () => {
+    const body = "She set the crate down. The lock had been changed again. Nobody was in.";
+    const h = await armed(["<REFINED>The lock was new.</REFINED>"], {}, reply(body));
+    await ask(h, "The lock had been changed again.");
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    const sent = JSON.stringify(h.asked[0].messages || []);
+    expect(sent).toContain("The lock had been changed again.");
+    // The sentences either side of it were never sent.
+    expect(sent).not.toContain("She set the crate down");
+    expect(sent).not.toContain("Nobody was in");
+  });
+
+  test("and the rest of the reply is left exactly as it was", async () => {
+    const body = "She set the crate down. The lock had been changed again. Nobody was in.";
+    const h = await armed(["<REFINED>Somebody had changed the lock again.</REFINED>"], {}, reply(body));
+    await ask(h, "The lock had been changed again.");
+    await wait(60);
+    expect(h.writes.length).toBe(1);
+    expect(h.writes[0].content).toBe("She set the crate down. Somebody had changed the lock again. Nobody was in.");
+  });
+
+  test("a selection inside italics does not leave a marker stranded", async () => {
+    // The markers are not in the rendered text, so they cannot be in what was
+    // picked. The span has to grow to cover the pair or the rest of the reply
+    // turns italic.
+    const body = "He shrugged. *She had said the same on the ferry.* Nobody answered.";
+    const h = await armed(["<REFINED>She had said that same thing on the boat.</REFINED>"], {}, reply(body));
+    await ask(h, "She had said the same on the ferry.");
+    await wait(60);
+    const out = h.writes[0].content;
+    expect((out.split("*").length - 1) % 2).toBe(0);
+    expect(out).toBe("He shrugged. *She had said that same thing on the boat.* Nobody answered.");
+  });
+
+  test("a selection running out of italics into plain text takes the whole run", async () => {
+    const body = "*Not tonight,* she said, and put the lid back on the pot.";
+    const h = await armed(["<REFINED>She said no and closed the pot.</REFINED>"], {}, reply(body));
+    await ask(h, "Not tonight, she said");
+    await wait(60);
+    const out = h.writes[0].content;
+    expect((out.split("*").length - 1) % 2).toBe(0);
+    expect(out).toBe("She said no and closed the pot., and put the lid back on the pot.");
+  });
+
+  test("the same phrase twice refines the one you picked", async () => {
+    const body = "He said it was fine. Later he said it was fine again, with less conviction.";
+    const h = await armed(["<REFINED>it was not fine</REFINED>"], {}, reply(body));
+    await ask(h, "it was fine", "He said it was fine. Later he said ");
+    await wait(60);
+    expect(h.writes[0].content).toBe("He said it was fine. Later he said it was not fine again, with less conviction.");
+  });
+
+  test("a selection that is not in the reply any more sends nothing", async () => {
+    const body = "She counted the jars on the shelf and came up short.";
+    const h = await armed(["<REFINED>never asked for</REFINED>"], {}, reply(body));
+    await ask(h, "a sentence that was never in this reply");
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.writes.length).toBe(0);
+    expect(h.sent.map((x: any) => String(x.why || "")).join(" ")).toMatch(/not in that reply any more/i);
+  });
+
+  test("an empty selection is not a refine of the whole reply by accident", async () => {
+    const body = "She counted the jars on the shelf and came up short.";
+    const h = await armed(["<REFINED>A whole new reply nobody asked for.</REFINED>"], {}, reply(body));
+    await ask(h, "   ");
+    await wait(60);
+    // Nothing picked means the pass has nothing to act on, so the reply is not
+    // rewritten end to end.
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("{{whole_reply}} carries the reply with the picked part marked", async () => {
+    const body = "She set the crate down. The lock had been changed. Nobody was in.";
+    const blocks = PROMPT.concat([
+      { id: "around", name: "Around it", on: true, role: "system", text: "<around>\n{{whole_reply}}\n</around>" },
+    ]);
+    const h = await armed(["<REFINED>The lock was new.</REFINED>"], { blocks: blocks }, reply(body));
+    await ask(h, "The lock had been changed.");
+    await wait(60);
+    const sent = JSON.stringify(h.asked[0].messages || []);
+    expect(sent).toContain("<<<The lock had been changed.>>>");
+    expect(sent).toContain("She set the crate down.");
+  });
+
+  test("and that block is left out of an ordinary refine", async () => {
+    const blocks = PROMPT.concat([
+      { id: "around", name: "Around it", on: true, role: "system", text: "<around>\n{{whole_reply}}\n</around>" },
+    ]);
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], { blocks: blocks });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(JSON.stringify(h.asked[0].messages || [])).not.toContain("<around>");
+  });
+});
+
+// Your own messages, and the one message that is never touched.
+//
+// A whole-message refine already treats these three differently: your messages
+// have their own prompt list, the greeting is refused outright, and neither is
+// picked up by the automatic pass. A selection goes through the same pass, so
+// the question is whether it inherits all of that or works around it.
+describe("selecting inside your own message", () => {
+  const mine = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate was already open when she got there." },
+    { id: "m1", role: "user", content: text },
+    { id: "m2", role: "assistant", content: "She did not answer for a while." },
+  ];
+
+  const ask = (h: any, id: string, picked: string, ahead = "") =>
+    h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: id, picked: picked, ahead: ahead });
+
+  test("it is refined, and only the part picked", async () => {
+    const h = await armed(
+      ["<REFINED>I push the gate open with my shoulder.</REFINED>"],
+      {},
+      mine("i go in through the gate. then i look around the yard."),
+    );
+    await ask(h, "m1", "i go in through the gate.");
+    await wait(60);
+    expect(h.writes.length).toBe(1);
+    expect(h.writes[0].content).toBe("I push the gate open with my shoulder. then i look around the yard.");
+  });
+
+  test("and it is built from the prompt for your messages, not the one for replies", async () => {
+    // Two lists, each carrying a line the other does not, so which one was sent
+    // is readable off the request rather than inferred from a call happening.
+    const forReplies = PROMPT.concat([
+      { id: "which", name: "Which list", on: true, role: "system", text: "<list>\nTHE REPLIES LIST\n</list>" },
+    ]);
+    const forMine = PROMPT.concat([
+      { id: "which", name: "Which list", on: true, role: "system", text: "<list>\nTHE MY MESSAGES LIST\n</list>" },
+    ]);
+    const h = await armed(
+      ["<REFINED>I push the gate open with my shoulder.</REFINED>"],
+      { blocks: forReplies, userBlocks: forMine },
+      mine("i go in through the gate. then i look around the yard."),
+    );
+    await ask(h, "m1", "i go in through the gate.");
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    const sent = JSON.stringify(h.asked[0].messages || []);
+    expect(sent).toContain("THE MY MESSAGES LIST");
+    expect(sent).not.toContain("THE REPLIES LIST");
+  });
+
+  test("and a selection in a reply still uses the replies list", async () => {
+    const forReplies = PROMPT.concat([
+      { id: "which", name: "Which list", on: true, role: "system", text: "<list>\nTHE REPLIES LIST\n</list>" },
+    ]);
+    const forMine = PROMPT.concat([
+      { id: "which", name: "Which list", on: true, role: "system", text: "<list>\nTHE MY MESSAGES LIST\n</list>" },
+    ]);
+    const h = await armed(
+      ["<REFINED>She said nothing for a long while afterwards.</REFINED>"],
+      { blocks: forReplies, userBlocks: forMine },
+      mine("i go in through the gate."),
+    );
+    await ask(h, "m2", "She did not answer for a while.");
+    await wait(60);
+    const sent = JSON.stringify(h.asked[0].messages || []);
+    expect(sent).toContain("THE REPLIES LIST");
+    expect(sent).not.toContain("THE MY MESSAGES LIST");
+  });
+
+  test("the greeting is refused, the same as it is for a whole message", async () => {
+    const h = await armed(
+      ["<REFINED>A rewrite of writing a person did, which must never be saved.</REFINED>"],
+      {},
+      mine("i go in through the gate."),
+    );
+    await ask(h, "m0", "The yard gate was already open");
+    await wait(60);
+    expect(h.writes.length).toBe(0);
+    expect(h.asked.length).toBe(0);
+  });
+});
+
+// The panel sends the text in front of what was picked rather than a count it
+// worked out itself, so the counting and the finding use one set of rules.
+describe("which of several identical runs was picked", () => {
+  const twice = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate was already open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+  const body = "He said it was fine. Later he said it was fine again, with less conviction.";
+
+  const ask = (h: any, picked: string, ahead: string) =>
+    h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m2", picked: picked, ahead: ahead });
+
+  test("nothing in front of it means the first one", async () => {
+    const h = await armed(["<REFINED>it was not fine at all</REFINED>"], {}, twice(body));
+    await ask(h, "it was fine", "He said ");
+    await wait(60);
+    expect(h.writes[0].content).toBe("He said it was not fine at all. Later he said it was fine again, with less conviction.");
+  });
+
+  test("one in front of it means the second one", async () => {
+    const h = await armed(["<REFINED>it was not fine at all</REFINED>"], {}, twice(body));
+    await ask(h, "it was fine", "He said it was fine. Later he said ");
+    await wait(60);
+    expect(h.writes[0].content).toBe("He said it was fine. Later he said it was not fine at all again, with less conviction.");
+  });
+
+  test("the count survives whitespace coming back differently", async () => {
+    // A DOM range joins paragraphs with one newline where the source has a
+    // blank line, so the text in front arrives flattened differently than it is
+    // stored. Counting has to read through that the same way finding does.
+    const split = "He said it was fine.\n\nLater he said it was fine again, with less conviction.";
+    const h = await armed(["<REFINED>it was not fine at all</REFINED>"], {}, twice(split));
+    await ask(h, "it was fine", "He said it was fine.\nLater he said ");
+    await wait(60);
+    expect(h.writes[0].content).toBe("He said it was fine.\n\nLater he said it was not fine at all again, with less conviction.");
+  });
+});
+
+// A share of a short passage is a handful of characters, so the length limits
+// carry a floor in characters as well. These two pin both halves of that: a
+// short passage has room to come back longer, and a whole reply losing most of
+// its writing is still refused.
+describe("the length limits on a short passage", () => {
+  const one = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate was already open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+
+  test("a few words may come back as a few more", async () => {
+    // Eleven characters becoming twenty-six is 136% longer, which the share on
+    // its own refuses at any setting anybody would pick.
+    const h = await armed(
+      ["<REFINED>it seemed all right to him</REFINED>"],
+      {},
+      one("He said it was fine and went back to the crates."),
+    );
+    await h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m2", picked: "it was fine", ahead: "He said " });
+    await wait(60);
+    expect(h.writes.length).toBe(1);
+    expect(h.writes[0].content).toBe("He said it seemed all right to him and went back to the crates.");
+  });
+
+  test("but a whole reply losing most of its writing is still turned down", async () => {
+    const whole = "She set the crate down on the step, straightened up, and tried the handle twice.";
+    const h = await armed(["<REFINED>She tried it.</REFINED>"], {}, one(whole));
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    expect(h.body("m2")).toBe(whole);
+  });
+});
+
+// An underscore with a word character either side of it is not emphasis, so it
+// is drawn as typed and is part of what a reader selects. Taking it out when
+// reading the source would make any selection over snake_case unfindable.
+describe("text that looks like markup and is not", () => {
+  const one = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate was already open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+  const ask = (h: any, picked: string, ahead = "") =>
+    h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m2", picked: picked, ahead: ahead });
+
+  test("a selection over an underscored name is found", async () => {
+    const body = "The file was called my_long_name and nobody ever renamed it.";
+    const h = await armed(["<REFINED>nobody renamed it afterwards</REFINED>"], {}, one(body));
+    await ask(h, "and nobody ever renamed it", "The file was called my_long_name ");
+    await wait(60);
+    expect(h.writes.length).toBe(1);
+    expect(h.writes[0].content).toBe("The file was called my_long_name nobody renamed it afterwards.");
+  });
+
+  test("and the name itself comes through the rewrite unchanged", async () => {
+    const body = "The file was called my_long_name and nobody ever renamed it.";
+    const h = await armed(["<REFINED>a file named my_long_name sat there</REFINED>"], {}, one(body));
+    await ask(h, "The file was called my_long_name", "");
+    await wait(60);
+    expect(h.writes[0].content).toContain("my_long_name");
+  });
+
+  test("real underscore emphasis is still styling, not text", async () => {
+    const body = "He called it _a waste of good timber_ and walked off.";
+    const h = await armed(["<REFINED>He said it wasted decent wood</REFINED>"], {}, one(body));
+    // The markers are not on screen, so they cannot be in what was picked.
+    await ask(h, "He called it a waste of good timber", "");
+    await wait(60);
+    expect(h.writes.length).toBe(1);
+    expect((h.writes[0].content.split("_").length - 1) % 2).toBe(0);
+  });
+});
+
+// Phrases this chat has worn out.
+//
+// A refine judges one reply at a time, so a phrase reads as fine every time it
+// is met. These drive the macro through a real refine, because what matters is
+// what reaches the model rather than what a counting function returns.
+describe("phrases this chat has worn out", () => {
+  const WORN_BLOCK = { id: "worn", name: "Worn out", on: true, role: "system", text: "<worn_out>\n{{overused}}\n</worn_out>" };
+
+  // Only what the macro filled in. The run-up block carries the replies
+  // themselves, so a phrase being repeated is in the request either way: asking
+  // whether the whole request mentions it answers a different question.
+  const wornSent = (h: any): string => {
+    const all = JSON.stringify(h.asked[0].messages);
+    const hit = /<worn_out>\\n([\s\S]*?)\\n<\/worn_out>/.exec(all);
+    return hit ? hit[1] : "";
+  };
+
+  const chatWith = (replies: string[]): Msg[] => {
+    const out: Msg[] = [{ id: "m0", role: "assistant", content: "The yard gate stood open." }];
+    replies.forEach((text, i) => {
+      out.push({ id: "u" + i, role: "user", content: "i keep going" });
+      out.push({ id: "a" + i, role: "assistant", content: text });
+    });
+    return out;
+  };
+
+  const habit = [
+    "A shiver ran down her spine as the lamp guttered out.",
+    "She pushed the door wider. A shiver ran down her spine.",
+    "The cold found the gap in the frame, and a shiver ran down her spine again.",
+    "She set the lamp on the sill and waited for the wind to drop.",
+  ];
+
+  test("a phrase in several replies reaches the model", async () => {
+    const h = await armed(
+      ["<REFINED>She set the lamp down and waited for the wind to drop at last.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      chatWith(habit),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(wornSent(h)).toContain("shiver ran down her spine");
+  });
+
+  test("a reply hidden from the prompt is not counted", async () => {
+    const msgs: any[] = chatWith(habit);
+    msgs.find((m: any) => m.id === "a1").extra = { hidden: true };
+    const h = await armed(
+      ["<REFINED>She set the lamp down and waited for the wind to drop at last.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      msgs,
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(wornSent(h)).not.toContain("shiver ran down her spine");
+  });
+
+  // Color tags are formatting. Their quote marks also read as a line of speech
+  // opening and closing, which let a spoken line through as narration.
+  test("color tags and the words around them are not counted as a phrase", async () => {
+    const colored = [
+      '<font color="#aa8844">"Mind the step."</font> Rook said, and lifted the lantern.',
+      '<font color="#aa8844">"Nearly there."</font> Rook said, and lifted the lantern.',
+      '<font color="#aa8844">"Hold the rope."</font> Rook said, and lifted the lantern.',
+      "The rope held, and the boat came in against the dock.",
+    ];
+    const h = await armed(
+      ["<REFINED>The rope held and the boat came in.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      chatWith(colored),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    const sent = wornSent(h);
+    expect(sent).not.toContain("font");
+    expect(sent).not.toContain("color");
+    expect(sent).not.toContain("mind the step");
+    // The narration still counts, so the check is not passing on an empty list.
+    expect(sent).toContain("and lifted the lantern");
+  });
+
+  // Trackers print the same labels in every reply. They are a format the card
+  // asked for, not the writing repeating itself.
+  test("trackers and status lines are not counted as a phrase", async () => {
+    const tracked = (line: string) =>
+      line + "\n\n**Location:** the east dock at low tide\nMood: tense and watchful\n" +
+      "HP 10/10 | Stamina 8/10 | Coins 12\n[Time: late evening | Weather: fog over the water]\n【Quest: find the lost ledger】";
+    const replies = [
+      tracked("Rook tied off the rope and lifted the lantern."),
+      tracked("The fog rolled in, and Rook lifted the lantern."),
+      tracked("A gull cried once, and Rook lifted the lantern."),
+      "The rope held, and the boat came in against the dock.",
+    ];
+    const h = await armed(
+      ["<REFINED>The rope held and the boat came in.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      chatWith(replies),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    const sent = wornSent(h);
+    for (const bit of ["east dock", "tense and watchful", "stamina", "late evening", "fog over the water", "lost ledger"])
+      expect({ bit, found: sent.includes(bit) }).toEqual({ bit, found: false });
+    // The prose around the trackers still counts.
+    expect(sent).toContain("lifted the lantern");
+  });
+
+  // Letters in any alphabet are word characters. Only a to z were, so an
+  // accented word was cut in pieces and a chat in Russian was never counted.
+  test("accented words are counted whole, and so are other alphabets", async () => {
+    const french = [
+      "Elle a posé la lanterne sur le quai désert.",
+      "Le vent tomba, et elle a posé la lanterne sur le quai désert.",
+      "Plus tard, elle a posé la lanterne sur le quai désert encore.",
+      "La corde tint bon.",
+    ];
+    const h = await armed(
+      ["<REFINED>La corde tint.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      chatWith(french),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(wornSent(h)).toContain("la lanterne sur le quai désert");
+
+    const russian = [
+      "Она поставила фонарь на пустой причал.",
+      "Ветер стих, и она поставила фонарь на пустой причал.",
+      "Позже она поставила фонарь на пустой причал снова.",
+      "Верёвка выдержала.",
+    ];
+    const r = await armed(
+      ["<REFINED>Верёвка выдержала.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      chatWith(russian),
+    );
+    await r.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(wornSent(r)).toContain("поставила фонарь на пустой причал");
+  });
+
+  test("a reply's own thinking is not counted", async () => {
+    const thinking = [
+      "<think>keep the lamp in view the whole time</think>She walked on.",
+      "<think>keep the lamp in view the whole time</think>She stopped at the gate.",
+      "<think>keep the lamp in view the whole time</think>She looked back once.",
+      "The rope held, and the boat came in against the dock.",
+    ];
+    const h = await armed(
+      ["<REFINED>The rope held and the boat came in.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      chatWith(thinking),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(wornSent(h)).not.toContain("lamp in view");
+  });
+
+  test("and the block is left out entirely with the setting off", async () => {
+    const h = await armed(
+      ["<REFINED>She set the lamp down and waited for the wind to drop at last.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: false },
+      chatWith(habit),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(JSON.stringify(h.asked[0].messages)).not.toContain("<worn_out>");
+  });
+
+  test("a phrase listed as fine is never reported", async () => {
+    const h = await armed(
+      ["<REFINED>She set the lamp down and waited for the wind to drop at last.</REFINED>"],
+      {
+        blocks: PROMPT.concat([WORN_BLOCK]),
+        wornOn: true,
+        wornLeast: 3,
+        wornFine: ["a shiver ran down her spine"],
+      },
+      chatWith(habit),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(wornSent(h)).not.toContain("shiver ran down her spine");
+  });
+
+  test("nothing repeated means the block is left out rather than sent empty", async () => {
+    const varied = [
+      "The kettle screamed and she took it off the ring.",
+      "Outside, somebody was dragging a bin across gravel.",
+      "She counted the jars on the shelf and came up two short.",
+      "The gutter had come away from the brick at one end.",
+    ];
+    const h = await armed(
+      ["<REFINED>The gutter hung loose from the brick at one end of the roof.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      chatWith(varied),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(JSON.stringify(h.asked[0].messages)).not.toContain("<worn_out>");
+  });
+
+  test("no block asking for it means none of it is sent", async () => {
+    // The same rule the other three macros follow: what a block nobody sends
+    // wants is nothing, so the counting is never done either.
+    const h = await armed(
+      ["<REFINED>She set the lamp down and waited for the wind to drop at last.</REFINED>"],
+      { blocks: PROMPT, wornOn: true, wornLeast: 3 },
+      chatWith(habit),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(JSON.stringify(h.asked[0].messages)).not.toContain("<worn_out>");
+  });
+
+  test("your own messages are not counted, since they are not the model's habit", async () => {
+    // Enough of them to clear the threshold on their own, or the check would
+    // pass because there were too few rather than because they were skipped.
+    const msgs = chatWith([
+      "The kettle screamed and she took it off the ring.",
+      "Outside, somebody dragged a bin across the gravel.",
+      "She counted the jars and came up two short.",
+      "The gutter had come away from the brick at one end.",
+    ]);
+    let mine = 0;
+    for (const m of msgs)
+      if (m.role === "user") {
+        m.content = "a shiver ran down her spine";
+        mine++;
+      }
+    expect(mine).toBeGreaterThanOrEqual(3);
+    const h = await armed(
+      ["<REFINED>The gutter hung loose from the brick at one end of the roof.</REFINED>"],
+      { blocks: PROMPT.concat([WORN_BLOCK]), wornOn: true, wornLeast: 3 },
+      msgs,
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(60);
+    expect(wornSent(h)).not.toContain("shiver");
+  });
+});
+
+// Several passes, each handed what the one before it wrote.
+//
+// One pass is the default and goes down the same path, built from the list on the
+// Prompt tab under its own name, so the two cannot drift apart.
+describe("a chain of passes", () => {
+  const reply = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate stood open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+
+  // Each pass carries a line naming itself, so which prompt ran is readable off
+  // the request rather than inferred from the number of calls.
+  const pass = (name: string, mark: string) => ({
+    name: name,
+    on: true,
+    blocks: [
+      { id: "which", name: "Which", on: true, role: "system", text: "<pass>\n" + mark + "\n</pass>" },
+      { id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" },
+    ],
+  });
+
+  const two = [pass("Cut the filler", "PASS ONE"), pass("Fix the rhythm", "PASS TWO")];
+  const body = "She stepped through the gate and, suddenly, the cold just hit her hard.";
+
+  test("one pass is still one call, with the setting off", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her at once.</REFINED>"], { passMode: "one", passes: two }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("two passes are two calls, in order", async () => {
+    const h = await armed(
+      [
+        "<REFINED>She stepped through the gate and the cold hit her hard.</REFINED>",
+        "<REFINED>She stepped through, and the cold took her breath away.</REFINED>",
+      ],
+      { passMode: "many", passes: two },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    expect(h.asked.length).toBe(2);
+    expect(JSON.stringify(h.asked[0].messages)).toContain("PASS ONE");
+    expect(JSON.stringify(h.asked[1].messages)).toContain("PASS TWO");
+  });
+
+  test("the second pass is handed what the first one wrote, not the reply", async () => {
+    const h = await armed(
+      [
+        "<REFINED>She stepped through the gate and the cold hit her hard.</REFINED>",
+        "<REFINED>She stepped through, and the cold took her breath away.</REFINED>",
+      ],
+      { passMode: "many", passes: two },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    const second = JSON.stringify(h.asked[1].messages);
+    expect(second).toContain("She stepped through the gate and the cold hit her hard.");
+    expect(second).not.toContain("suddenly");
+  });
+
+  test("and what gets saved is the last pass's answer", async () => {
+    const h = await armed(
+      [
+        "<REFINED>She stepped through the gate and the cold hit her hard.</REFINED>",
+        "<REFINED>She stepped through, and the cold took her breath away.</REFINED>",
+      ],
+      { passMode: "many", passes: two },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    expect(h.writes.length).toBe(1);
+    expect(h.writes[0].content).toBe("She stepped through, and the cold took her breath away.");
+  });
+
+  test("a refusal in the first pass stops the chain there", async () => {
+    const h = await armed(
+      ["I cannot rewrite this request.", "<REFINED>A second answer nobody should ever ask for.</REFINED>"],
+      { passMode: "many", passes: two },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    expect(h.asked.length).toBe(1);
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("a pass with no block carrying the turn is dropped rather than sent", async () => {
+    const broken = { name: "Nothing to rewrite", on: true, blocks: [{ id: "a", name: "A", on: true, role: "system", text: "<pass>\nNO TURN HERE\n</pass>" }] };
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her all at once.</REFINED>"],
+      { passMode: "many", passes: [broken, pass("Fix the rhythm", "PASS TWO")] },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    expect(h.asked.length).toBe(1);
+    expect(JSON.stringify(h.asked[0].messages)).toContain("PASS TWO");
+    expect(JSON.stringify(h.asked[0].messages)).not.toContain("NO TURN HERE");
+  });
+
+  test("a switched-off pass is skipped", async () => {
+    const off = { ...pass("Cut the filler", "PASS ONE"), on: false };
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her all at once.</REFINED>"],
+      { passMode: "many", passes: [off, pass("Fix the rhythm", "PASS TWO")] },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    expect(h.asked.length).toBe(1);
+    expect(JSON.stringify(h.asked[0].messages)).toContain("PASS TWO");
+  });
+
+  test("with the mode on and no usable pass, the prompt tab's list runs instead", async () => {
+    const h = await armed(
+      ["<REFINED>She stepped through and the cold hit her all at once.</REFINED>"],
+      { passMode: "many", passes: [] },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(120);
+    expect(h.asked.length).toBe(1);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("three passes each tightening a little are refused on the total", async () => {
+    // No single pass breaks the shrink limit. Together they take the reply to
+    // under half, which is exactly what a per-pass check cannot see.
+    const long = "She stepped through the gate and, quite suddenly, the cold of the yard just hit her all at once, hard.";
+    const three = [pass("One", "P1"), pass("Two", "P2"), pass("Three", "P3")];
+    const h = await armed(
+      [
+        "<REFINED>She stepped through the gate and the cold of the yard hit her all at once.</REFINED>",
+        "<REFINED>She stepped through the gate and the cold hit her at once.</REFINED>",
+        "<REFINED>She went through, and the cold hit.</REFINED>",
+      ],
+      { passMode: "many", passes: three, minShrinkPct: 40 },
+      reply(long),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(160);
+    expect(h.asked.length).toBe(3);
+    expect(h.writes.length).toBe(0);
+    expect(h.sent.map((x: any) => String(x.why || "")).join(" ")).toMatch(/across all 3 passes/i);
+  });
+});
+
+// The two blocks added for the new macros start switched on, which is only safe
+// because a block whose macros came back empty leaves the prompt. If that ever
+// stopped being true, every refine would carry two empty headings.
+describe("the built-in prompt carries the new macros", () => {
+  const blocks = (DEFAULT_BLOCKS as any[]).map((b) => ({ ...b }));
+
+  test("the built-in prompt has a block for each of them", () => {
+    const text = blocks.map((b) => String(b.text || "")).join("\n");
+    expect(text).toContain("{{overused}}");
+    expect(text).toContain("{{whole_reply}}");
+  });
+
+  test("and both are switched on, so turning the setting on is enough", () => {
+    for (const id of ["worn", "around"]) {
+      const had = blocks.find((b) => b.id === id);
+      expect(had).toBeTruthy();
+      expect(had.on).toBe(true);
+    }
+  });
+
+  test("an ordinary refine sends neither of them", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her at once.</REFINED>"], { blocks: blocks });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g1" });
+    await wait(60);
+    const sent = JSON.stringify(h.asked[0].messages);
+    expect(sent).not.toContain("<worn_out>");
+    expect(sent).not.toContain("<reply_around_it>");
+  });
+
+  test("refining a selection sends the one that has something to say", async () => {
+    const msgs: Msg[] = [
+      { id: "m0", role: "assistant", content: "The yard gate stood open when she got there." },
+      { id: "m1", role: "user", content: "i go in" },
+      { id: "m2", role: "assistant", content: "She set the crate down. She tried the handle twice anyway. Nobody came." },
+    ];
+    const h = await armed(
+      ["<REFINED>She tried the handle twice regardless of that.</REFINED>"],
+      { blocks: blocks },
+      msgs,
+    );
+    await h.front({
+      type: "refine_selection",
+      requestId: "r",
+      chatId: "c1",
+      messageId: "m2",
+      picked: "She tried the handle twice anyway.",
+      ahead: "She set the crate down. ",
+    });
+    await wait(80);
+    const sent = JSON.stringify(h.asked[0].messages);
+    // The reply around it, so the fragment is not read without its context.
+    expect(sent).toContain("<reply_around_it>");
+    expect(sent).toContain("<<<She tried the handle twice anyway.>>>");
+    // And still not the worn one, whose setting is off.
+    expect(sent).not.toContain("<worn_out>");
+  });
+
+  test("switching the worn setting on is all it takes", async () => {
+    const habit = [
+      { id: "m0", role: "assistant", content: "A shiver ran down her spine as the lamp guttered." },
+      { id: "u1", role: "user", content: "i keep going" },
+      { id: "a1", role: "assistant", content: "She pushed the door wider. A shiver ran down her spine." },
+      { id: "u2", role: "user", content: "i keep going" },
+      { id: "a2", role: "assistant", content: "The cold found the frame, and a shiver ran down her spine again." },
+      { id: "u3", role: "user", content: "i keep going" },
+      { id: "a3", role: "assistant", content: "She set the lamp on the sill and waited for the wind to drop." },
+    ];
+    const h = await armed(
+      ["<REFINED>She put the lamp on the sill and waited for the wind to fall away.</REFINED>"],
+      { blocks: blocks, wornOn: true, wornLeast: 3 },
+      habit as Msg[],
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(80);
+    const sent = JSON.stringify(h.asked[0].messages);
+    expect(sent).toContain("<worn_out>");
+    expect(sent).toContain("shiver ran down her spine");
+  });
+});
+
+// What each pass of a chain did. One before and one after, with three calls
+// somewhere between them, says a chain came out worse and never says which link
+// did it.
+// A pass on a model setup of its own, with "Each pass uses its preset's model
+// setup" on. The panel sends the setup's values with the pass. A pass without
+// one runs on the Model tab's settings.
+describe("a pass on its own model setup", () => {
+  const reply = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The ferry was late again, and the dock was cold." },
+    { id: "m1", role: "user", content: "i wait" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+  const pass = (name: string, mark: string, model: any = null) => ({
+    name: name,
+    on: true,
+    blocks: [
+      { id: "which", name: "Which", on: true, role: "system", text: "<pass>\n" + mark + "\n</pass>" },
+      { id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" },
+    ],
+    model: model,
+  });
+  const quick = {
+    setup: "Quick fixes",
+    connectionId: "conn-small",
+    thinkingMode: "off",
+    thinkingEffort: "medium",
+    timeoutSecs: 60,
+    samplers: { temperature: 0.2 },
+    costIn: 2000000,
+    costOut: 0,
+  };
+  const body = "Ines waited by the rail and, honestly, the wind was just really sharp.";
+  const answers = [
+    "<REFINED>Ines waited by the rail, and the wind was really sharp.</REFINED>",
+    "<REFINED>Ines waited by the rail. The wind was sharp.</REFINED>",
+  ];
+  const main = {
+    passMode: "many",
+    connectionId: "conn-main",
+    thinkingMode: "custom",
+    thinkingEffort: "high",
+    samplers: { temperature: 0.9 },
+    costIn: 0,
+    costOut: 0,
+  };
+
+  test("each pass is asked on its own connection, thinking and samplers", async () => {
+    const h = await armed(answers, { ...main, passes: [pass("Prose", "PASS ONE"), pass("Fixes", "PASS TWO", quick)] }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(150);
+    expect(h.asked.length).toBe(2);
+    expect(h.asked[0].connection_id).toBe("conn-main");
+    expect(h.asked[0].reasoning).toEqual({ source: "custom", effort: "high" });
+    expect(h.asked[0].parameters).toEqual({ temperature: 0.9 });
+    expect(h.asked[1].connection_id).toBe("conn-small");
+    expect(h.asked[1].reasoning).toEqual({ source: "off" });
+    expect(h.asked[1].parameters).toEqual({ temperature: 0.2 });
+  });
+
+  test("each call tells the panel its own wait", async () => {
+    const h = await armed(answers, { ...main, timeoutSecs: 240, passes: [pass("Prose", "PASS ONE"), pass("Fixes", "PASS TWO", quick)] }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(150);
+    const asks = h.sent.filter((m: any) => m.type === "refine_progress" && (m.stage === "asking" || m.stage === "thinking"));
+    // Each call says its wait, both where the pass starts and where the call
+    // is made, and the pass with thinking off is never said to be thinking.
+    expect(asks.map((m: any) => m.waitSecs)).toEqual([240, 240, 60, 60]);
+    expect(asks.map((m: any) => m.stage)).toEqual(["thinking", "thinking", "asking", "asking"]);
+  });
+
+  test("a pass with no model setup runs on the Model tab", async () => {
+    const h = await armed(answers, { ...main, passes: [pass("Prose", "PASS ONE"), pass("More", "PASS TWO")] }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(150);
+    expect(h.asked.map((a: any) => a.connection_id)).toEqual(["conn-main", "conn-main"]);
+  });
+
+  test("the cost is priced at the prices of the model each pass ran on", async () => {
+    const h = await armed(answers, { ...main, passes: [pass("Prose", "PASS ONE"), pass("Fixes", "PASS TWO", quick)] }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(200);
+    const used = h.sent.filter((m: any) => m.type === "refine_used");
+    expect(used.length).toBe(2);
+    // The first pass is on the Model tab, priced at 0. The second is priced at
+    // 2 per input token, so the total is twice what the second pass sent.
+    expect(used[0].cost).toBe(0);
+    expect(used[1].cost).toBeCloseTo((used[1].sent - used[0].sent) * 2, 6);
+    expect(used[1].cost).toBeGreaterThan(0);
+  });
+
+  test("what each pass changed names the model setup it ran on", async () => {
+    const h = await armed(answers, { ...main, passes: [pass("Prose", "PASS ONE"), pass("Fixes", "PASS TWO", quick)] }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(150);
+    const steps = (h.sent.find((m: any) => m.type === "refine_steps") || {}).steps || [];
+    expect(steps.map((x: any) => x.setup)).toEqual(["", "Quick fixes"]);
+  });
+
+  test("the preview shows the first pass on its model setup, with its prices", async () => {
+    const h = await armed([], { ...main, passes: [pass("Fixes", "PASS ONE", quick), pass("Prose", "PASS TWO")] }, reply(body));
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1" });
+    await wait(80);
+    const got = h.sent.find((m: any) => m.type === "prompt_preview" && m.requestId === "p");
+    expect(got.connectionId).toBe("conn-small");
+    expect(got.reasoning).toEqual({ source: "off" });
+    expect(got.parameters).toEqual({ temperature: 0.2 });
+    expect(got.setup).toBe("Quick fixes");
+    expect(got.prices).toEqual({ in: 2000000, out: 0 });
+  });
+});
+
+// Replies run the passes for replies. Your own messages run the passes for
+// your messages, or run once with their own prompt when that list is empty.
+// Neither side ever runs the other side's passes.
+describe("several passes and your own messages", () => {
+  const pass = (name: string, mark: string, model: any = null) => ({
+    name: name,
+    on: true,
+    blocks: [
+      { id: "which", name: "Which", on: true, role: "system", text: "<pass>\n" + mark + "\n</pass>" },
+      { id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" },
+    ],
+    model: model,
+  });
+  const base = {
+    passMode: "many",
+    passes: [pass("A", "REPLY PASS ONE"), pass("B", "REPLY PASS TWO")],
+    userBlocks: [{ id: "u", name: "Mine", on: true, role: "user", text: "OWN MESSAGE PROMPT {{message}}" }],
+  };
+  const yours = { ...base, passesYours: [pass("C", "OWN PASS ONE"), pass("D", "OWN PASS TWO")] };
+  const said = (h: any, i: number) => JSON.stringify(h.asked[i].messages);
+
+  test("with no passes for your messages, yours is refined once, with the prompt for your messages", async () => {
+    const h = await armed(["<REFINED>I walk through the gate.</REFINED>"], base);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(150);
+    expect(h.asked.length).toBe(1);
+    expect(said(h, 0)).toContain("OWN MESSAGE PROMPT");
+    expect(said(h, 0)).not.toContain("PASS");
+  });
+
+  test("with passes for your messages, yours runs them in order, and never the reply passes", async () => {
+    const h = await armed(["<REFINED>I walk through the gate.</REFINED>", "<REFINED>I walk through the open gate.</REFINED>"], yours);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(150);
+    expect(h.asked.length).toBe(2);
+    expect(said(h, 0)).toContain("OWN PASS ONE");
+    expect(said(h, 1)).toContain("OWN PASS TWO");
+    // The second pass is handed what the first wrote.
+    expect(said(h, 1)).toContain("I walk through the gate.");
+    expect(said(h, 0) + said(h, 1)).not.toContain("REPLY PASS");
+    expect(h.writes[h.writes.length - 1].content).toBe("I walk through the open gate.");
+  });
+
+  test("a reply runs the passes for replies, and never the ones for your messages", async () => {
+    const h = await armed(["<REFINED>The gate stood open when she arrived.</REFINED>", "<REFINED>The gate was open when she arrived.</REFINED>"], yours);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(150);
+    expect(h.asked.length).toBe(2);
+    expect(said(h, 0)).toContain("REPLY PASS ONE");
+    expect(said(h, 1)).toContain("REPLY PASS TWO");
+    expect(said(h, 0) + said(h, 1)).not.toContain("OWN PASS");
+  });
+
+  test("a pass for your messages runs on its own model setup", async () => {
+    const quick = { setup: "Quick", connectionId: "conn-small", thinkingMode: "off", thinkingEffort: "medium", timeoutSecs: 60, samplers: {}, costIn: 0, costOut: 0 };
+    const h = await armed(["<REFINED>I walk through the gate.</REFINED>"], { ...base, connectionId: "conn-main", passesYours: [pass("C", "OWN PASS ONE", quick)] });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(150);
+    expect(h.asked[0].connection_id).toBe("conn-small");
+  });
+
+  test("See what gets sent shows the first pass for your messages, and names them", async () => {
+    const h = await armed([], yours);
+    await h.front({ type: "preview_prompt", requestId: "p", chatId: "c1", messageId: "m1" });
+    await wait(80);
+    const got = h.sent.find((m: any) => m.type === "prompt_preview" && m.requestId === "p");
+    const text = (got.messages || []).map((m: any) => m.content).join("\n");
+    expect(text).toContain("OWN PASS ONE");
+    expect(text).not.toContain("REPLY PASS");
+    expect(got.passes).toEqual(["C", "D"]);
+  });
+
+  test("with one pass, your own messages ignore both lists", async () => {
+    const h = await armed(["<REFINED>I walk through the gate.</REFINED>"], { ...yours, passMode: "one" });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(150);
+    expect(h.asked.length).toBe(1);
+    expect(said(h, 0)).toContain("OWN MESSAGE PROMPT");
+  });
+});
+
+describe("what each pass changed", () => {
+  const reply = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate stood open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+  const pass = (name: string) => ({
+    name: name,
+    on: true,
+    blocks: [
+      { id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" },
+    ],
+  });
+  const body = "She stepped through the gate and, suddenly, the cold just hit her hard.";
+  const steps = (h: any) => (h.sent.filter((x: any) => x && x.type === "refine_steps").pop() || {}).steps || [];
+
+  test("a chain reports a step for each pass, in order", async () => {
+    const h = await armed(
+      [
+        "<REFINED>She stepped through the gate and the cold hit her hard.</REFINED>",
+        "<REFINED>She stepped through, and the cold took her breath away.</REFINED>",
+      ],
+      { passMode: "many", passes: [pass("Cut the filler"), pass("Fix the rhythm")] },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(140);
+    const got = steps(h);
+    expect(got.length).toBe(2);
+    expect(got.map((s: any) => s.name)).toEqual(["Cut the filler", "Fix the rhythm"]);
+  });
+
+  test("each step says what it was handed and what it gave back", async () => {
+    const h = await armed(
+      [
+        "<REFINED>She stepped through the gate and the cold hit her hard.</REFINED>",
+        "<REFINED>She stepped through, and the cold took her breath away.</REFINED>",
+      ],
+      { passMode: "many", passes: [pass("Cut the filler"), pass("Fix the rhythm")] },
+      reply(body),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(140);
+    const got = steps(h);
+    // The first pass starts from the reply, and each one after starts where the
+    // one before it finished. Without that they would all read as starting from
+    // the original, which is the thing this is for.
+    expect(got[0].before).toBe(body);
+    expect(got[0].after).toBe("She stepped through the gate and the cold hit her hard.");
+    expect(got[1].before).toBe(got[0].after);
+    expect(got[1].after).toBe("She stepped through, and the cold took her breath away.");
+  });
+
+  test("one pass reports nothing, since there is nothing to break down", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her at once.</REFINED>"], { passMode: "one" }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(steps(h).length).toBe(0);
+  });
+
+  test("a chain refused on the total still reports its passes", async () => {
+    // The refusal says which limit was hit. This says which pass hit it, which
+    // is the half a reader cannot get anywhere else.
+    const long = "She stepped through the gate and, quite suddenly, the cold of the yard just hit her all at once, hard.";
+    const h = await armed(
+      [
+        "<REFINED>She stepped through the gate and the cold of the yard hit her all at once.</REFINED>",
+        "<REFINED>She stepped through the gate and the cold hit her at once.</REFINED>",
+        "<REFINED>She went through, and the cold hit.</REFINED>",
+      ],
+      { passMode: "many", passes: [pass("One"), pass("Two"), pass("Three")], minShrinkPct: 40 },
+      reply(long),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(180);
+    expect(h.writes.length).toBe(0);
+    expect(steps(h).length).toBe(3);
+  });
+});
+
+// Each pass is a model call, so the list cannot be allowed to run away with
+// somebody's bill.
+describe("how many passes one refine will walk", () => {
+  test("a list longer than the cap is cut to it", async () => {
+    const one = (n: number) => ({
+      name: "Pass " + n,
+      on: true,
+      blocks: [{ id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" }],
+    });
+    const answers = new Array(20)
+      .fill("")
+      .map((_, i) => "<REFINED>A rewrite from pass " + i + ", long enough to keep as it stands.</REFINED>");
+    const h = await armed(
+      answers,
+      { passMode: "many", passes: new Array(20).fill(0).map((_, i) => one(i + 1)) },
+      [
+        { id: "m0", role: "assistant", content: "The yard gate stood open when she got there." },
+        { id: "m1", role: "user", content: "i go in" },
+        { id: "m2", role: "assistant", content: "A rewrite from pass zero, long enough to keep as it stands." },
+      ],
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(400);
+    expect(h.asked.length).toBe(6);
+  });
+});
+
+// A straight quote is not always somebody speaking, and reading one as dialogue
+// drops every word after it from the counting.
+describe("quotes that are not dialogue", () => {
+  const chatWith = (replies: string[]): Msg[] => {
+    const out: Msg[] = [{ id: "m0", role: "assistant", content: "The yard gate stood open." }];
+    replies.forEach((text, i) => {
+      out.push({ id: "u" + i, role: "user", content: "i keep going" });
+      out.push({ id: "a" + i, role: "assistant", content: text });
+    });
+    return out;
+  };
+  const WORN = { id: "worn", name: "Worn", on: true, role: "system", text: "<worn>\n{{overused}}\n</worn>" };
+  const wornSent = (h: any): string => {
+    const all = JSON.stringify(h.asked[0].messages);
+    const hit = /<worn>\\n([\s\S]*?)\\n<\/worn>/.exec(all);
+    return hit ? hit[1] : "";
+  };
+
+  test("a measurement mark does not hide the narration after it", async () => {
+    // The habit sits after the inch mark in every reply. Read as an opening
+    // quote, the whole of it is thrown away and nothing is ever found.
+    const replies = [
+      'The gap was 6" wide and the wind came straight through it.',
+      'The gap was 4" wide and the wind came straight through it again.',
+      'The gap was 8" wide and the wind came straight through it once more.',
+      "She packed the frame with rag and sat back down.",
+    ];
+    const h = await armed(
+      ["<REFINED>She packed the frame with rag and then sat back down again.</REFINED>"],
+      { blocks: PROMPT.concat([WORN]), wornOn: true, wornLeast: 3 },
+      chatWith(replies),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(80);
+    expect(wornSent(h)).toContain("wind came straight through it");
+  });
+
+  test("real dialogue is still left out", async () => {
+    const replies = [
+      'She shrugged. "I told you about the gate," she said.',
+      'He looked away. "I told you about the gate."',
+      'The dog barked. "I told you about the gate," she repeated.',
+      "She packed the frame with rag and sat back down.",
+    ];
+    const h = await armed(
+      ["<REFINED>She packed the frame with rag and then sat back down again.</REFINED>"],
+      { blocks: PROMPT.concat([WORN]), wornOn: true, wornLeast: 3 },
+      chatWith(replies),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(80);
+    expect(wornSent(h)).not.toContain("told you about the gate");
+  });
+
+  test("curly quotes are read by their shape", async () => {
+    const replies = [
+      "She shrugged. “I told you about the gate,” she said.",
+      "He looked away. “I told you about the gate.”",
+      "The dog barked. “I told you about the gate,” she repeated.",
+      "She packed the frame with rag and sat back down.",
+    ];
+    const h = await armed(
+      ["<REFINED>She packed the frame with rag and then sat back down again.</REFINED>"],
+      { blocks: PROMPT.concat([WORN]), wornOn: true, wornLeast: 3 },
+      chatWith(replies),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(80);
+    expect(wornSent(h)).not.toContain("told you about the gate");
+  });
+});
+
+// A place, an institution or a thing the story is about repeats because the
+// story is about it. Telling somebody their own setting is a habit is telling
+// them to stop writing their story.
+describe("the story's own words are not a habit", () => {
+  const WORN = { id: "worn", name: "Worn", on: true, role: "system", text: "<worn>\n{{overused}}\n</worn>" };
+  const wornSent = (h: any): string => {
+    const all = JSON.stringify(h.asked[0].messages);
+    const hit = /<worn>\\n([\s\S]*?)\\n<\/worn>/.exec(all);
+    return hit ? hit[1] : "";
+  };
+  const chatWith = (replies: string[]): Msg[] => {
+    const out: Msg[] = [{ id: "m0", role: "assistant", content: "The gate stands open." }];
+    replies.forEach((text, i) => {
+      out.push({ id: "u" + i, role: "user", content: "i keep going" });
+      out.push({ id: "a" + i, role: "assistant", content: text });
+    });
+    return out;
+  };
+
+  test("something the card says is not reported", async () => {
+    // The card calls her a ferry pilot who has crossed the same water. A story
+    // about that will say it, and saying it is not a habit.
+    const replies = [
+      "She had crossed the same water for years and thought nothing of it.",
+      "Anyone who had crossed the same water that long stopped looking at it.",
+      "She had crossed the same water in worse weather than this.",
+      "The lamp guttered and she put a hand over it.",
+    ];
+    const h = await armed(
+      ["<REFINED>The lamp guttered, and she cupped a hand around it to keep it lit.</REFINED>"],
+      { blocks: PROMPT.concat([WORN]), wornOn: true, wornLeast: 3 },
+      chatWith(replies),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(80);
+    expect(wornSent(h)).not.toContain("crossed the same water");
+  });
+
+  test("but a habit the story never mentions still is", async () => {
+    const replies = [
+      "A shiver ran down her spine as the lamp guttered out.",
+      "She pushed the door wider. A shiver ran down her spine.",
+      "The cold found the frame, and a shiver ran down her spine again.",
+      "The lamp guttered and she put a hand over it.",
+    ];
+    const h = await armed(
+      ["<REFINED>The lamp guttered, and she cupped a hand around it to keep it lit.</REFINED>"],
+      { blocks: PROMPT.concat([WORN]), wornOn: true, wornLeast: 3 },
+      chatWith(replies),
+    );
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "a3" });
+    await wait(80);
+    expect(wornSent(h)).toContain("shiver ran down her spine");
+  });
+});
+
+// A chain is several calls with real time between them, so the window for the
+// reply to be replaced underneath it is as many times wider as there are passes.
+describe("a chain stops when the reply is on its way out", () => {
+  const reply = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate stood open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+  const pass = (name: string) => ({
+    name: name,
+    on: true,
+    blocks: [{ id: "turn", name: "The turn", on: true, role: "user", text: "<turn_to_refine>\n{{message}}\n</turn_to_refine>" }],
+  });
+  const six = [pass("One"), pass("Two"), pass("Three"), pass("Four"), pass("Five"), pass("Six")];
+  const body = "She stepped through the gate and, suddenly, the cold just hit her hard.";
+  const answers = new Array(8)
+    .fill("")
+    .map((_, i) => "<REFINED>She stepped through the gate and the cold hit her, take " + i + ".</REFINED>");
+
+  test("all six run when nothing interrupts", async () => {
+    const h = await armed(answers, { passMode: "many", passes: six }, reply(body));
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(400);
+    expect(h.asked.length).toBe(6);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("but a reply starting partway through stops it there", async () => {
+    // Announced while the second pass is being answered, which is Auto Retry
+    // swiping the reply or the reader pressing regenerate.
+    let calls = 0;
+    const h = await armed(answers, { passMode: "many", passes: six }, reply(body), {
+      whileAsking: () => {
+        calls++;
+        if (calls === 2) h.started({ chatId: "c1" });
+      },
+    } as any);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(400);
+    // Two paid for rather than six, and nothing written over a reply that is
+    // being replaced anyway.
+    expect(h.asked.length).toBe(2);
+    expect(h.writes.length).toBe(0);
+  });
+
+  test("and it says which pass it stopped after", async () => {
+    let calls = 0;
+    const h = await armed(answers, { passMode: "many", passes: six }, reply(body), {
+      whileAsking: () => {
+        calls++;
+        if (calls === 2) h.started({ chatId: "c1" });
+      },
+    } as any);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(400);
+    expect(h.sent.map((x: any) => String(x.why || "")).join(" ")).toMatch(/stopped after pass 2 of 6/i);
+  });
+});
+
+// Taking a selection out. No model call at all: the same mapping from rendered
+// text back onto the raw source that a refine of a selection uses, then the gap
+// is closed and the message is saved. The checks here are about the gap, since
+// that is the part a person notices and the part nothing else covers.
+describe("taking out what you selected", () => {
+  const reply = (text: string): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate was already open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: text },
+  ];
+
+  const cut = (h: any, picked: string, ahead = "") =>
+    h.front({
+      type: "snip_selection",
+      requestId: "r",
+      chatId: "c1",
+      messageId: "m2",
+      picked: picked,
+      ahead: ahead,
+    });
+
+  test("the selection goes and the rest of the message stays", async () => {
+    const h = await armed([], {}, reply("She set the crate down. The lock had been changed. Nobody was in."));
+    await cut(h, "The lock had been changed.");
+    await wait(50);
+    expect(h.body("m2")).toBe("She set the crate down. Nobody was in.");
+  });
+
+  test("a selection with straight quotes comes out of a reply that holds curly ones", async () => {
+    const h = await armed([], {}, reply("She set the crate down. The lock’d been changed. Nobody was in."));
+    await cut(h, "The lock'd been changed.");
+    await wait(50);
+    expect(h.body("m2")).toBe("She set the crate down. Nobody was in.");
+  });
+
+  test("and no model is asked anything", async () => {
+    const h = await armed([], {}, reply("She set the crate down. The lock had been changed. Nobody was in."));
+    await cut(h, "The lock had been changed.");
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+  });
+
+  test("one space is left between the two halves, not two", async () => {
+    const h = await armed([], {}, reply("He waited a while, counting, and then he knocked."));
+    await cut(h, "counting, ", "He waited a while, ");
+    await wait(50);
+    expect(h.body("m2")).toBe("He waited a while, and then he knocked.");
+  });
+
+  // The space in front of the selection, not inside it, which is what a double
+  // click hands over. Closing the gap with a space would put one before the
+  // period.
+  test("a space is not left sitting in front of a period", async () => {
+    const h = await armed([], {}, reply("She counted the coins twice over."));
+    await cut(h, "twice over", "She counted the coins ");
+    await wait(50);
+    expect(h.body("m2")).toBe("She counted the coins.");
+  });
+
+  test("taking the front off does not leave the line starting with a space", async () => {
+    const h = await armed([], {}, reply("Even so, the door held."));
+    await cut(h, "Even so, ");
+    await wait(50);
+    expect(h.body("m2")).toBe("the door held.");
+  });
+
+  test("a whole paragraph out leaves one blank line, not two", async () => {
+    const h = await armed([], {}, reply("The first thing.\n\nThe middle thing.\n\nThe last thing."));
+    await cut(h, "The middle thing.", "The first thing.\n\n");
+    await wait(50);
+    expect(h.body("m2")).toBe("The first thing.\n\nThe last thing.");
+  });
+
+  test("the second of two identical runs is the one taken", async () => {
+    const h = await armed([], {}, reply("She nodded. He spoke. She nodded. It ended."));
+    await cut(h, "She nodded. ", "She nodded. He spoke. ");
+    await wait(50);
+    expect(h.body("m2")).toBe("She nodded. He spoke. It ended.");
+  });
+
+  test("a selection inside italics never leaves a marker unclosed", async () => {
+    const h = await armed([], {}, reply("*She waited there, counting, for a long while.*"));
+    await cut(h, "counting, ", "She waited there, ");
+    await wait(50);
+    // Whatever the span came out as, the emphasis still opens and closes.
+    const marks = (h.body("m2").match(/\*/g) || []).length;
+    expect(marks % 2).toBe(0);
+    expect(h.body("m2")).not.toContain("counting");
+  });
+
+  test("selecting the whole message is refused rather than emptying it", async () => {
+    const body = "There was nothing else to say.";
+    const h = await armed([], {}, reply(body));
+    await cut(h, body);
+    await wait(50);
+    expect(h.body("m2")).toBe(body);
+    const done = h.sent.find((m: any) => m.type === "snip_result");
+    expect(done.ok).toBe(false);
+    expect(done.why).toMatch(/empty/i);
+  });
+
+  test("a selection that is not in the message any more takes nothing", async () => {
+    const body = "She set the crate down.";
+    const h = await armed([], {}, reply(body));
+    await cut(h, "a line from some other reply");
+    await wait(50);
+    expect(h.body("m2")).toBe(body);
+    const done = h.sent.find((m: any) => m.type === "snip_result");
+    expect(done.ok).toBe(false);
+  });
+
+  test("an empty selection takes nothing", async () => {
+    const body = "She set the crate down.";
+    const h = await armed([], {}, reply(body));
+    await cut(h, "   ");
+    await wait(50);
+    expect(h.body("m2")).toBe(body);
+    const done = h.sent.find((m: any) => m.type === "snip_result");
+    expect(done.ok).toBe(false);
+  });
+
+  test("the model's own working is left where it is", async () => {
+    const h = await armed(
+      [],
+      {},
+      reply("<think>weigh the cold against the light</think>She went in. The hall was dark."),
+    );
+    await cut(h, "The hall was dark.", "She went in. ");
+    await wait(50);
+    expect(h.body("m2")).toContain("<think>weigh the cold against the light</think>");
+    expect(h.body("m2")).not.toContain("The hall was dark.");
+  });
+
+  test("it is offered back the same way a refine is", async () => {
+    const h = await armed([], {}, reply("She set the crate down. The lock had been changed. Nobody was in."));
+    await cut(h, "The lock had been changed.");
+    await wait(50);
+    const told = h.sent.find((m: any) => m.type === "refined");
+    expect(told.kind).toBe("snip");
+    expect(told.before).toContain("The lock had been changed.");
+    expect(told.after).not.toContain("The lock had been changed.");
+  });
+
+  test("a chat switched off is left alone", async () => {
+    const body = "She set the crate down. The lock had been changed.";
+    const h = await armed([], {}, reply(body));
+    await h.front({ type: "set_chats_off", chats: ["c1"] });
+    await cut(h, "The lock had been changed.");
+    await wait(50);
+    expect(h.body("m2")).toBe(body);
+    const done = h.sent.find((m: any) => m.type === "snip_result");
+    expect(done.ok).toBe(false);
+  });
+});
+
+// The two buttons sit next to each other on a message, so what one refuses the
+// other has to refuse too. A snip is a person's own edit rather than a model
+// rewrite, which is an argument for allowing it, but not an argument anybody
+// could guess from two marks side by side.
+// A snip is an edit to the writing on screen, never another version of it.
+//
+// It used to share the refine's write, swipe setting included, so with that
+// setting on a snip went in as a new swipe one arrow away. The screen did not
+// change, the log said it had, and the next snip read the swipe nobody could
+// see and reported that the selection was not in the message. Reported from
+// the Discord as the button working twice and then never again.
+describe("a snip edits the swipe on screen and never adds one", () => {
+  const WAS = "She stepped through and, suddenly, the cold just hit her.";
+  const withSwipes = (list: string[], showing: number): Msg[] => {
+    const msgs = chat() as any[];
+    msgs[2].swipes = list.slice();
+    msgs[2].swipe_id = showing;
+    msgs[2].content = list[showing];
+    return msgs as Msg[];
+  };
+  const snip = (h: any, picked: string, ahead: string) =>
+    h.front({ type: "snip_selection", requestId: "r", chatId: "c1", messageId: "m2", picked, ahead });
+
+  test("with the swipe setting on, a snip still writes in place", async () => {
+    const h = await armed([], { asSwipe: true }, withSwipes([WAS], 0));
+    await snip(h, ", suddenly,", "She stepped through and");
+    await wait(60);
+    const p = h.lastPatch("m2");
+    expect(p.swipes.length).toBe(1);
+    expect(p.swipe_id).toBe(0);
+    expect(h.body("m2")).toBe("She stepped through and the cold just hit her.");
+  });
+
+  test("so a second snip on the same message finds what it was asked for", async () => {
+    const h = await armed([], { asSwipe: true }, withSwipes([WAS], 0));
+    await snip(h, ", suddenly,", "She stepped through and");
+    await wait(60);
+    await snip(h, "just ", "She stepped through and the cold ");
+    await wait(60);
+    const results = h.sent.filter((m: any) => m.type === "snip_result");
+    expect(results.every((r: any) => r.ok !== false)).toBe(true);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // The record says one swipe is showing and the screen shows another, which
+  // is what a refine added as a swipe leaves when the view does not follow it.
+  // The selection was made on screen, so that is the swipe it belongs to.
+  test("a selection from the swipe on screen is found when the record points elsewhere", async () => {
+    const refined = "She stepped through and the cold hit her.";
+    const h = await armed([], {}, withSwipes([WAS, refined], 1));
+    await snip(h, ", suddenly,", "She stepped through and");
+    await wait(60);
+    const done = h.sent.find((m: any) => m.type === "snip_result");
+    expect(done && done.ok).not.toBe(false);
+    const p = h.lastPatch("m2");
+    expect(p.swipes[0]).toBe("She stepped through and the cold just hit her.");
+    // The refine is left as it was, and the swipe you edited is the one showing.
+    expect(p.swipes[1]).toBe(refined);
+    expect(p.swipe_id).toBe(0);
+  });
+
+  test("but not when two swipes both hold it, since there is no telling which was meant", async () => {
+    const h = await armed([], {}, withSwipes(["Rain, suddenly, on the glass.", WAS, "The dog barked."], 2));
+    await snip(h, ", suddenly,", "Rain");
+    await wait(60);
+    // Two swipes hold it, and neither is the one on record.
+    const h2 = await armed([], {}, withSwipes([WAS, WAS.replace("her", "him"), "The dog barked."], 2));
+    await snip(h2, ", suddenly,", "She stepped through and");
+    await wait(60);
+    const done = h2.sent.find((m: any) => m.type === "snip_result");
+    expect(done.ok).toBe(false);
+    expect(done.why).toMatch(/not in that message/i);
+  });
+});
+
+describe("what a snip refuses, matching the refine beside it", () => {
+  const withGreeting = (): Msg[] => [
+    { id: "m0", role: "assistant", content: "The yard gate was already open when she got there." },
+    { id: "m1", role: "user", content: "i go in" },
+    { id: "m2", role: "assistant", content: "She went in and the hall was dark." },
+  ];
+
+  test("the greeting is not edited", async () => {
+    const was = "The yard gate was already open when she got there.";
+    const h = await armed([], {}, withGreeting());
+    await h.front({
+      type: "snip_selection",
+      requestId: "r",
+      chatId: "c1",
+      messageId: "m0",
+      picked: "already open ",
+      ahead: "The yard gate was ",
+    });
+    await wait(50);
+    expect(h.body("m0")).toBe(was);
+    const done = h.sent.find((m: any) => m.type === "snip_result");
+    expect(done.ok).toBe(false);
+    expect(done.why).toMatch(/greeting/i);
+  });
+
+  test("and the refine beside it refuses the greeting the same way", async () => {
+    const was = "The yard gate was already open when she got there.";
+    const h = await armed(["<REFINED>The gate stood open.</REFINED>"], {}, withGreeting());
+    await h.front({
+      type: "refine_selection",
+      requestId: "r",
+      chatId: "c1",
+      messageId: "m0",
+      picked: "already open ",
+      ahead: "The yard gate was ",
+    });
+    await wait(60);
+    expect(h.body("m0")).toBe(was);
+  });
+
+  test("your own message is still yours to snip", async () => {
+    const h = await armed([], {}, withGreeting());
+    await h.front({
+      type: "snip_selection",
+      requestId: "r",
+      chatId: "c1",
+      messageId: "m1",
+      picked: " in",
+      ahead: "i go",
+    });
+    await wait(50);
+    expect(h.body("m1")).toBe("i go");
+  });
+});
+
+// Several rewrites written at the same time. The first that passes every check
+// is saved and the rest are stopped, so nothing is paid for past the answer.
+describe("several rewrites at once", () => {
+  const GOOD = "<REFINED>She stepped through and the cold hit her.</REFINED>";
+  const REFUSED = "I'm sorry, but I can't help with that.";
+
+  test("off by default, so one ask is one call", async () => {
+    const h = await armed([GOOD]);
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+
+  test("on, one ask writes that many at the same time", async () => {
+    const h = await armed([REFUSED, GOOD, GOOD], { refineAtOnce: true, refineAtOnceCount: 3 }, chat(), { delays: [5, 10, 200] });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(3);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("the first that passes is used, and the slower ones are stopped", async () => {
+    const h = await armed([REFUSED, GOOD, GOOD], { refineAtOnce: true, refineAtOnceCount: 3 }, chat(), { delays: [5, 10, 300] });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.stoppedCalls).toEqual([2]);
+    expect(h.writes.length).toBe(1);
+  });
+
+  test("with none passing, nothing is saved and the reason is given", async () => {
+    const h = await armed([REFUSED], { refineAtOnce: true, refineAtOnceCount: 2 }, chat(), { delays: [5, 10] });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/declined to rewrite/i);
+  });
+
+  // A provider's filter stopping one of them is a refusal, which a new try can
+  // fix, so it is the failure kept over one that a new try cannot fix.
+  test("a refusal through the provider's filter among them is asked again", async () => {
+    const h = await armed(
+      ["unused", "<REFINED>Short.</REFINED>", GOOD, GOOD],
+      { refineAtOnce: true, refineAtOnceCount: 2, retryRefine: 1 },
+      chat(),
+      { delays: [5, 10, 5, 10], errorsAt: { 0: "Generation failed: prohibited_content" } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(120);
+    expect(h.asked.length).toBe(4);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  // A decline for asking the model to write out its thinking comes back the
+  // same on every try, so it is not asked again, at once or one at a time.
+  test("a decline as reasoning_extraction is not asked again", async () => {
+    const no = "Lantern generation failed: The provider declined the response (reasoning_extraction).";
+    const h = await armed(
+      ["unused", "unused", GOOD, GOOD],
+      { refineAtOnce: true, refineAtOnceCount: 2, retryRefine: 2 },
+      chat(),
+      { delays: [5, 10, 5, 10], errorsAt: { 0: no, 1: no } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(150);
+    expect(h.asked.length).toBe(2);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/reasoning_extraction/);
+  });
+
+  test("and one decline among them stops the others and is not asked again", async () => {
+    const no = "Lantern generation failed: The provider declined the response (reasoning_extraction).";
+    const h = await armed(
+      ["unused", "<REFINED>Short.</REFINED>", GOOD, GOOD],
+      { refineAtOnce: true, refineAtOnceCount: 2, retryRefine: 2 },
+      chat(),
+      { delays: [5, 200, 5, 10], errorsAt: { 0: no } },
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(300);
+    expect(h.asked.length).toBe(2);
+    expect(h.writes.length).toBe(0);
+    expect(h.skipped().join(" ")).toMatch(/reasoning_extraction/);
+  });
+
+  test("a hand-edited count cannot go past five", async () => {
+    const h = await armed([GOOD], { refineAtOnce: true, refineAtOnceCount: 40 }, chat(), { delays: [5] });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(5);
+  });
+});
+
+// A reroll Auto Retry adds with Several tries at once is written straight into
+// the chat, so no end event announces it. The panel hands it over instead, and
+// it goes through the automatic pass like a reply that ended.
+// What to refine holds for a refine asked for by hand too. The panel hides the
+// buttons for the side that is off, and the backend refuses that side for any
+// way in the panel does not cover.
+describe("what to refine, asked for by hand", () => {
+  const result = (h: any) => h.sent.filter((m: any) => m.type === "refine_result").pop();
+
+  test("with replies only, your own message is refused and left as it was", async () => {
+    const h = await armed(["<refined>I walk through it.</refined>"], { refineSide: "replies" });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m1")).toBe("i walk through it");
+    expect(result(h).why).toMatch(/only replies are refined, as set in What to refine/);
+  });
+
+  test("with your messages only, a reply is refused and left as it was", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], { refineSide: "mine" });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m2")).toBe("She stepped through and, suddenly, the cold just hit her.");
+    expect(result(h).why).toMatch(/only your own messages are refined, as set in What to refine/);
+  });
+
+  test("a selection in a message on the side that is off is refused too", async () => {
+    const h = await armed(["<refined>stride</refined>"], { refineSide: "replies" });
+    await h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m1", picked: "walk", ahead: "i " });
+    await wait(50);
+    expect(h.asked.length).toBe(0);
+    expect(h.body("m1")).toBe("i walk through it");
+  });
+
+  test("with both, each side is refined", async () => {
+    const h = await armed(["<refined>I walk through it.</refined>"], { refineSide: "both" });
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m1" });
+    await wait(50);
+    expect(h.body("m1")).toBe("I walk through it.");
+  });
+
+  test("Pick it for me can close the drawer, for the account that asked", async () => {
+    const h = await armed([]);
+    await h.front({ type: "close_drawer", requestId: "d1" }, "u7");
+    await wait(20);
+    expect(h.drawerCloses).toEqual([{ userId: "u7" }]);
+    const got = h.sent.filter((m: any) => m.type === "close_drawer").pop();
+    expect(got).toMatchObject({ requestId: "d1", ok: true });
+  });
+
+  test("a Lumiverse that cannot close the drawer is answered with no", async () => {
+    for (const opts of [{ noUi: true }, { uiFail: "not allowed" }]) {
+      const h = await armed([], {}, chat(), opts);
+      await h.front({ type: "close_drawer", requestId: "d2" });
+      await wait(20);
+      const got = h.sent.filter((m: any) => m.type === "close_drawer").pop();
+      expect(got).toMatchObject({ requestId: "d2", ok: false });
+    }
+  });
+
+  test("the panel can ask whose each message is", async () => {
+    const h = await armed([]);
+    await h.front({ type: "message_roles", requestId: "q", chatId: "c1" });
+    await wait(20);
+    const got = h.sent.filter((m: any) => m.type === "message_roles").pop();
+    expect(got.ok).toBe(true);
+    expect(got.roles).toEqual({ m0: "assistant", m1: "user", m2: "assistant" });
+  });
+});
+
+describe("a reroll Auto Retry added", () => {
+  test("is refined by the automatic pass", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.front({ type: "reroll_added", chatId: "c1", messageId: "m2", swipe: 1 });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.");
+  });
+
+  test("not with the automatic pass off", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], { refineOn: false });
+    await h.front({ type: "reroll_added", chatId: "c1", messageId: "m2", swipe: 1 });
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.stood().join(" ")).toMatch(/automatic pass is switched off/);
+  });
+
+  test("not with only your own messages refined", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"], { refineSide: "mine" });
+    await h.front({ type: "reroll_added", chatId: "c1", messageId: "m2", swipe: 1 });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g9" });
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.stood().join(" ")).toMatch(/only your own messages are refined/);
+  });
+
+  test("the same reroll handed over twice is refined once", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.front({ type: "reroll_added", chatId: "c1", messageId: "m2", swipe: 1 });
+    await h.front({ type: "reroll_added", chatId: "c1", messageId: "m2", swipe: 1 });
+    await wait(60);
+    expect(h.asked.length).toBe(1);
+  });
+});
+
+
+// The panel's pop-ups are Lumiverse's own notifications. Lumiverse takes them
+// only from the server side, so the panel sends its words to the backend.
+describe("notifications the panel asks for", () => {
+  test("are shown as Lumiverse's own, in the color asked for, to the account that asked", async () => {
+    const h = await armed([]);
+    await h.front({ type: "notify", kind: "warning", text: "A refine is already running." }, "u7");
+    expect(h.notes).toEqual([{ kind: "warning", text: "A refine is already running.", opts: { userId: "u7" } }]);
+  });
+  test("an unknown color is shown as information", async () => {
+    const h = await armed([]);
+    await h.front({ type: "notify", kind: "shout", text: "Copied." });
+    expect(h.notes.map((n: any) => n.kind)).toEqual(["info"]);
+  });
+  test("empty words show nothing", async () => {
+    const h = await armed([]);
+    await h.front({ type: "notify", kind: "success", text: "   " });
+    expect(h.notes).toEqual([]);
+  });
+});
+
+// A model can write British spelling. The refusal patterns take both, so a
+// refusal spelled "fulfil" is caught the same as one spelled "fulfill".
+describe("a refusal in British spelling", () => {
+  test("is caught, and nothing is saved", async () => {
+    const no = "<REFINED>I am not going to fulfil that request.</REFINED>";
+    const h = await armed([no, no, no, no]);
+    await h.front({ type: "refine_now", requestId: "r", chatId: "c1", messageId: "m2" });
+    await wait(150);
+    expect(h.writes.length).toBe(0);
+    const why = (h.sent.filter((m: any) => m.type === "refine_result").pop() || {}).why;
+    expect(why).toMatch(/declined to rewrite/);
+  });
+});
+
+// A rewrite from a model that broke down while it wrote. Each check counts
+// only what the rewrite has and the reply did not. The length limits are off
+// here, so only this check decides.
+describe("a broken rewrite", () => {
+  const scene =
+    "Wren pushed the ferry off the bank and let the current take it. The lamp on the far side was lit, " +
+    "and Oriel stood under it with a ledger, counting. The water was high from the rain and the rope " +
+    "creaked on its pulley. Halfway across, Wren cut the engine and listened. Nothing but the river and " +
+    "a dog somewhere upstream. She started the engine again and steered for the light. ";
+  const reply = (content = scene): Msg[] => [
+    { id: "m0", role: "assistant", content: "The gate stands open, and the road past it is dark." },
+    { id: "m1", role: "user", content: "i walk through it" },
+    { id: "m2", role: "assistant", content },
+  ];
+  const loose = { maxGrowthPct: 0, minShrinkPct: 0 };
+  const jumble =
+    "然后system拒绝了道路data处理 ferryQ 心理model训练集准确率 lampFRS 桥已经断了 riverTL 没有人知道 rope路径 " +
+    "ledgerRMB 数据集验证结果为 bankLWN 他们的mapping继续 engineQ 水还在不断上涨 pulleyTRV 天也越来越黑 lightFRN 结果 ";
+  const cases: Array<[string, string, RegExp]> = [
+    ["a jumble of languages", scene + jumble.repeat(3), /came back garbled/],
+    ["broken characters", scene.replace(/ the /g, " thÃ© â€™ "), /came back garbled/],
+    ["a switch to Russian for the rest of it", scene + "Затем дорога ушла вниз к реке, и никто не знал, куда идти дальше, потому что мост был сломан.", /came back garbled/],
+    ["an instruction marker and card data", scene + "[/INST] [Character(\"Wren\")][Job(\"ferry pilot\")]", /prompt's own format/],
+    ["the start of the next turn", scene + "\n<|im_start|>user\nI wave at the lamp.", /prompt's own format/],
+    ["a phrase repeated to the end", scene + "the river and the river and ".repeat(16), /stuck repeating/],
+    ["one word and a comma repeated to the end", scene + "The cold, wet, tired, " + "and, ".repeat(40) + "and,", /stuck repeating/],
+    [
+      "a list of terms with dotted names in it, ending with a period",
+      scene +
+        Array.from({ length: 150 }, (_, i) =>
+          ["tide", "Ferry.io", "rope", "pulley/winch", "chart", "Lamp.app", "buoy", "hull", "keel", "dock", "oar", "sail", "mast"][(i * 7) % 13] + " " +
+          ["log", "kit", "guide", "index", "gauge", "table", "scale", "notes", "list", "map", "plan"][(i * 3) % 11]).join(" ") +
+        ".",
+      /stuck repeating/,
+    ],
+    [
+      "a tokenizer's marks for a space and a line break",
+      scene + "She\u0120cut\u0120the\u0120engine.\u010A\"Quiet.\"\u0120Oriel\u0120closed\u0120the\u0120ledger\u0120and\u0120waited.",
+      /came back garbled/,
+    ],
+    [
+      "words run together with no spaces",
+      scene + "Wrenkepthereyesonthelampandsaidnothing, and Orielcountedthecoinsasecondtimeforluck, thenshutthebookquietly.",
+      /came back garbled/,
+    ],
+  ];
+  for (const [label, answer, why] of cases) {
+    test("refused: " + label, async () => {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], loose, reply());
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(scene);
+      expect(h.skipped().some((w: string) => why.test(w))).toBe(true);
+    });
+  }
+
+  test("asked again with the note on, a broken rewrite gets the broken note", async () => {
+    const h = await armed(
+      ["<REFINED>" + scene + "[/INST] [Character(\"Wren\")]</REFINED>", "<REFINED>" + scene.replace("Wren pushed", "Wren shoved") + "</REFINED>"],
+      { ...loose, retryRefine: 1, askNote: true },
+      reply(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    const last = h.asked[1].messages[h.asked[1].messages.length - 1];
+    expect(last.content).toMatch(/^Your last rewrite came back broken\./);
+    expect(h.sent.some((m: any) => m.type === "refine_progress" && m.stage === "retrying" && m.note === "After a broken rewrite")).toBe(true);
+  });
+
+  test("saved: the same broken text when the reply already had it", async () => {
+    const already = scene + "the river and the river and ".repeat(16);
+    const h = await armed(["<REFINED>" + already.replace("Wren pushed", "Wren shoved") + "</REFINED>"], loose, reply(already));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(already.replace("Wren pushed", "Wren shoved").trim());
+  });
+
+  test("saved: a letter in Russian after a colon, which is written on purpose", async () => {
+    const answer = scene + "The note read:\n\nЗатем дорога ушла вниз к реке, и никто не знал, куда идти дальше, потому что мост был сломан.";
+    const h = await armed(["<REFINED>" + answer + "</REFINED>"], loose, reply());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(answer);
+  });
+
+  test("saved: one well-known long word and a held scream", async () => {
+    const answer = scene + "\"Supercalifragilisticexpialidocious,\" Oriel sang, and Wren shouted \"Noooooooooooooooooooooooooooo!\"";
+    const h = await armed(["<REFINED>" + answer + "</REFINED>"], loose, reply());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(answer);
+  });
+
+  const onPurpose: Array<[string, string]> = [
+    ["a crowd's chant in quotation marks that close", scene + "The crowd on the bank roared, \"" + "Bring her home! ".repeat(25).trim() + "\""],
+    ["lines written out after a colon", scene + "In the ledger Oriel wrote:\n\n" + "One boat crossed after dark and did not pay.\n".repeat(15)],
+    ["a held laugh in asterisks that close", scene + "*Ha" + "ha".repeat(200) + "*"],
+  ];
+  for (const [label, answer] of onPurpose) {
+    test("saved: repetition written on purpose, " + label, async () => {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], loose, reply());
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(answer.trim());
+    });
+  }
+
+  // Sentences said again and again, which do not have to reach the end.
+  const sentenceLoops: Array<[string, string]> = [
+    ["one sentence six times, then another six times", scene + "The rope creaks on its pulley. ".repeat(6) + "Oriel counts the boats again. ".repeat(6) + "Then they landed."],
+    ["two sentences in turn, over and over", scene + "Wren watches the lamp. The river pulls at the hull. ".repeat(6) + "They reached the bank."],
+    ["three sentences in turn, with an odd one between", scene + "Wren steers for the light.\nShe says nothing.\nShe steers.\n".repeat(4) + "She the.\n" + "Wren steers for the light.\nShe says nothing.\nShe steers.\n".repeat(5) + "The ferry bumped the pier."],
+  ];
+  for (const [label, answer] of sentenceLoops) {
+    test("refused: " + label, async () => {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], loose, reply());
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(scene);
+      expect(h.skipped().some((w: string) => /stuck repeating/.test(w))).toBe(true);
+    });
+  }
+
+  const sentencesOnPurpose: Array<[string, string]> = [
+    ["a sentence said three times for effect", scene + "She would not turn back now. She would not turn back now. She would not turn back now. The pier was close."],
+    ["a chant of sentences in quotation marks that close", scene + "The crowd on the bank roared, \"" + "Bring the ferry in. Bring the ferry in now. ".repeat(8).trim() + "\" Wren waved."],
+    ["sentences written out after a colon", scene + "In the ledger Oriel wrote:\n" + "One boat crossed. One boat did not pay.\n".repeat(8)],
+  ];
+  for (const [label, answer] of sentencesOnPurpose) {
+    test("saved: " + label, async () => {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], loose, reply());
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(answer.trim());
+    });
+  }
+
+  test("refused: a loop inside dialogue that never closes", async () => {
+    const h = await armed(["<REFINED>" + scene + "\"Bring her home, " + "bring her home, ".repeat(25) + "</REFINED>"], loose, reply());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(scene);
+    expect(h.skipped().some((w: string) => /stuck repeating/.test(w))).toBe(true);
+  });
+
+  // A rewrite that writes a character card or a prompt format on purpose, at
+  // its start or after a colon, is kept, even when the message did not have
+  // one. Here the message described them in words.
+  const meant: Array<[string, string, string]> = [
+    ["a character card",
+      "Wren is a ferry pilot, blunt and wary.",
+      "[Character(\"Wren\")]\n[Job(\"ferry pilot\")]\n[Mind(\"blunt\" + \"wary\")]"],
+    ["a character card after a colon",
+      "Here is the card for Wren: a ferry pilot, blunt and wary.",
+      "Here is the card for Wren:\n\n[Character(\"Wren\")]\n[Job(\"ferry pilot\")]\n[Mind(\"blunt\" + \"wary\")]"],
+    ["a template after a colon",
+      "The template has an instruction heading, then a response heading.",
+      "The template looks like this:\n### Instruction:\nWrite the crossing.\n### Response:"],
+  ];
+  for (const [label, original, answer] of meant) {
+    test("saved: " + label + ", written on purpose", async () => {
+      const h = await armed(["<REFINED>" + answer + "</REFINED>"], loose, reply(original));
+      await h.ended({ chatId: "c1", messageId: "m2" });
+      await wait(50);
+      expect(h.body("m2")).toBe(answer);
+    });
+  }
+
+  test("saved with the check off", async () => {
+    const answer = scene + "[/INST] [Character(\"Wren\")][Job(\"ferry pilot\")]";
+    const h = await armed(["<REFINED>" + answer + "</REFINED>"], { ...loose, guardBroken: false }, reply());
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe(answer);
+  });
+
+  test("asked again when Ask again is on", async () => {
+    const good = scene.replace("Wren pushed", "Wren shoved").trim();
+    const h = await armed(
+      ["<REFINED>" + scene + "the river and the river and ".repeat(16) + "</REFINED>", "<REFINED>" + good + "</REFINED>"],
+      { ...loose, retryRefine: 1 },
+      reply(),
+    );
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(80);
+    expect(h.asked.length).toBe(2);
+    expect(h.body("m2")).toBe(good);
+  });
+});
+
+// Another extension's block in a reply. An extension can ask the model to write
+// data into the reply inside a tag it named, which Lumiverse hides on screen and
+// hands to that extension. A rewrite that changes the words inside makes a new
+// block, and the extension acts on it a second time. The names here are made
+// up; a hyphen in the name is what marks one.
+describe("another extension's block in a reply", () => {
+  const BLOCK = '<tide-note kind="dm">{"from":"Odile","text":"Bring the spare lantern."}</tide-note>';
+  const withBlock = (body: string): Msg[] => {
+    const c = chat();
+    c[2].content = body;
+    return c;
+  };
+  const turnOf = (h: any) => String(h.asked[0].messages[h.asked[0].messages.length - 1].content);
+  const tokensIn = (h: any): string[] => turnOf(h).match(/\[\[AR\d+\]\]/g) || [];
+  const body = "She stepped through and, suddenly, the cold just hit her.\n" + BLOCK;
+
+  test("is hidden whole, with the words inside it", async () => {
+    const h = await armed(["ok"], {}, withBlock(body));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(turnOf(h)).not.toContain("spare lantern");
+    expect(turnOf(h)).not.toContain("tide-note");
+    expect(tokensIn(h).length).toBe(1);
+  });
+
+  test("and comes back exactly as it was", async () => {
+    const seen = await armed([], {}, withBlock(body));
+    await seen.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const t = tokensIn(seen);
+    const h = await armed(["<refined>She stepped through and the cold hit her.\n" + t[0] + "</refined>"], {}, withBlock(body));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.\n" + BLOCK);
+  });
+
+  test("is hidden with the protect switch off too", async () => {
+    const h = await armed(["ok"], { protectOn: false }, withBlock(body));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(turnOf(h)).not.toContain("spare lantern");
+  });
+
+  test("so is one that closes itself", async () => {
+    const h = await armed(["ok"], {}, withBlock("She stepped through and, suddenly, the cold just hit her.\n<tide-mark ref=\"k4\"/>"));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(turnOf(h)).not.toContain("tide-mark");
+    expect(tokensIn(h).length).toBe(1);
+  });
+
+  test("an empty element is hidden as one piece, so its two tags stay together", async () => {
+    const h = await armed(["ok"], {}, withBlock('She stepped through and, suddenly, the cold just hit her.\n<span class="tide-anchor" data-tide="k4"></span>'));
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(tokensIn(h).length).toBe(1);
+  });
+
+  // The extension turns its block into an anchor right after the reply ends,
+  // while the refine is out. The words are the same, so the refine is kept,
+  // with the anchor in place of the block.
+  const ANCHOR = '<span class="tide-anchor" data-tide="k4"></span>';
+  test("the refine is kept when only that block changed while it was out", async () => {
+    const seen = await armed([], {}, withBlock(body));
+    await seen.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const t = tokensIn(seen);
+    const h = host(withBlock(body), ["<refined>She stepped through and the cold hit her.\n" + t[0] + "</refined>"], {
+      whileAsking: () => h.edit("m2", "She stepped through and, suddenly, the cold just hit her.\n" + ANCHOR),
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("She stepped through and the cold hit her.\n" + ANCHOR);
+  });
+
+  test("and still dropped when the words changed as well", async () => {
+    const seen = await armed([], {}, withBlock(body));
+    await seen.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    const t = tokensIn(seen);
+    const h = host(withBlock(body), ["<refined>She stepped through and the cold hit her.\n" + t[0] + "</refined>"], {
+      whileAsking: () => h.edit("m2", "Somebody else got here first.\n" + ANCHOR),
+    });
+    await h.front({ type: "set_settings", settings: RULES });
+    await h.ended({ chatId: "c1", messageId: "m2" });
+    await wait(50);
+    expect(h.body("m2")).toBe("Somebody else got here first.\n" + ANCHOR);
+    expect(h.skipped().join(" ")).toMatch(/changed while the rewrite/i);
+  });
+});
+
+// Another extension can color dialogue with markup Lumiverse would show as
+// text, and draw only the words inside in color. A selection holds those words
+// alone, so it has to be found with the markup passed over, and the markup has
+// to come back around the rewrite.
+describe("selecting dialogue another extension colored", () => {
+  const msgs = (text: string): Msg[] => [
+    { id: "m0", role: "user", content: "hi" },
+    { id: "m1", role: "assistant", content: text },
+  ];
+  const ask = (h: any) =>
+    h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m1", picked: '"The tide turns at noon," she said.', ahead: "Mira leaned in. " });
+  for (const [label, open, shut] of [
+    ["an HTML font tag", '<font color="#5a8fd0">', "</font>"],
+    ["a [color] mark", "[color=#5a8fd0]", "[/color]"],
+    ["an escaped font tag", '&lt;font color="#5a8fd0"&gt;', "&lt;/font&gt;"],
+    ["an escaped span with a color", '&lt;span style="color: #5a8fd0"&gt;', "&lt;/span&gt;"],
+  ]) {
+    const content = "Mira leaned in. " + open + '"The tide turns at noon,"' + shut + ' she said. "Be ready."';
+    test(label + ": the selection is found and the color stays around the rewrite", async () => {
+      const h = await armed(['<REFINED>[[AR1]]"The tide turns at midday,"[[AR2]] she whispered.</REFINED>'], {}, msgs(content));
+      await ask(h);
+      await wait(80);
+      expect(h.writes.length).toBe(1);
+      expect(h.writes[0].content).toBe("Mira leaned in. " + open + '"The tide turns at midday,"' + shut + ' she whispered. "Be ready."');
+    });
+    test(label + ": a rewrite that drops the color is not saved", async () => {
+      const h = await armed(['<REFINED>"The tide turns at midday," she whispered.</REFINED>'], {}, msgs(content));
+      await ask(h);
+      await wait(80);
+      expect(h.writes.length).toBe(0);
+    });
+  }
+
+  test("a [color] mark typed as plain text and selected with it is still found as written", async () => {
+    const h = await armed(["<REFINED>She wrote [color=#5a8fd0] on the card and smiled.</REFINED>"], { protectOn: false }, msgs("She wrote [color=#5a8fd0] on the card."));
+    await h.front({ type: "refine_selection", requestId: "r", chatId: "c1", messageId: "m1", picked: "She wrote [color=#5a8fd0] on the card.", ahead: "" });
+    await wait(80);
+    expect(h.writes.length).toBe(1);
+  });
+});
+
+// An impersonation writes the reader's side. As a draft it goes into the
+// input box and makes no message, and as a message it is the reader's own.
+// The automatic pass is for replies, so it leaves both alone, and never takes
+// the newest reply in place of the draft.
+describe("an impersonation is not a reply", () => {
+  test("a draft in the input box refines nothing", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.ended({ chatId: "c1", messageId: "", generationId: "g9", generationType: "impersonate", impersonateDraft: true });
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.writes.length).toBe(0);
+  });
+  test("a message written as an impersonation is not refined either", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g9", generationType: "impersonate" });
+    await wait(60);
+    expect(h.asked.length).toBe(0);
+    expect(h.writes.length).toBe(0);
+  });
+  test("an ordinary reply right after is still refined", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    await h.ended({ chatId: "c1", messageId: "", generationId: "g9", generationType: "impersonate", impersonateDraft: true });
+    await h.ended({ chatId: "c1", messageId: "m2", generationId: "g10", generationType: "normal" });
+    await wait(60);
+    expect(h.writes.length).toBe(1);
+  });
+});
+
+// A tracker some cards print under every reply: a divider line, then the
+// stats in a code fence. The rewrite is for the prose above it. The divider
+// and the stats go to the model as kept pieces and come back as they were.
+describe("a tracker under a divider and in a code fence", () => {
+  const PROSE = '"Wren, the kettle will *not* stop whistling. Can you come fix it? It trusts you." *She sounds worn out.*';
+  const TRACKER = "---\n```\nMood: Worn out \nThoughts: If she says yes... she is braver than me. \nTrust Level: 40%\nDoubt Level: 5%\n```";
+  const msgs = (): Msg[] => [
+    { id: "m0", role: "user", content: "hi" },
+    { id: "m1", role: "assistant", content: PROSE + "\n\n" + TRACKER },
+  ];
+  test("the divider and the stats are kept as they were", async () => {
+    const h = await armed(['<REFINED>"Wren, the kettle will *not* stop. Can you come fix it? It trusts you." *She sounds tired.*\n\n[[AR2]]\n[[AR1]]</REFINED>'], {}, msgs());
+    await h.ended({ chatId: "c1", messageId: "m1", generationId: "g1" });
+    await wait(80);
+    const sent = JSON.stringify(h.asked[0].messages || []);
+    expect(sent).not.toContain("Trust Level");
+    expect(sent).not.toContain("\\n---\\n");
+    expect(h.writes.length).toBe(1);
+    expect(h.writes[0].content).toBe('"Wren, the kettle will *not* stop. Can you come fix it? It trusts you." *She sounds tired.*\n\n' + TRACKER);
+  });
+  test("a rewrite that drops the tracker is not saved", async () => {
+    const h = await armed(['<REFINED>"Wren, the kettle will *not* stop. Can you come fix it?" *She sounds tired.*</REFINED>'], {}, msgs());
+    await h.ended({ chatId: "c1", messageId: "m1", generationId: "g1" });
+    await wait(80);
+    expect(h.writes.length).toBe(0);
+  });
+});
+
+describe("an impersonation says nothing to the panel", () => {
+  test("no answer is sent, so a refine started by hand keeps its spinner", async () => {
+    const h = await armed(["<REFINED>She stepped through and the cold hit her.</REFINED>"]);
+    const before = (h.sent || []).length;
+    await h.ended({ chatId: "c1", messageId: "", generationId: "g9", generationType: "impersonate", impersonateDraft: true });
+    await wait(60);
+    expect((h.sent || []).slice(before).filter((m: any) => m.type === "refine_stood_down").length).toBe(0);
+  });
+});

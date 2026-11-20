@@ -1,0 +1,22 @@
+{
+  "version": "1.56.5",
+  "name": "Auto Refine",
+  "identifier": "auto_refine",
+  "author": "starlitcode",
+  "github": "https://github.com/starlitcode/Lumiverse-Auto-Refine",
+  "homepage": "https://github.com/starlitcode/Lumiverse-Auto-Refine",
+  "description": "Sends each finished reply, or a message of your own, to a model with a prompt of writing rules you can read and edit, and saves the rewrite only if it passes its checks. The text it replaced is kept, so you can put it back with one tap.",
+  "permissions": [
+    "generation",
+    "chat_mutation",
+    "chats",
+    "interceptor",
+    "characters",
+    "world_books",
+    "ui_panels",
+    "decisions"
+  ],
+  "entry_frontend": "dist/frontend.js",
+  "entry_backend": "dist/backend.js",
+  "minimum_lumiverse_version": "0.1.0"
+}

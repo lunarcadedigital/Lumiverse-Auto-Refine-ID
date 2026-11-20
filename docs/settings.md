@@ -1,0 +1,379 @@
+# Settings
+
+Auto Refine lives in a tab in Lumiverse's sidebar drawer. Open it from the drawer, or find it with `Ctrl+K`. It has no settings window and is not in the Extras menu.
+
+It is a tab so you can keep it open while you write, and see what the last refine changed.
+
+## How settings are saved
+
+- **There is no Save button.** Everything saves as you change it.
+- **Only deleting a preset and starting again throw anything away**, and both ask first.
+- **Your settings follow your account.** They are saved to Lumiverse under your account, so a different browser or device finds the same setup. This browser also keeps a copy, so the panel opens instantly and keeps working if your account cannot be reached.
+- **The account copy wins.** When the panel opens, it uses this browser's copy until your account's copy arrives, then switches to the account's. Only a change you make is saved to your account. Opening Lumiverse on another device never saves that device's copy over yours. If the panel opens before the extension's server side has started, it asks your account again once that side is ready.
+- **A tab left open catches up.** Come back to a tab after more than 30 seconds away and it loads your settings and presets from your account again. So an old tab on your phone does not bring back an older prompt.
+- **If a save to your account fails, the panel says so.**
+- **On a server with several accounts**, each account's settings and presets are stored separately. No account can read another's.
+
+**One install for several accounts.** An admin can install Auto Refine once for everyone on a server. Each account's refines still use that account's own settings:
+
+- A refine you start uses your settings.
+- The automatic pass uses the settings of the account the chat belongs to. If Lumiverse cannot say whose chat it is, the account whose panel last sent its settings is used, and Lumiverse's server log says so.
+- Refines take turns between accounts. If another account's refine is running, yours waits for it to finish, and the panel says "Waiting for another account's refine to finish".
+- Your own refines never wait for each other.
+
+## The row of tabs
+
+When you scroll down a tab, the row of tabs stays at the top of the drawer. You can switch tabs without scrolling back up. While it is at the top, the row has a solid background, so the settings under it do not show through. Scroll back to the top and the row is in its own place again. While you search, the row is hidden, because the results come from every tab.
+
+## Finding a setting
+
+The search box above the tabs searches every tab, not only the one you are on.
+
+- Results are grouped by tab.
+- It also searches inside folded sections and inside each setting's description.
+
+## Above the tabs
+
+These stay in place whichever tab is open:
+
+- **The switch** turns everything on or off. Off, nothing is refined and no model is called.
+
+The buttons are in two groups. **What to refine**, on the Setup tab, can hide one of them.
+
+**Replies:**
+
+- **Refine the latest reply** refines one reply now. While it runs, the buttons change to **Stop this refine**.
+- **Refine every reply here** goes through the chat you are in, oldest first, one model call each. It asks before it starts.
+- **Refine the part I selected** shows while part of a reply is selected.
+- **Refine every new reply automatically** is the automatic pass. It is off by default.
+  - It leaves an impersonation alone. An impersonation writes your side, as a draft in your input box or as a message of yours, and is not a reply.
+
+**Your messages:**
+
+- **Refine my latest message** refines the last message you sent in this chat, with the prompt for your messages.
+- **Refine all my messages here** goes through every message you sent in this chat, oldest first, one model call each. It asks before it starts. Replies are left alone.
+- **Refine what I am typing** shows when **Refining the draft in your input box** is switched on.
+
+Below them:
+
+- **Refines you can put back** lists the last 5 refines in this chat, each with **Put it back** and **Dismiss**. The tab shows a badge with the count.
+  - Each refine also has **Expand**. It opens the before, the after and what changed in a large window. Press **Close**, press Escape, or tap outside it to close it.
+  - Every before and after shows the words as they read in the chat. Markup tags, such as a color tag, are left out of it. **Read it in full** shows the text exactly as written.
+  - The thinking at the start of a reply is left out of every before and after, and out of the short preview of an older refine, since it was not sent to the model and did not change. A line above the marked text says so. **Read it in full** shows it.
+  - The list comes back after a reload, or when you leave the app and come back. Your server holds it in memory.
+  - An update or a restart of Lumiverse clears it, unless **Keep them through an update** is on, on the Limits tab.
+  - The refined replies stay in your chat either way.
+  - To always keep a way back to the original, turn on **Add the refine as a swipe instead of writing over the reply** on the Limits tab.
+  - The newest is open.
+  - The others are in one fold, **Older refines**. Each is named by its time and its first words.
+  - When a sixth refine comes in, the oldest one goes.
+  - **Dismiss them all** clears the list. It does not change any reply.
+
+The greeting is not refined unless **Refine the greeting** is on. Your own messages are never refined automatically, only when you press a button for them. See [Every way to refine](#every-way-to-refine).
+
+## Every way to refine
+
+Each row is one thing you can refine, and every place its button is.
+
+| What it refines | Where to press | Needs a setting |
+| --- | --- | --- |
+| **The latest reply** | Above the tabs. A tap on the floating button. The button in the chat's row of controls. The Extras menu. | Only for the floating button, the chat-row button and Extras. See the notes below. |
+| **Every reply in this chat** | Above the tabs. The floating button's menu. | No |
+| **Your latest message**, the last one you sent | Above the tabs. The floating button's menu. The Extras menu. | No, apart from the Extras note below |
+| **All your messages in this chat** | Above the tabs. The floating button's menu. | No |
+| **One message**, a reply or one of yours | The refine button on that message. | **A button on every message**, on the Setup tab |
+| **A reroll Auto Retry adds** with **Several tries at once** | Nothing to press. The automatic pass refines it like any new reply. | The automatic pass, and [Auto Retry](https://github.com/starlitcode/Lumiverse-Auto-Retry) 5.11.0 or later |
+| **A reply Auto Retry adds** with **Several tries at once**, after a turn that saved no reply | Nothing to press. The automatic pass refines it like any new reply. | The automatic pass, and [Auto Retry](https://github.com/starlitcode/Lumiverse-Auto-Retry) 5.20.6 or later |
+| **Part of a message**, a reply or one of yours | Select the text, then press **Refine the part I selected**: above the tabs, in the floating button's menu, in the Extras menu, or on the chat buttons. | No |
+| **What you are typing**, before you send it | Above the tabs. The floating button's menu, or the Extras menu. | **Refining the draft in your input box**, on the Setup tab |
+
+**What to refine**, on the Setup tab, hides the rows for the side you do not refine.
+
+What each kind uses:
+
+- A reply is refined with the prompt on the Prompt tab.
+- Your own message is refined with the prompt under **For your messages**, on the Prompt tab. It fixes mistakes and leaves your style alone.
+- Refining a message you already sent changes the saved message. The reply the model already wrote stays as it is. Every later reply reads the fixed version.
+- What you are typing is rewritten in the input box. Nothing is written to the chat until you send it.
+
+Where the buttons come from:
+
+- **The floating button** and **the button in the chat's row of controls** each have their own switch on the Setup tab.
+- **The Extras menu** is the menu in the chat's input bar. Auto Refine only adds entries to it while **Refining the draft in your input box** is on. While the floating button is on screen, its menu holds these entries instead, and Extras holds none. With the floating button off, they come back to Extras, which is how you reach them on a phone.
+
+## Prompt
+
+- **Your prompt** is the whole request, block by block. You can rename, reorder, switch off, and add blocks, and choose the role each is sent as. **Expand** opens a block in a full-screen editor. See [How the prompt is built](prompt.md).
+- **Fold all** folds every block down to its name, and **Open all** opens them again. Each preset remembers its own folds.
+- **Macros you can use** lists what a block can contain. Tap one to copy it, and press **?** to see what it turns into.
+- **Presets** save a prompt under a name, and can name a model setup to load with it. Four come built in. See [Presets](prompt.md#presets).
+
+## Context
+
+- **How much it is told** sets how many messages of chat history are sent, whether each line names who said it, and the size limits for history and lorebook. See [How much it is told](prompt.md#how-much-it-is-told).
+- **See what gets sent** builds the request a refine would send and shows it, without calling a model. What the checks found and the passes after the first are named rather than shown. **Raw** shows it as the JSON that is sent. **Expand** opens it full screen.
+
+## Model
+
+Not sure what to pick? [What to use](recommended.md) has settings that work well for most people.
+
+- **Refine using** picks the model that refines, from your connection profiles. Leave it on the default to use the model you chat with.
+  - On the default, it refines with the connection you chat with. To see which one that is, it needs the `interceptor` permission.
+  - Without that permission, it uses the chat's own connection, or your default one if the chat has none.
+  - It also uses those two before a chat has had a reply since Auto Refine started.
+  - With only one connection on your account, the list shows one choice, **The model I am chatting with**, with that connection's name.
+- **Let it think first** is off by default. You can leave it to your connection's setting, or pick an effort level. See [How much thinking it does](prompt.md#how-much-thinking-it-does).
+- **Give up waiting after** stops a refine that has not come back.
+  - The default is four minutes. The most is an hour. At 0, it waits the full hour.
+  - Four minutes is long on purpose. A fast model answers in seconds. A reasoning model on a high setting, or a local model loading, can take minutes, and stopping it early throws that work away.
+  - The wait is for each call to the model. A refine that asks again, after a failed check or after the provider turned the call away, has the whole wait again. The status line then shows the time left as "left on this try". The clock beside it is the whole refine.
+  - You can end a refine yourself at any time: **Stop this refine** is always there.
+  - The time counts while the tab is in the background too. On a phone, a refine that ran out while you were away ends as soon as you come back to the tab. A reply that finished while the tab was asleep can miss the panel, so check the reply itself.
+- **Input price, per million tokens** and **Output price, per million tokens** are your provider's prices.
+  - Input is what you send. Output is what the model writes back.
+  - Both start at 0, which hides all costs.
+  - There is no currency. The number you type is the number you see.
+  - See [What a refine costs](prompt.md#what-a-refine-costs).
+- **Samplers** start blank. A blank sampler is not sent, so Lumiverse uses the value from the preset linked to the connection. See [Sampler settings](prompt.md#sampler-settings).
+- **Saved model setups** keep everything on this tab under a name: the connection, thinking, timeout, samplers and prices.
+  - Save one for a cheap model and one for a careful one, and switch between them.
+  - A setup never contains your prompt, so loading one only changes what runs the refine.
+  - Setups are kept in this browser and your account.
+  - A preset can name a setup, so the two load together.
+  - If a setup's connection has been deleted, the card says so.
+- **One model or two** is a beta. With two, a small second model checks each new reply first, and only the replies that need it are refined. It is asked through one of your Decision connections in Lumiverse. It has its own checks and line, and every text it sends is in a box you can change. See [Two models](two-models.md).
+
+## Limits
+
+**Protecting what is not prose.** See [Protecting what is not prose](prompt.md#protecting-what-is-not-prose).
+
+- **Hide markup from the model** and **Hide plain italic and bold too** keep formatting out of the rewrite.
+- **What the model is told about the stand-ins** is the text `{{protect_notes}}` puts in. You can change it. **Use the built-in text** puts it back.
+- **Keep the reply's own reasoning out of the refine** keeps the model's thinking out.
+- **Extra thinking tag names** is folded under it. Thinking in these tags is already recognized: think, thinking, thought, thoughts, reasoning, reflection, scratchpad and analysis. Only add a name if your model uses a different one. Thinking that is not recognized is rewritten like prose and saved over the reply.
+- **Patterns of your own to hide** is folded under the markup switch.
+
+**Reading the answer.**
+
+- **Take the answer from between the tags** takes only the rewrite from the model's answer, so a preamble is ignored. See [The answer it asks for](prompt.md#the-answer-it-asks-for).
+- **Drop an answer with no tags** is folded under it. When your prompt asks for the tags and the answer has none, the rewrite is thrown away.
+- **Say how much has come back** shows the answer arriving, so the status line counts characters. It does not change what is saved.
+
+**What it refuses to save.** See [What it refuses to save](guardrails.md).
+
+- **Longest a rewrite may get** and **Shortest a rewrite may get** are the two length limits.
+- **Refuse an answer that declines the job**, **Refuse an answer that talks about the edit** and **Refuse a rewrite that sanitized the reply** each have a switch. If all three are off, the panel warns you.
+- **Refuse a rewrite that loses \* marks** is off by default. On, a rewrite with fewer \* marks than the reply, or with one left unpaired, is thrown away. See [The \* marks around actions](guardrails.md#the--marks-around-actions).
+- **Leave a refusal as it is** is on by default. A short reply where the model refused is not refined by the automatic pass. See [A reply that is a refusal](guardrails.md#a-reply-that-is-a-refusal).
+
+**Before it writes.**
+
+- **Refine something that has been refined before** is off by default.
+  - Off, a reply that still holds its refine is not refined again, by any button or by the automatic pass.
+  - A reply you swiped, regenerated or edited holds different words, so it is refined either way. This is what lets it work alongside [Auto Retry](https://github.com/starlitcode/Lumiverse-Auto-Retry).
+  - One reply announced twice is still only refined once.
+- **Refine the greeting** is off by default. On, the first message of a chat can be refined like any reply, by a button or by **Refine every reply here**. The automatic pass never refines it. A warning under it says the greeting is written by the card's author. See [The greeting](guardrails.md#the-greeting).
+- **Wait out a provider that will not take the call** waits and tries again, twice by default, when the provider is busy or a local model is loading. See [Waiting out a provider that will not take the call](guardrails.md#waiting-out-a-provider-that-will-not-take-the-call).
+- **Seconds between automatic refines** puts a gap between automatic refines, for a provider that limits calls per minute. A reply that arrives too soon waits, with a countdown, and is then refined. It is 0, no gap, by default. Refines you start yourself never wait.
+- **Ask again when a check fails** retries a refine that failed a check a second try could fix. It is 0 by default.
+  - **Send a note when it asks again** is off by default. On, an ask made again after a refusal, a softened rewrite or an empty answer ends with a note that says what went wrong. See [A note when it asks again](guardrails.md#a-note-when-it-asks-again).
+- **Several rewrites at once** writes several rewrites at the same time and keeps the first that passes every check. It is off by default, and each rewrite costs a call. See [Several rewrites at once](guardrails.md#several-rewrites-at-once).
+- **Add the refine as a swipe instead of writing over the reply** is off by default.
+  - On, the rewrite is added as a new swipe, and the original stays one swipe back.
+  - The original stays in the chat, so this way back survives an update and a restart with no other setting.
+  - **Put it back** then removes that swipe. It refuses if you have added another swipe since.
+  - **Your next / swipe button** is under it. You only need it if a Lumiverse update renames the swipe arrows. It works like **Where the input box is**, under **Refining the draft in your input box**. Its **Pick it for me** takes the next / swipe arrow you hold on a reply.
+- **Keep what a refine replaced** keeps the original, so you can put it back. It is on by default.
+  - Your server holds it in memory, so a reload keeps it. An update or a restart of Lumiverse clears it.
+  - **Keep them through an update** is under it, and off by default. On, the list is also saved on your server for your account, so an update or a restart does not clear it.
+  - Turning **Keep them through an update** off empties the saved copy. The list in memory stays until the next update or restart.
+- **Ask before saving a refine** holds every refine until you decide.
+  - It appears in a **Waiting for you** card at the top of the tab, with **Accept it** and **Turn it down**. The card shows what changed, marked the same way as every before and after.
+  - When the tab is not open, the question also comes up on screen as **Save this refine?**, on the same card a finished refine uses. It comes up even with **Show the before and after on screen** off. Answering either one answers both. Closing it without an answer leaves the question waiting in the tab.
+  - The floating button's menu can answer it too. A tap on the button only opens the tab.
+- **Your own messages** are only refined when you press a button on one. They use their own prompt, under **For your messages** on the Prompt tab.
+
+## Log
+
+- **Right now** shows what is happening: asking, thinking, writing (with a character count), checking, or waiting.
+  - A clock runs while it works. After eight seconds it also shows how long is left before the timeout.
+  - Below, it shows what the last refine used, in input and output tokens, and what it cost if you set prices. This includes dropped rewrites and retries, because those were paid for too.
+- **What the model said outside the rewrite** keeps the model's notes from the last refine that finished. It has **Copy**, **Expand** and **Clear**. Stopping a refine leaves the last notes alone.
+- **What it has been doing** lists what it did, newest first.
+  - **Show in this list**, under it, has a switch for each kind of line. All are on by default. Untick one to hide it:
+    - **Refines starting and finishing**: each refine, a run through the chat, a wait, and a retry after a failed check.
+    - **Replies left alone**: a reply or draft that was not changed, and why.
+    - **What the second model decided**: one line for each reply the second model reads.
+    - **What the second model sent on**: what the second model found, sent to the refine model.
+    - **The second model reading a rewrite**: whether a rewrite needs a second refine.
+    - **Your answers and put-backs**: a refine waiting for you, accepted or turned down, and a reply put back.
+    - **Settings, presets and model setups**: settings, presets or model setups loaded, put back, or moved to and from your account.
+    - **Problems and warnings**: something that could not be done, such as a window that would not open.
+  - The count at the top says how many lines are hidden.
+  - Hidden lines are still kept. **Reporting a problem** still includes them.
+- **Reporting a problem** copies a report you can add to a bug report. It is optional, but it helps show exactly what went wrong.
+  - **What it carries** chooses what goes in: your settings, the shape of your prompt, the counts, the recent log, where you are, and your browser.
+  - What your blocks say is never included, only their names, roles and macros.
+  - **Your settings** names the provider and model of your Decision connection, and lists every setting you changed, with its default beside it. A default that is empty says "empty". Text you wrote shows only as its length, and an address only as set or empty.
+  - The time at the top is your own time, with your time zone. Each recent line says which kind of line it is.
+  - **Read and edit it first** lets you check it before it is copied.
+  - The first lines always name the panel's version, the backend's version and Lumiverse's version. The first two differ if you updated without reloading.
+  - The next line says whether the page is secure: on `https`, or opened on the same device that Lumiverse runs on, such as a phone running Lumiverse itself. Some browser features only work on a secure page. It never shows the address or the port.
+
+## Setup
+
+**What to refine** chooses which side of the chat Auto Refine works on.
+
+- **Replies and your messages** is the default.
+- **Replies only** hides everything for your own messages: their buttons, their menu entries, **Refine what I am typing**, the button on each of your messages, and the prompt under **For your messages**.
+- **Your messages only** hides everything for replies: their buttons, their menu entries, the automatic switch, the button in the chat's row of controls, the button on each reply, and the prompt for replies. Nothing is refined automatically, since your own messages never are. A tap on the floating button refines your latest message.
+- The page does not say whose a message is, so the panel asks the backend. Until it has the answer, a new message shows no button.
+- A refine on the side that is off is refused, however it is asked for, such as with a selection. The Log says why.
+- Nothing is deleted. Switch back and everything returns as it was.
+
+**This chat** switches Auto Refine off in the chat you are in, and leaves other chats alone.
+
+- It is saved to your account and in your browser, as a list of chat ids, so every browser and device you use has the same chats switched off.
+- In a **temporary chat**, one with no character card, the switch works while the chat is open but is not saved, because the next temporary chat has a different id.
+
+**When a refine finishes** chooses how you are told.
+
+- **Show the before and after on screen** puts a card on the page with the before, the after, and a button to put it back. It is on by default.
+- **Read them side by side** or **Read them together** switches every before-and-after on screen between two columns and one text with the changes colored. The next card opens the way you left it. On a narrow screen, the columns stack.
+- **Lumiverse notification when a refine finishes** sends a short Lumiverse notification when a reply is refined, and one when a run through the whole chat ends. It is off by default. It does not change **Show the before and after on screen**. Turn on both to get the card and the notification, or turn off the card to get only the notification. With both on, the card can cover the notification. That depends on where Lumiverse shows notifications, which is **Toast position** in Lumiverse's own settings, under **Notifications**. Messages about a problem, such as a refine that could not run, show either way.
+- The sound is off by default. With no file chosen, it is a short built-in sound.
+
+**Ways to reach it** are four optional ways in, all off by default.
+
+**A floating button** puts a round button over the chat. It needs the interface panels permission.
+
+- A tap refines the latest reply. That is all a tap does.
+- Hold it, or right-click it, to open its menu: the tab, refining every reply, stopping a refine, putting one back, refining your draft, hiding the button, and the main switch.
+- Holding fills a ring around the edge. The menu opens when the ring closes. Let go early and nothing happens.
+- Its mark is an eye. It is shut when nothing is running, and reads while a refine runs. It blinks once when a refine finishes, and closes without a blink when you stop one.
+- Drag it where you want it. It stays there, in this browser.
+- If your device is set to reduce motion, the eye stays still and there is no ring.
+
+**A button in the chat's row of controls** adds a button to Lumiverse's own row of chat buttons. A tap refines the latest reply.
+
+**A button on every message** adds a button to each message's row of buttons. A tap refines that message.
+
+- It is the only way to refine an older message without selecting all of it.
+- It works on your own messages too.
+- On the greeting, it says the greeting is not refined, unless **Refine the greeting** is on.
+- While a message is open for editing, its button is hidden, like Lumiverse's own.
+
+**Hold to select text in messages** is off by default. It is for selecting text on a phone.
+
+- Holding message text selects it. Lumiverse's own menu does not open over it. Holding anywhere else on a message still opens that menu.
+- Message text can be selected even where another extension stops it from being selected.
+- When you select part of a message, a small bar comes up by the selection, with **Refine it**, **Take it out** and **Copy**.
+- The bar also comes up on a laptop. A right-click is left to Lumiverse.
+- While you drag the selection, the bar moves with it. Its buttons can be pressed once the selection stops.
+- You can select forwards or backwards. While you drag, the bar sits by the end you are moving: below the last line when you drag forwards, above the first line when you drag backwards. On a phone, once you stop, it sits below the selection, clear of the phone's own copy menu.
+- Only the reply's own text counts. A drag that runs a little past it into blank space is trimmed to the text. Selecting the character's name, or the line with the message's number and date, never brings up the bar.
+- The bar follows the same rules as the buttons on a message. On the greeting, it only works with **Refine the greeting** on.
+
+Both chat buttons copy the look of the Lumiverse button next to them, so your theme and your own CSS apply to them. While a refine runs, each turns into **Stop this refine**.
+
+**Keep the eye still** stops every eye this extension draws from moving: on the drawer tab, the floating button, the chat buttons and the button on each message. It is off by default.
+
+- At rest, the eye is shut.
+- While a refine runs, the eye is open, with no pupil moving and no blink.
+- Pointing at a button does not open its eye.
+
+**Pattern behind the panel** draws a faint pattern behind this tab: Diamonds, Stripes, Dots, Hearts or Stars. It is None by default.
+
+- The pattern is drawn in your theme's color.
+- With a pattern on, the cards and the tab strip have a color of their own over it. **How solid the boxes are (%)** sets how much of the pattern shows through them.
+- With no pattern, the tab strip has the same see-through color as the cards.
+- The tab strip stays at the top while you scroll. It blurs the rows that pass under it, so its names stay easy to read.
+
+**How solid the boxes are (%)** is shown only while a pattern is picked. It is 60 by default.
+
+- Lower lets more of the pattern show through the cards and the tab strip.
+- Higher makes them more solid. 100 is solid.
+- Auto Retry has the same setting, with the same default.
+
+**Color of cut words** and **Color of added words** set the colors used in every before and after: on the card, in the panel and on the Log tab.
+
+- By default, cut words use your theme's danger color and added words its success color.
+- Tap the swatch beside each one to open the color editor under it. It works the same on a phone and a laptop:
+  - a box for a color code, such as `#ff0040`, with or without the `#`, or the short form such as `#f04`
+  - sliders for **Hue**, **Saturation** and **Lightness**. Each track shows the colors its slider can reach, and each knob shows the color in use.
+  - your theme's **Danger** and **Success** colors, one tap each
+  - a line showing the words in the color
+- A color you set is used instead of the theme's. **Use the theme's color** puts the theme's color back.
+- With a dark theme, Lumiverse makes custom danger and success colors lighter before any extension sees them. To use the exact color you picked in Lumiverse's theme editor, copy its code from there into the code box here.
+- Cut words keep the line through them whatever the color, so they can be told apart without color.
+- A color you pick is shown exactly as you picked it, everywhere, even where it is hard to read on your theme.
+- With no color of your own, the theme's color is used. If that is too faint to read on your theme, it is made lighter or darker until it can be read.
+
+**Reduce motion** stops everything in Auto Refine from moving or fading. It is off by default.
+
+- On, the panel, the card, the descriptions, the floating button and every eye change at once, with no fade or slide.
+- With it off, the card, the full-size editor and a setting's description fade in and slide a little, and fade out when they close. Nothing grows.
+- With it off, rows that hang off a switch, folds, a block's text on the Prompt tab and the color editor open and close smoothly, and the settings below move with them. Pressing again while one moves turns it round.
+- The eye works as it does with **Keep the eye still**: shut at rest and open while a refine runs.
+- A device set to reduce motion gets the same, with the switch off.
+- With the switch off, the floating button shrinks a little when pressed, and a switch's knob springs past its end and back. With it on, both keep their size and place.
+
+**Refining part of a reply** needs no setting. Select part of a reply and **Refine the part I selected** appears:
+
+- on the panel
+- in the chat input's Extras menu
+- in the floating button's menu, when it is on screen
+- on the chat buttons, when they are on
+
+It rewrites only what you selected. It works in your own messages too, with their prompt.
+
+Lumiverse shows curly quotes and apostrophes as straight ones. Your selection is matched either way, so a reply that a refine filled with curly quotes can still be selected and refined again.
+
+**Take out what I selected** appears in the same places. It deletes the selection without calling a model, so it costs nothing.
+
+- It tidies the gap. It leaves one space where a phrase was cut, and one blank line where a paragraph was.
+- It will not delete the whole message.
+- **Put it back** undoes it.
+
+**Refining the draft in your input box** is off by default, because it writes into the box you type in. On, **Refine what I am typing** appears above the tabs and in the Extras menu, or in the floating button's menu when that is on screen. It is grayed out when no chat is open, because there is no input box to read. Like every button above the tabs, it is also grayed out while the panel is waiting to be told which chat you are in. **Your draft, refined** then shows at the top of the tab, with **Put it back**, **Dismiss** and **Read it in full**.
+
+While the floating button is on screen, its menu holds these extra actions. With the button off, they are in the chat input's Extras menu instead, which is how you reach them on a phone.
+
+**Where the input box is** is under **Refining the draft in your input box**, and shows while that switch is on. It is only needed if a Lumiverse update moves the input box.
+
+- The box is the list of selectors it tries, in order, separated by commas.
+- The built-in list is always tried after yours, so a selector of yours that stops working costs nothing. Emptying the box leaves only the built-in list.
+- The list below the box shows which selector found the box. A selector the browser cannot read is marked in red.
+- **Test** checks the page when you press it, and says whether the box was found and can be typed in.
+- **Pick it for me** makes the selector from the real box on your screen:
+  1. Press **Pick it for me**. The drawer closes, and a bar at the top of the page says what to hold.
+  2. Press and hold the chat input box for half a second. On a phone this opens the keyboard, which closes again after the pick.
+  3. The drawer opens again on Auto Refine. The new selector is in the box, and the line beside the buttons says what was picked.
+  - A short tap picks nothing, and the page works as usual while the bar is up.
+  - **Cancel** on the bar, or Esc on a keyboard, stops it.
+  - If the drawer does not close, the bar asks you to close it yourself. This happens on a Lumiverse that cannot close the drawer for an extension.
+  - Nothing inside another extension's part of the page can be picked.
+- **Use the built-in list** puts the box back to the built-in list. A pop-up asks you to confirm first, since what you wrote is not kept.
+
+**Your whole setup** exports your settings to a file, imports a file, or resets to defaults.
+
+- All three use the same list of parts:
+  - Your prompt
+  - Context
+  - Model and thinking
+  - Samplers
+  - Limits and protection
+  - Alerts and sound
+  - Buttons and the widget
+  - Where the input box is
+  - One model or two
+  - The on and off switches
+  - Saved presets
+  - Saved model setups
+  - Chats you switched off
+- **What goes in the file**, **What to take from a file** and **What to put back** each choose their own parts. So you can export only your prompt, or reset your prompt and keep your connection.
+- See [Import and export](prompt.md#import-and-export) and [Starting again](prompt.md#starting-again).
+
+---
+
+[Back to the README](../README.md)

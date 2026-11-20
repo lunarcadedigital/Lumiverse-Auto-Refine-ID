@@ -1,0 +1,165 @@
+<p align="center">
+  <img src="docs/refine-banner.png" width="100%" alt="Auto Refine: a woman writes at a desk on a balcony at night, by the light of a lantern. Crossed-out pages lie beside her, and clean pages float up into the starry sky.">
+</p>
+
+# Auto Refine
+
+A Lumiverse extension. It sends a finished reply to a model with the rules you wrote, and saves the rewrite over the original.
+
+- **It leaves the greeting alone.** A person wrote that message. **Refine the greeting**, off by default, is the only way to change this.
+- **Nothing is written that you cannot undo.** **Put it back** restores the wording a refine replaced.
+
+It works alongside [Auto Retry](https://github.com/starlitcode/Lumiverse-Auto-Retry). Auto Retry decides whether a reply is worth keeping. Auto Refine improves the ones that are.
+
+## What it does
+
+- **Refines replies.** Press a button to refine the latest reply, or go through every reply in a chat. Automatic refining of each new reply is off until you turn it on.
+- **Refines part of a reply.** Select some text and refine only that, or take it out.
+- **Refines messages you have already sent.** Refine your latest message, all of your messages in a chat, or one message from its own button. This is never done automatically. Your messages get their own prompt, which fixes mistakes and leaves your style alone.
+- **Refines what you are still typing.** An optional button rewrites the draft in the input box, before you send it.
+- **Shows what changed.** After a refine, the tab shows the before and after, either mixed in one text or side by side.
+
+[Every way to refine](docs/settings.md#every-way-to-refine) lists each button, where it is, and what it needs.
+
+It lives in a tab in the sidebar drawer, so you can keep it open while you write.
+
+## Install
+
+1. In Lumiverse, open **Extensions**.
+2. Install from this address:
+
+   ```
+   https://github.com/starlitcode/Lumiverse-Auto-Refine
+   ```
+
+3. Open the sidebar drawer and pick the **Auto Refine** tab.
+
+A prompt comes with it, so switching it on is all the setup you need. Everything else is optional. For the settings that work well for most people, see [What to use](docs/recommended.md).
+
+## You are in control
+
+- **The switch at the top** stops everything. No refine runs and no model is called.
+- **Turn off here**, on the Setup tab, leaves one chat alone.
+- **What to refine**, on the Setup tab, picks replies, your own messages, or both. The buttons for the other side are hidden.
+- **Ask before saving a refine** shows you each rewrite before it is written.
+- **Put it back** undoes a refine.
+
+## What it checks before saving
+
+A rewrite is dropped, and your reply is left as it was, when:
+
+- the model talks about the edit instead of making it, like "Here is the rewritten message"
+- the model declines, sends nothing, or changes nothing
+- the rewrite is much longer or shorter than the reply (you set both limits)
+- the rewrite lost your formatting, such as tags, code or image links
+
+Also:
+
+- The model's own thinking is never sent, so a rewrite cannot change it.
+- The original is kept so you can put it back, even after a reload. An update or a restart of Lumiverse clears it, unless you keep it through one on the Limits tab.
+- Every check says why it fired, in the Log tab.
+
+More in [What it refuses to save](docs/guardrails.md).
+
+## The tabs
+
+| Tab | What is on it |
+| --- | --- |
+| **Prompt** | The request, block by block, the macros, and your presets |
+| **Context** | How much of the chat and lorebook goes in, and a preview of what is sent |
+| **Model** | Which connection refines, thinking, the timeout, samplers, and two models (beta) |
+| **Limits** | What it protects, what it refuses to save, and what it does before it writes |
+| **Log** | What is happening now, what it did, what the last refine cost, and a bug report button |
+| **Setup** | This chat, alerts, the optional buttons, import and export, and resetting |
+
+The switch, the refine buttons and the refines you can put back sit above the tabs.
+
+## What it costs
+
+A refine is a second model call on every reply it refines. To spend less:
+
+- **Refine using** (Model tab): point it at a cheaper model than the one you chat with.
+- **Let it think first** (Model tab): off by default. Rewriting does not need a reasoning model.
+- **How much it is told** (Context tab): less chat history means a cheaper call.
+- **Two models** (Model tab, beta): a small second model, through one of your Decision connections, checks each reply first, so only the ones that need it are refined. It can be wrong, so a reply that needs a refine is sometimes left alone. See [It can be wrong](docs/two-models.md#it-can-be-wrong).
+
+**Several rewrites at once** (Limits tab) costs more, because each rewrite it writes is a whole call. It is off by default.
+
+Put your provider's prices on the Model tab to see costs in money instead of tokens. On a free tier or a local model, **Wait out a provider that will not take the call** (Limits tab) waits and tries again when the provider is busy.
+
+## Your prompt
+
+The whole request is a list of blocks you can edit, reorder, switch off or add to. Macros like `{{message}}`, `{{history}}` and `{{description}}` are filled in when the refine runs.
+
+Four prompts come with it:
+
+- **A judge**, for replies. It improves how a reply reads and leaves what happens alone.
+- **A line judge**, for your own messages. It fixes mistakes and leaves your style alone.
+- Each has a smaller version **that thinks**, for a model that reasons.
+
+All four change only a line the model could quote as breaking a rule. The two for a model that thinks score each area and write the scores down. The two plain ones give the same limit as a rule. They do not ask the model to check its work, because a model that does not think writes its answer in one go. All four work with one character or several, and in group chats. See [The scorecard](docs/prompt.md#the-scorecard).
+
+**Show me the request**, on the Context tab, shows the request a refine of that reply would send, without calling a model or costing anything. Two things only a real refine can fill in are named rather than shown: what the checks found, and the passes after the first.
+
+## Documentation
+
+**Start here**
+
+- [What to use](docs/recommended.md): the prompt, model, thinking and sampler settings to start with
+- [Settings](docs/settings.md): every tab and setting
+- [Ways to reach it](docs/settings.md#setup): the floating button, the chat buttons, and refining a selection
+
+**Going further**
+
+- [How the prompt is built](docs/prompt.md): blocks, macros, roles, the built-in prompts, and the preview
+- [Making your own prompt](docs/rules.md): a step-by-step guide to a prompt that fits your story and your model
+- [Presets](docs/prompt.md#presets) and [Import and export](docs/prompt.md#import-and-export)
+- [What it refuses to save](docs/guardrails.md): the checks on what comes back
+- [Two models](docs/two-models.md): a beta where a second model picks which replies to refine
+
+**About it**
+
+- [Privacy](docs/privacy.md): what it can reach, what it sends, and what it keeps
+- [Security policy](SECURITY.md): how to report a security problem
+- [Changelog](CHANGELOG.md): what changed in every version
+
+## How it works
+
+- The refining runs in the extension's backend, because editing a saved message is a backend job.
+- Every refine goes through Lumiverse to the provider you set up. With two models on, the call to the second model goes through Lumiverse to your Decision connection.
+- The extension has no networking of its own. Search the two source files for `fetch(`, `XMLHttpRequest`, `WebSocket`, `sendBeacon` or `EventSource` and you will find nothing.
+- **Nothing is ever added to your chat.** It only edits messages that already exist.
+- **Refine what I am typing** reads and writes the input box on the page, because Lumiverse has no API for it. If an update moves the box, **Where the input box is** on the Setup tab points it at the new one.
+- The files Lumiverse loads are `dist/frontend.js` and `dist/backend.js`. They are plain, readable JavaScript. Nothing is minified.
+
+It asks for eight permissions:
+
+| Permission | What it is for |
+| --- | --- |
+| `generation` | running the refine |
+| `chat_mutation` | saving the rewrite |
+| `chats` | knowing which chat you are in, and what Lumiverse remembers of it |
+| `interceptor` | seeing which connection you chat with |
+| `characters` | reading the character card |
+| `world_books` | reading the lore the chat has active |
+| `ui_panels` | the floating button |
+| `decisions` | asking the second model, when two models are on |
+
+[Privacy](docs/privacy.md) says what still works without each one.
+
+## Help and feedback
+
+Questions, bug reports and ideas are welcome in my [Auto Refine post](https://discord.com/channels/1484149939167821915/1545884657743171594) on the Lumiverse Discord server, or as a [GitHub issue](https://github.com/starlitcode/Lumiverse-Auto-Refine/issues). [Contributing](CONTRIBUTING.md) says what to put in a bug report.
+
+## Made for adults
+
+Auto Refine is for adults, 18 and older. It is not for sexual content involving minors, and I do not support anyone using it for that. I do not help anyone who tells me they are under 18, with anything. [The one thing they do not edit](docs/prompt.md#the-one-thing-they-do-not-edit) says exactly how the built-in prompts handle it.
+
+## Credits
+
+- **starlitcode**: built and maintains the extension
+- **[Claude](https://claude.ai)** (Anthropic): wrote the code, directed and tested by starlitcode
+- **[Hone](https://github.com/AMousePad/Hone)**: the extension that showed refinement was worth having. Auto Refine is written from scratch and shares no code with it
+- Everyone who has reported a bug or suggested something that turned into a fix
+
+Licensed under the GNU General Public License v3.0. See [LICENSE](LICENSE).
