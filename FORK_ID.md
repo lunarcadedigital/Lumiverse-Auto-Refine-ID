@@ -7,7 +7,7 @@ the original author.
 
 ## What changed
 
-The program code is the same as upstream. The changes are prompt and check text in
+The program code is the same as upstream except one small fix (below, item 7). The changes are prompt and check text in
 `src/frontend.ts` (and the matching `dist/frontend.js`, rebuilt with `tsc`), the
 docs and tests that quote that text, the README, and the repository links:
 
@@ -37,6 +37,12 @@ docs and tests that quote that text, the README, and the repository links:
    messages, do not get this block.
 6. **`docs/two-models.md`**: the list of checks, kept identical to the code, as the
    test suite requires.
+
+7. **Connection list refresh** (`src/frontend.ts`): the list of chat connections shown
+   under **Refine using** is now asked for again when the Model tab opens and when
+   the page comes back after being away. Before, it was read once at start, so a
+   model changed on a connection in Lumiverse kept its old name in the list until
+   the page was reloaded. Which connection a refine uses was never affected.
 
 The permissions, the version and the backend are the same as upstream. The
 manifest and `package.json` point to this repository instead of upstream, and

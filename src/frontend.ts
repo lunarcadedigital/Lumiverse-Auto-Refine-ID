@@ -3877,8 +3877,9 @@ export function setup(ctx: Ctx, overrides?: any) {
       loadPresetsFromAccount();
       loadSetupsFromAccount();
       loadStateFromAccount();
-      // A Decision connection can be added in Lumiverse while this tab is in
-      // the background.
+      // A Decision connection can be added, and a connection's model changed,
+      // in Lumiverse while this tab is in the background.
+      send({ type: "list_connections", requestId: newId() });
       send({ type: "list_decision_connections", requestId: newId() });
     } catch (_) {}
   }
@@ -7542,6 +7543,10 @@ export function setup(ctx: Ctx, overrides?: any) {
       b.addEventListener("click", () => {
         cfg.tab = t.id;
         persist(true);
+        // The list of connections is read once when the panel starts. A model
+        // changed on a connection in Lumiverse since then would still be named
+        // the old way in Refine using, so the Model tab asks again as it opens.
+        if (t.id === "model") send({ type: "list_connections", requestId: newId() });
         paint();
       });
       strip.appendChild(b);
