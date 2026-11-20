@@ -11070,6 +11070,36 @@ console.log("\nwhen the prompt stops matching the preset named in the box");
   });
 }
 
+// ---- the line about a changed default, on a phone ----
+// The sentence and its two buttons shared one row, which left the sentence a
+// narrow column beside the buttons on a phone. The buttons go under it there.
+console.log("\nthe changed-default line on a phone");
+{
+  const OLD_LEAD =
+    "Another model, {{second_model}}, read this passage before you and scored it against checks the user picked. The checks below reached the user's line of {{checks_line}}%, strongest first. In them, \"reply\" means the passage you are rewriting. Look at these first. Treat each one as a lead to check. If a check does not fit the passage, leave that part as it is. Everything else in these instructions still applies.";
+  const errors = await inTab(browser, { viewport: { width: 390, height: 820 }, touch: true }, async (page) => {
+    await page.evaluate(async (lead) => {
+      const id = window.__sent.filter((m) => m.type === "load_settings").pop().requestId;
+      window.__fromBackend({ type: "loaded_settings", requestId: id, settings: { judgeMode: "two", judgeFoundLead: lead, judgeChecks: "x" } });
+      await new Promise((r) => setTimeout(r, 150));
+    }, OLD_LEAD);
+    await settle(page);
+    const box = await page.evaluate(() => {
+      const row = document.querySelector("#drawer [data-arf-moveddefault='1']");
+      if (!row) return null;
+      const text = row.querySelector("span").getBoundingClientRect();
+      const take = row.querySelector("[data-arf-moveddefault='take']").getBoundingClientRect();
+      const rr = row.getBoundingClientRect();
+      return { textBottom: text.bottom, takeTop: take.top, textW: text.width, rowW: rr.width, over: document.documentElement.scrollWidth > window.innerWidth };
+    });
+    ok("the line is there", !!box, JSON.stringify(box));
+    ok("the buttons sit under the sentence", !!box && box.takeTop >= box.textBottom - 1, JSON.stringify(box));
+    ok("and the sentence has the width of the row, not a narrow column", !!box && box.textW >= box.rowW * 0.9, JSON.stringify(box));
+    ok("nothing runs off the side", !!box && box.over === false, JSON.stringify(box));
+  });
+  ok("no errors with the changed-default line", errors.length === 0, errors.join("\n         "));
+}
+
 console.log("\nwhen a default moves under somebody who was on it");
 {
   // The line only reaches a reader still holding the old value, because that is

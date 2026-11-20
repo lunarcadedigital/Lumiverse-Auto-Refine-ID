@@ -2175,7 +2175,7 @@ const MOVED_DEFAULTS: Array<{ key: string; was: any; label: string; why: string;
       "`reply` ends with a question to the user about what they do next, as in \"What do you do?\".",
     ].join("\n"),
     label: "What the second model checks",
-    why: "the built-in checks are now written in Indonesian, with Indonesian examples.",
+    why: "the built-in checks are now in Indonesian.",
     needs: { key: "judgeMode", is: "two" },
   },
   {
@@ -2197,7 +2197,7 @@ const MOVED_DEFAULTS: Array<{ key: string; was: any; label: string; why: string;
       "`reply` has a character reassure or praise another in therapy language, as in \"Kau melakukan hal yang benar.\" or \"Aku di sini untukmu.\".",
     ].join("\n"),
     label: "What the second model checks",
-    why: "the built-in checks are now written in Indonesian, with Indonesian examples.",
+    why: "the built-in checks are now in Indonesian.",
     needs: { key: "judgeMode", is: "two" },
   },
   {
@@ -2210,7 +2210,7 @@ const MOVED_DEFAULTS: Array<{ key: string; was: any; label: string; why: string;
       "`reply` ends the same way as `previous_reply`, such as both ending on a character waiting for an answer.",
     ].join("\n"),
     label: "What it compares",
-    why: "the built-in comparison checks are now written in Indonesian.",
+    why: "its built-in checks are now in Indonesian.",
     needs: { key: "judgeMode", is: "two" },
     also: { key: "judgeBefore", is: true },
   },
@@ -2218,7 +2218,7 @@ const MOVED_DEFAULTS: Array<{ key: string; was: any; label: string; why: string;
     key: "judgeWornCheck",
     was: "`reply` contains at least one phrase listed in `worn_phrases`.",
     label: "How it asks",
-    why: "the check sent with the worn-out phrases is now written in Indonesian.",
+    why: "its built-in check is now in Indonesian.",
     needs: { key: "judgeMode", is: "two" },
     also: { key: "judgeWorn", is: true },
   },
@@ -2226,14 +2226,14 @@ const MOVED_DEFAULTS: Array<{ key: string; was: any; label: string; why: string;
     key: "judgeFoundLead",
     was: "Another model, {{second_model}}, read this passage before you and scored it against checks the user picked. The checks below reached the user's line of {{checks_line}}%, strongest first. In them, \"reply\" means the passage you are rewriting. Look at these first. Treat each one as a lead to check. If a check does not fit the passage, leave that part as it is. Everything else in these instructions still applies.",
     label: "What the refine model is told about the checks",
-    why: "the built-in text is now written in Indonesian.",
+    why: "the built-in text is now in Indonesian.",
     needs: { key: "judgeMode", is: "two" },
   },
   {
     key: "protectNote",
     was: "Parts of this passage have been replaced with tokens shaped like [[AR1]], [[AR2]] and so on. Each stands in for formatting that has to survive the edit exactly as it is. Copy every one into your answer unchanged and in the same place. Do not change, split, translate or remove any of them.",
     label: "What the model is told about the stand-ins",
-    why: "the built-in text is now written in Indonesian.",
+    why: "the built-in text is now in Indonesian.",
     needs: { key: "protectOn", is: true },
   },
 ];
@@ -8014,7 +8014,10 @@ export function setup(ctx: Ctx, overrides?: any) {
           moved.map((m) => m.label + ": " + m.why).join(" ") +
           " Yours is still the old value until you take the new one.",
       );
-      what.style.flex = "1";
+      // A long sentence beside two buttons leaves the sentence a narrow column on a
+      // phone. A basis wide enough to need its own line puts the buttons under it
+      // there, and still lets them sit beside it where there is room.
+      what.style.flex = "1 1 18rem";
       line.appendChild(what);
       const take = button("Take it", true);
       take.setAttribute("data-arf-moveddefault", "take");
@@ -10255,7 +10258,10 @@ export function setup(ctx: Ctx, overrides?: any) {
         "",
         "The built-in prompts have changed since you last loaded one. Yours is untouched. To take the new wording, load one from the card below, which writes over the list you are on.",
       );
-      what.style.flex = "1";
+      // A long sentence beside two buttons leaves the sentence a narrow column on a
+      // phone. A basis wide enough to need its own line puts the buttons under it
+      // there, and still lets them sit beside it where there is room.
+      what.style.flex = "1 1 18rem";
       moved.appendChild(what);
       const gotIt = button("Got it", false);
       gotIt.setAttribute("data-arf-builtinmoved", "dismiss");
