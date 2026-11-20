@@ -65,6 +65,13 @@ The ones it starts with:
 `reply` follows an action with a comment that judges how it came out, as in "she laughed, and it came out thin" or "he said it, and it sounded wrong".
 `reply` has a character start an action, then take it back, as in "reached out, then pulled back" or "opened her mouth, then closed it".
 `reply` ends with a question to the user about what they do next, as in "What do you do?".
+`reply` denies something in Indonesian, then names what it really is or does, as in "Bukan ke mana-mana. Hanya terbang.", "Itu bukan kegagalan, melainkan kejujuran." or "Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan.".
+`reply` narrates what a character does not do in Indonesian, as in "Dia tidak berkedip." or "Tony tidak menjawab sindiran itu.".
+`reply` has a character announce what they are about to say, as in "Aku ingin kau tahu bahwa..." or "Aku punya satu pertanyaan...".
+`reply` contains a stock phrase in Indonesian, such as "jantungnya berdegup kencang", "dunia seolah berhenti", "seulas senyum tipis" or "rahang mengeras".
+`reply` counts a sound or a knock one by one, as in "Telepon berdering sekali. Dua kali. Tiga kali.".
+`reply` ends on the weather, the light, or someone watching from a distance, as in "langit mulai berwarna lebih gelap" or "seseorang mengamati dari atap".
+`reply` has a character reassure or praise another in therapy language, as in "Kau melakukan hal yang benar." or "Aku di sini untukmu.".
 ```
 
 Each one has to be false of a clean reply. A reply is refined when any one check reaches the line, so a check that is true of almost every reply sends every reply through. For example, "repeats a word" is true of any reply that uses a name twice.

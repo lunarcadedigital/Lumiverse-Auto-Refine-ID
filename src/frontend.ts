@@ -291,6 +291,13 @@ const JUDGE_CHECKS = [
   "`reply` follows an action with a comment that judges how it came out, as in \"she laughed, and it came out thin\" or \"he said it, and it sounded wrong\".",
   "`reply` has a character start an action, then take it back, as in \"reached out, then pulled back\" or \"opened her mouth, then closed it\".",
   "`reply` ends with a question to the user about what they do next, as in \"What do you do?\".",
+  "`reply` denies something in Indonesian, then names what it really is or does, as in \"Bukan ke mana-mana. Hanya terbang.\", \"Itu bukan kegagalan, melainkan kejujuran.\" or \"Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan.\".",
+  "`reply` narrates what a character does not do in Indonesian, as in \"Dia tidak berkedip.\" or \"Tony tidak menjawab sindiran itu.\".",
+  "`reply` has a character announce what they are about to say, as in \"Aku ingin kau tahu bahwa...\" or \"Aku punya satu pertanyaan...\".",
+  "`reply` contains a stock phrase in Indonesian, such as \"jantungnya berdegup kencang\", \"dunia seolah berhenti\", \"seulas senyum tipis\" or \"rahang mengeras\".",
+  "`reply` counts a sound or a knock one by one, as in \"Telepon berdering sekali. Dua kali. Tiga kali.\".",
+  "`reply` ends on the weather, the light, or someone watching from a distance, as in \"langit mulai berwarna lebih gelap\" or \"seseorang mengamati dari atap\".",
+  "`reply` has a character reassure or praise another in therapy language, as in \"Kau melakukan hal yang benar.\" or \"Aku di sini untukmu.\".",
 ].join("\n");
 
 // More checks a reader can add to What the second model checks. Each one finds
@@ -1286,12 +1293,25 @@ const PHRASES =
   "- a laugh, a breath or a sound that escapes somebody\n" +
   "- do-then-undo: reached out, then pulled back; opened her mouth, then closed it\n" +
   "- the same thing twice: she looked at him, really looked at him; he worked his jaw, his jaw worked\n" +
-  "- narrator flourishes: little did they know, only time would tell, nothing would ever be the same";
+  "- narrator flourishes: little did they know, only time would tell, nothing would ever be the same\n" +
+  // Indonesian. The same kinds as above, in the words a model actually reaches
+  // for when it writes Indonesian. Added in the Indonesian anti-slop fork.
+  "- (Indonesian) the denial and its answer: bukan X, melainkan Y; tidak X, tapi Y; bukan X, hanya Y, also split across two sentences (Bukan ke mana-mana. Hanya terbang.); bukan hanya X, tapi juga Y; lebih dari sekadar X; a string of denied options before the true one. Say the true thing directly: Ia terbang.\n" +
+  "- (Indonesian) narrated negation: tanpa + a verb, and tidak or belum + an action in narration (Dia tidak berkedip). Say what they do instead: Matanya tetap terbuka.\n" +
+  "- (Indonesian) bodies on autopilot: jantungnya berdegup kencang, napas tertahan, napas tercekat, rahang mengeras, menelan ludah, tubuhnya menegang, mata berkaca-kaca, suara bergetar, bulu kuduk merinding, pupil melebar, alis terangkat, menyipitkan mata, menghela napas, menggigit bibir bawah\n" +
+  "- (Indonesian) stock faces: seulas senyum tipis, tersenyum getir, senyum miring, tatapan dingin menusuk, tatapan tajam, tatapan predator\n" +
+  "- (Indonesian) the air and the silence doing the mood's job: hening yang canggung, keheningan menggantung, udara terasa berat, dunia seolah berhenti, waktu seolah berhenti, ketegangan yang merayap, atmosfer yang kental, getaran\n" +
+  "- (Indonesian) lines that announce or soothe: Aku ingin kau tahu bahwa..., Aku punya satu pertanyaan..., Kalau boleh aku menambahkan..., Kau melakukan hal yang benar, Aku di sini untukmu\n" +
+  "- (Indonesian) counting a sound out loud: berdering sekali, dua kali, tiga kali; exact numbers nobody gave (tiga detik, empat puluh derajat) where beberapa detik would do\n" +
+  "- (Indonesian) the closing shot: the sky growing darker, the light turning, a watcher on a roof, an arrival at a door\n" +
+  "- (Indonesian) English leaking into Indonesian prose: beat, density, micro-adjustment, fresh meat";
 
 const FILLER =
   "suddenly, slowly, slightly, just, really, very, almost, somehow, " +
   "seemed to, began to, found themselves, could not help but, visibly, " +
-  "practically, simply, merely, truly, utterly";
+  "practically, simply, merely, truly, utterly, " +
+  "tiba-tiba, perlahan, sedikit, seolah-olah, sepertinya, tampaknya, " +
+  "benar-benar, sungguh, nyaris";
 
 const COPY_EXACTLY: Block = {
   id: "hands_off",
@@ -1474,6 +1494,50 @@ const SCORE_BLOCK: Block = {
 
 // ---- a model that does not reason, in full ----
 // The same rules, one to a block, each said at length.
+// Added in the Indonesian anti-slop fork. One block for passages written in
+// Indonesian: it keeps the language and the register the passage already has,
+// and gives the Indonesian forms of the faults the other blocks name in English.
+const INDONESIAN_BLOCK: Block = {
+  id: "indonesian",
+  name: "Bahasa Indonesia",
+  on: true,
+  role: "system",
+  text:
+    "<bahasa_indonesia>\n" +
+    "Applies only when the passage is in Indonesian. Skip this block for any other language.\n\n" +
+    "Language first. The rewrite stays in Indonesian and never drifts into " +
+    "English. Keep the register the passage already has, for each speaker: " +
+    "aku, kau, kamu, saya, Anda, and any casual particles (sih, kok, dong, " +
+    "nggak). Do not make anyone more formal or more casual, and keep a " +
+    "narrator who calls the user kamu calling them kamu.\n\n" +
+    "Say the true thing directly. A denial followed by its answer becomes the " +
+    "answer alone, in narration and in dialogue:\n" +
+    "- Dia tidak berkedip. > Matanya tetap terbuka.\n" +
+    "- Bukan ke mana-mana. Hanya terbang. > Ia terbang.\n" +
+    "- Itu bukan kegagalan. Itu kejujuran. > Itu kejujuran.\n" +
+    "- Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan. > Dia akan bertanya kapan.\n" +
+    "The pattern is a denial, then tapi, melainkan, hanya, cuma or sekadar, " +
+    "even across two sentences. One plain denial that is the actual point of " +
+    "the line stays. Narration that reports what someone did not do (tanpa " +
+    "plus a verb, tidak or belum plus an action) becomes what they did, or goes.\n\n" +
+    "Speech says the thing. Cut the run-up (Aku ingin kau tahu bahwa..., " +
+    "Aku punya satu pertanyaan...), the soothing line (Kau melakukan hal " +
+    "yang benar), and speeches about what something means. Keep what the " +
+    "character wants to get across, in fewer words.\n\n" +
+    "Plain numbers. Counting a sound out loud (Berdering sekali. Dua kali. " +
+    "Tiga kali.) becomes Berdering. An exact number nobody gave (tiga detik) " +
+    "becomes beberapa detik.\n\n" +
+    "Stock Indonesian: jantungnya berdegup kencang, napas tertahan, rahang " +
+    "mengeras, menelan ludah, seulas senyum tipis, dunia seolah berhenti, " +
+    "keheningan menggantung. Replace each with what this person is actually " +
+    "doing in this room, or cut it.\n\n" +
+    "Natural Indonesian, not translated English: drop sebuah and adalah where " +
+    "Indonesian drops them, prefer bisa over dapat in speech, and let the " +
+    "verb carry the present instead of sedang. Name a character instead of " +
+    "alternating dia, ia and -nya when two of the same gender share a sentence." +
+    "\n</bahasa_indonesia>",
+};
+
 const PLAIN_LONG: Block[] = [
   JOB_BLOCK,
   {
@@ -1597,6 +1661,7 @@ const PLAIN_LONG: Block[] = [
       "picked that ending, not you." +
       "\n</the_finish>",
   },
+  INDONESIAN_BLOCK,
   LEAVE_ALONE,
   SCORE_BLOCK,
   COPY_EXACTLY,
@@ -1931,6 +1996,7 @@ const THINKS_LONG: Block[] = [
       "a foul-mouthed rambler and you've killed the character." +
       "\n</voice>",
   },
+  INDONESIAN_BLOCK,
   CAST_BLOCK,
   RESTRAINT,
   {
