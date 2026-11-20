@@ -5,13 +5,13 @@
   "author": "starlitcode",
   "license": "GPL-3.0-only",
   "type": "module",
-  "homepage": "https://github.com/starlitcode/Lumiverse-Auto-Refine",
+  "homepage": "https://github.com/lunarcadedigital/Lumiverse-Auto-Refine-ID",
   "repository": {
     "type": "git",
-    "url": "https://github.com/starlitcode/Lumiverse-Auto-Refine.git"
+    "url": "https://github.com/lunarcadedigital/Lumiverse-Auto-Refine-ID.git"
   },
   "bugs": {
-    "url": "https://github.com/starlitcode/Lumiverse-Auto-Refine/issues"
+    "url": "https://github.com/lunarcadedigital/Lumiverse-Auto-Refine-ID/issues"
   },
   "keywords": [
     "lumiverse",

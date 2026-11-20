@@ -21,7 +21,7 @@ Questions and ideas are welcome too.
 ## Where to send it
 
 - Post in my [Auto Refine post](https://discord.com/channels/1484149939167821915/1545884657743171594) on the Lumiverse Discord server, or
-- [open an issue](https://github.com/starlitcode/Lumiverse-Auto-Refine/issues).
+- [open an issue](https://github.com/lunarcadedigital/Lumiverse-Auto-Refine-ID/issues).
 
 For anything sensitive, such as a security problem, follow [SECURITY.md](SECURITY.md) instead.
 
