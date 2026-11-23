@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { __testing } from "../src/frontend";
 
-const { JUDGE_CHECKS, BEFORE_CHECKS } = __testing as any;
+const { JUDGE_CHECKS, BEFORE_CHECKS, PHRASES } = __testing as any;
 const checks = String(JUDGE_CHECKS).split("\n");
 const page = readFileSync(join(import.meta.dir, "..", "docs/two-models.md"), "utf8");
 
@@ -48,4 +48,27 @@ test("each comparison check is about `reply` and `previous_reply`, and is one se
 test("the page lists the comparison checks exactly as the code has them", () => {
   const block = /The ones it compares with:\n\n```\n([\s\S]*?)\n```/.exec(page);
   expect(block && block[1]).toBe(before.join("\n"));
+});
+
+// Three kinds of stock writing that a reply full of them still passed: a run of
+// paragraphs that each open on a character's name, a sentence chained with
+// "dan" three or more times, and one gesture repeated across characters. Each
+// is a check, and each has a rule in the built-in prompts, so a reply it flags
+// is one the refine knows how to fix.
+const KINDS = [
+  { check: "dibuka dengan nama seorang karakter diikuti kata kerja", rule: "paragraf berderet yang dibuka nama tokoh" },
+  { check: "menyambung tiga bagian atau lebih dalam satu kalimat dengan", rule: "kalimat yang disambung dengan dan tiga kali atau lebih" },
+  { check: "mengulang gestur yang sama tiga kali atau lebih", rule: "gestur yang sama diulang pada tokoh berbeda" },
+];
+
+test("each of the three added kinds is a check with an example", () => {
+  for (const k of KINDS) {
+    const c = checks.find((x) => x.indexOf(k.check) >= 0);
+    expect(c).toBeDefined();
+    expect(/"[^"]+"/.test(String(c))).toBe(true);
+  }
+});
+
+test("each of the three added kinds has a rule in the phrases the prompts carry", () => {
+  for (const k of KINDS) expect(String(PHRASES).indexOf(k.rule)).toBeGreaterThan(-1);
 });

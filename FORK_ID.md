@@ -11,7 +11,7 @@ The program code is the same as upstream except small changes (below, items 7 to
 `src/frontend.ts` (and the matching `dist/frontend.js`, rebuilt with `tsc`), the
 docs and tests that quote that text, the README, and the repository links:
 
-1. **`JUDGE_CHECKS`** (what the second model checks): written in Indonesian, 12 checks,
+1. **`JUDGE_CHECKS`** (what the second model checks): written in Indonesian, 15 checks,
    with Indonesian examples (the first version of this fork had the English ones plus
    7 Indonesian). They cover contrast framing ("Bukan ke mana-mana. Hanya
    terbang."), narrated negation ("Dia tidak berkedip."), lines that announce what

@@ -70,6 +70,9 @@ The ones it starts with:
 `reply` menghitung sebuah bunyi atau ketukan satu per satu, seperti "Telepon berdering sekali. Dua kali. Tiga kali.".
 `reply` berakhir pada cuaca, cahaya, atau seseorang yang mengamati dari kejauhan, seperti "langit mulai berwarna lebih gelap" atau "seseorang mengamati dari atap".
 `reply` membuat seorang karakter menenangkan atau memuji karakter lain dengan bahasa terapis, seperti "Kau melakukan hal yang benar." atau "Aku di sini untukmu.".
+`reply` memuat enam paragraf narasi atau lebih yang dibuka dengan nama seorang karakter diikuti kata kerja, seperti "Mira menutup pintu.", "Dion mengambil kunci." dan "Sari duduk di tangga.", sehingga terbaca seperti daftar siapa melakukan apa.
+`reply` menyambung tiga bagian atau lebih dalam satu kalimat dengan "dan", seperti "Ia membuka pintu dan melangkah masuk, dan lampu menyala, dan ia berhenti.".
+`reply` mengulang gestur yang sama tiga kali atau lebih pada karakter yang berbeda, seperti "mengangkat dagunya", "meletakkan kedua tangannya" atau "berhenti di sampingnya".
 ```
 
 Each one has to be false of a clean reply. A reply is refined when any one check reaches the line, so a check that is true of almost every reply sends every reply through. For example, "repeats a word" is true of any reply that uses a name twice.

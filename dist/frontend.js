@@ -279,6 +279,9 @@ const JUDGE_CHECKS = [
     "`reply` menghitung sebuah bunyi atau ketukan satu per satu, seperti \"Telepon berdering sekali. Dua kali. Tiga kali.\".",
     "`reply` berakhir pada cuaca, cahaya, atau seseorang yang mengamati dari kejauhan, seperti \"langit mulai berwarna lebih gelap\" atau \"seseorang mengamati dari atap\".",
     "`reply` membuat seorang karakter menenangkan atau memuji karakter lain dengan bahasa terapis, seperti \"Kau melakukan hal yang benar.\" atau \"Aku di sini untukmu.\".",
+    "`reply` memuat enam paragraf narasi atau lebih yang dibuka dengan nama seorang karakter diikuti kata kerja, seperti \"Mira menutup pintu.\", \"Dion mengambil kunci.\" dan \"Sari duduk di tangga.\", sehingga terbaca seperti daftar siapa melakukan apa.",
+    "`reply` menyambung tiga bagian atau lebih dalam satu kalimat dengan \"dan\", seperti \"Ia membuka pintu dan melangkah masuk, dan lampu menyala, dan ia berhenti.\".",
+    "`reply` mengulang gestur yang sama tiga kali atau lebih pada karakter yang berbeda, seperti \"mengangkat dagunya\", \"meletakkan kedua tangannya\" atau \"berhenti di sampingnya\".",
 ].join("\n");
 // More checks a reader can add to What the second model checks. Each one finds
 // one more kind of stock writing, and none is sent until it is added. They
@@ -1262,6 +1265,9 @@ const PHRASES_ID = "- sangkalan lalu jawabannya: bukan X, melainkan Y; tidak X, 
     "- kalimat yang mengumumkan atau menenangkan: Aku ingin kau tahu bahwa..., Aku punya satu pertanyaan..., Kalau boleh aku menambahkan..., Kau melakukan hal yang benar, Aku di sini untukmu\n" +
     "- menghitung bunyi dengan lantang: berdering sekali, dua kali, tiga kali; angka pasti yang tidak diberikan siapa pun (tiga detik, empat puluh derajat) padahal beberapa detik cukup\n" +
     "- bidikan penutup: langit yang makin gelap, cahaya yang berubah, pengamat di atap, kedatangan di ambang pintu\n" +
+    "- paragraf berderet yang dibuka nama tokoh lalu kata kerja (Mira menutup pintu. Dion mengambil kunci. Sari duduk di tangga.): gabungkan, ubah urutan kalimatnya, atau buka dengan hal lain selain nama\n" +
+    "- kalimat yang disambung dengan dan tiga kali atau lebih (Ia membuka pintu dan masuk, dan lampu menyala, dan ia berhenti): pecah jadi kalimat pendek, atau buang sambungannya\n" +
+    "- gestur yang sama diulang pada tokoh berbeda: mengangkat dagunya, meletakkan kedua tangannya, berhenti di sampingnya. Pakai satu, atau ganti dengan sesuatu yang khas bagi tokoh itu\n" +
     "- bahasa Inggris yang bocor ke prosa Indonesia: beat, density, micro-adjustment, fresh meat";
 const PHRASES = "Dalam bahasa Indonesia:\n" +
     PHRASES_ID +
@@ -2037,6 +2043,27 @@ const MOVED_DEFAULTS = [
         ].join("\n"),
         label: "What the second model checks",
         why: "the built-in checks are now in Indonesian.",
+        needs: { key: "judgeMode", is: "two" },
+    },
+    {
+        key: "judgeChecks",
+        // The list before three more were added: rows that open paragraphs with a name, long chains of "dan", and a gesture repeated across characters.
+        was: [
+            "`reply` memakai frasa yang sama sepanjang tiga kata atau lebih dua kali dalam beberapa kalimat.",
+            "`reply` memulai tiga kalimat atau lebih berturut-turut dengan kata yang sama.",
+            "`reply` memuat frasa klise, seperti \"jantungnya berdegup kencang\", \"napas tertahan\", \"seulas senyum tipis\", \"dunia seolah berhenti\" atau \"rahang mengeras\".",
+            "`reply` menyangkal sesuatu lalu menyebut apa yang sebenarnya, seperti \"Bukan ke mana-mana. Hanya terbang.\", \"Itu bukan kegagalan, melainkan kejujuran.\" atau \"Dia tidak akan bertanya kenapa. Dia hanya akan bertanya kapan.\".",
+            "`reply` mengikuti sebuah tindakan dengan komentar yang menilai hasilnya, seperti \"dia tertawa, dan suaranya terdengar tipis\" atau \"ia mengatakannya, dan kedengarannya salah\".",
+            "`reply` membuat seorang karakter memulai sebuah tindakan lalu menariknya kembali, seperti \"mengulurkan tangan, lalu menariknya\" atau \"membuka mulut, lalu menutupnya\".",
+            "`reply` berakhir dengan pertanyaan kepada pengguna tentang apa yang mereka lakukan selanjutnya, seperti \"Apa yang kamu lakukan?\".",
+            "`reply` menarasikan apa yang tidak dilakukan seorang karakter, seperti \"Dia tidak berkedip.\" atau \"Tony tidak menjawab sindiran itu.\".",
+            "`reply` membuat seorang karakter mengumumkan apa yang akan ia katakan, seperti \"Aku ingin kau tahu bahwa...\" atau \"Aku punya satu pertanyaan...\".",
+            "`reply` menghitung sebuah bunyi atau ketukan satu per satu, seperti \"Telepon berdering sekali. Dua kali. Tiga kali.\".",
+            "`reply` berakhir pada cuaca, cahaya, atau seseorang yang mengamati dari kejauhan, seperti \"langit mulai berwarna lebih gelap\" atau \"seseorang mengamati dari atap\".",
+            "`reply` membuat seorang karakter menenangkan atau memuji karakter lain dengan bahasa terapis, seperti \"Kau melakukan hal yang benar.\" atau \"Aku di sini untukmu.\".",
+        ].join("\n"),
+        label: "What the second model checks",
+        why: "three checks were added: paragraphs that each open with a character's name, three or more parts joined by \"dan\" in one sentence, and the same gesture repeated across characters.",
         needs: { key: "judgeMode", is: "two" },
     },
     {
@@ -18569,6 +18596,7 @@ export const __testing = {
     PROTECT_NOTE_FIELD,
     JUDGE_FIELDS,
     JUDGE_CHECKS,
+    PHRASES,
     BEFORE_CHECKS,
     WORN_CHECK,
     FOUND_LEAD,

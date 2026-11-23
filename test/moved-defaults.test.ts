@@ -21,9 +21,15 @@ describe("the defaults said to have moved", () => {
   test("the English checks and notes are covered, so a reader on them is told", () => {
     const keys = ["judgeChecks", "judgeBeforeChecks", "judgeWornCheck", "judgeFoundLead", "protectNote"];
     for (const k of keys) expect({ key: k, rows: MOVED_DEFAULTS.filter((m: any) => m.key === k).length > 0 }).toEqual({ key: k, rows: true });
-    // Two old lists for the checks: the original one and the one with seven added.
-    expect(MOVED_DEFAULTS.filter((m: any) => m.key === "judgeChecks").length).toBe(2);
-    for (const m of MOVED_DEFAULTS.filter((x: any) => x.key === "judgeChecks")) expect(String(m.was)).toContain("`reply` uses the same phrase");
+    // Two English old lists for the checks: the original one and the one with seven added.
+    const lists = MOVED_DEFAULTS.filter((m: any) => m.key === "judgeChecks");
+    const english = lists.filter((m: any) => String(m.was).indexOf("`reply` uses the same phrase") >= 0);
+    expect(english.length).toBe(2);
+    // And the Indonesian list of twelve, which a reader on it is told has three more.
+    const twelve = lists.filter((m: any) => String(m.was).indexOf("`reply` memakai frasa yang sama") >= 0);
+    expect(twelve.length).toBe(1);
+    expect(String(twelve[0].was).split("\n").length).toBe(12);
+    expect(lists.length).toBe(3);
   });
 
   test("each row names a setting that exists", () => {
