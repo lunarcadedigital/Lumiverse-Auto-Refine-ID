@@ -38,8 +38,8 @@ const rows = page
   .map((cells) => ({ name: cells[1].replace(/\*\*/g, ""), what: cells[2], needs: cells[3] }));
 
 describe("the prompts page keeps up with the panel", () => {
-  test("the code has four prompts to check against", () => {
-    expect(builtIns.length).toBe(4);
+  test("the code has five prompts to check against", () => {
+    expect(builtIns.length).toBe(5);
   });
 
   test("the page has a row for each of them", () => {
@@ -51,7 +51,7 @@ describe("the prompts page keeps up with the panel", () => {
     // is the order the array is in. A prompt renamed in one and not the other
     // lands here.
     expect(rows.map((r) => r.name)).toEqual(builtIns.map((p) => p.label));
-    expect(builtIns.map((p) => p.mine)).toEqual([false, false, true, true]);
+    expect(builtIns.map((p) => p.mine)).toEqual([false, false, false, true, true]);
   });
 
   test("the page agrees about which ones need a reasoning model", () => {
@@ -63,7 +63,7 @@ describe("the prompts page keeps up with the panel", () => {
 
   test("and none of the reasoning ones is described as a question", () => {
     const asked = rows
-      .filter((r) => /that thinks/.test(r.name) && r.what.includes("?"))
+      .filter((r) => /\(Thinking\)/.test(r.name) && r.what.includes("?"))
       .map((r) => r.what);
     expect(asked).toEqual([]);
   });

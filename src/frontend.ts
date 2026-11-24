@@ -997,7 +997,7 @@ function reportValue(key: string, v: any): string {
 const NOTES_TAG = /<\s*refine_notes\s*>/i;
 
 // ---- the prompts that come with it ----
-// One question, four answers. A judge for a reply and a line judge for what
+// One question, four answers. Refine Reply for a reply and Refine My Message for what
 // you wrote yourself, and on each of those two sides one for a model that
 // reasons and one for a model that does not. The question is which model you
 // are running, and nothing else.
@@ -1991,6 +1991,54 @@ const YOURS_THINKS_LONG: Block[] = [
 
 const DEFAULT_BLOCKS: Block[] = PLAIN_LONG;
 
+// ---- Fix Facts: a rewrite that brings a reply back in line with the story ----
+// Reads the memories, the earlier turns, the cards and the lorebook, finds what
+// the passage gets wrong about them, and fixes only that. It does not touch
+// style, so it can run on top of the prompts above rather than instead of them.
+//
+// The paragraph about who a sex scene is between is taken from The Judge, so the
+// two can never differ.
+const FACT_SAFETY: string =
+  String(JOB_BLOCK.text)
+    .split("\n")
+    .find((l) => l.indexOf("Adegan seks adalah") === 0) || "";
+
+const FACT_JOB: Block = {
+  id: "job",
+  name: "Fix Facts",
+  on: true,
+  role: "system",
+  text:
+    "<fix_facts>\n" +
+    "Tugasmu satu: mencocokkan naskah di bawah dengan fakta yang sudah terjadi di cerita ini. Sumber faktanya adalah ingatan jangka panjang di <memories>, kejadian di <earlier_turns>, lembar karakter dan pemain, dan fakta dunia.\n" +
+    "\n" +
+    "Cari kalimat di naskah yang:\n" +
+    "- menanyakan, menjelaskan ulang, atau meragukan hal yang sudah dijawab atau diputuskan\n" +
+    "- melupakan sesuatu yang sudah terjadi, atau membuat tokoh tahu hal yang belum pernah mereka dengar\n" +
+    "- bertentangan dengan fakta yang sudah ditetapkan: nama, tempat, benda, luka, hubungan, urutan waktu, dan siapa yang hadir\n" +
+    "- membuat tokoh bertindak berlawanan dengan sejarah dan sikap yang sudah mereka tunjukkan, tanpa alasan di cerita\n" +
+    "\n" +
+    "Perbaiki hanya kalimat itu, dengan perubahan sekecil mungkin supaya cocok dengan fakta. Suara, gaya, panjang, dan urutan kejadian di kalimat lain tidak berubah. Kalau tidak ada yang bertentangan, kembalikan naskah persis seperti aslinya dan tulis satu baris di luar tag yang menyebut itu.\n" +
+    "\n" +
+    "Kalau ingatan dan riwayat bertentangan satu sama lain, percayai yang lebih baru. Jangan menambah fakta baru, jangan menghapus kejadian yang memang terjadi di naskah, dan jangan memperbaiki gaya menulis.\n" +
+    "\n" +
+    FACT_SAFETY +
+    "\n" +
+    "</fix_facts>",
+};
+
+const FIX_FACTS: Block[] = [
+  FACT_JOB,
+  COPY_EXACTLY,
+  ...SCENE_BLOCKS,
+  { ...MEMORY_BLOCK, on: true },
+  RECENT_BLOCK,
+  AROUND_BLOCK,
+  TURN_BLOCK,
+  HOW_TO_ANSWER,
+  PROTECT_BLOCK,
+];
+
 // Four that come with it: the judge and the line judge, each once for any model
 // and once for a model that reasons.
 //
@@ -2008,32 +2056,40 @@ type BuiltIn = {
 
 const BUILT_IN_PROMPTS: BuiltIn[] = [
   {
-    name: "A judge",
-    label: "A judge",
+    name: "Refine Reply",
+    label: "Refine Reply",
     mine: false,
     blocks: PLAIN_LONG,
     thinking: "off",
     what: "Start here. It judges the reply one rule at a time: Instant Penalties, Dead Weight, Echoes, Rhythm, Dialogue, Body Language, Roll Call and The Finish. It changes only a line that clearly breaks a rule, and leaves any line it is not sure about. Works with one character or several. Runs on any model.",
   },
   {
-    name: "A judge that thinks",
-    label: "A judge that thinks",
+    name: "Refine Reply (Thinking)",
+    label: "Refine Reply (Thinking)",
     mine: false,
     blocks: THINKS_LONG,
     thinking: "inherit",
     what: "The same job, given as a bar to clear. It checks five hot spots and the roll call, keeps the voice the reply was written in, and reviews its own rewrite before handing it in. Needs a model that reasons.",
   },
   {
-    name: "A line judge",
-    label: "A line judge",
+    name: "Fix Facts",
+    label: "Fix Facts",
+    mine: false,
+    blocks: FIX_FACTS,
+    thinking: "off",
+    what: "For a reply that goes against what already happened: a question asked twice, a forgotten event, a wrong name or place. It reads the memories, the earlier turns, the cards and the lorebook, and rewrites only the lines that contradict them. It leaves style alone. Press Refine on the reply by hand. Raise How much it is told on the Context tab for a long chat.",
+  },
+  {
+    name: "Refine My Message",
+    label: "Refine My Message",
     mine: true,
     blocks: YOURS_LONG,
     thinking: "off",
-    what: "Start here. A line judge for your own writing: slips, missing words, punctuation that came out wrong, and then it stops. It fixes only a clear slip, and leaves any line it is not sure about. Your wording, your sentences and your plain lines come back as they went in, for every character you write. Runs on any model.",
+    what: "Start here. For your own writing: slips, missing words, punctuation that came out wrong, and then it stops. It fixes only a clear slip, and leaves any line it is not sure about. Your wording, your sentences and your plain lines come back as they went in, for every character you write. Runs on any model.",
   },
   {
-    name: "A line judge that thinks",
-    label: "A line judge that thinks",
+    name: "Refine My Message (Thinking)",
+    label: "Refine My Message (Thinking)",
     mine: true,
     blocks: YOURS_THINKS_LONG,
     thinking: "inherit",
@@ -2046,14 +2102,18 @@ const BUILT_IN = BUILT_IN_PROMPTS.map((p) => p.name);
 // or a pass saved under one of these is carried to the name it has now, so
 // nobody finds their picker empty or a pass skipped after updating.
 const OLD_BUILT_IN_NAMES: Record<string, string> = {
-  "the line edit": "A judge",
-  "the line edit, for a model that thinks": "A judge that thinks",
-  "the copy edit": "A line judge",
-  "the copy edit, for a model that thinks": "A line judge that thinks",
-  "the judge": "A judge",
-  "the judge, for a model that thinks": "A judge that thinks",
-  "the line judge": "A line judge",
-  "the line judge, for a model that thinks": "A line judge that thinks",
+  "the line edit": "Refine Reply",
+  "the line edit, for a model that thinks": "Refine Reply (Thinking)",
+  "the copy edit": "Refine My Message",
+  "the copy edit, for a model that thinks": "Refine My Message (Thinking)",
+  "the judge": "Refine Reply",
+  "the judge, for a model that thinks": "Refine Reply (Thinking)",
+  "the line judge": "Refine My Message",
+  "the line judge, for a model that thinks": "Refine My Message (Thinking)",
+  "a judge": "Refine Reply",
+  "a judge that thinks": "Refine Reply (Thinking)",
+  "a line judge": "Refine My Message",
+  "a line judge that thinks": "Refine My Message (Thinking)",
 };
 // The lines of a box, trimmed, with the empty ones dropped.
 const linesOf = (text: any): string[] =>

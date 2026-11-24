@@ -209,23 +209,32 @@ A model that thinks writes a plan before its reply. The **Writers Plan** block s
 
 ## The prompts built in
 
-There are four: a judge for replies and a line judge for your own messages, each in two versions. Pick the version by whether your model reasons.
+There are five. **Refine Reply** and **Refine My Message** each come in two versions, and you pick the version by whether your model reasons. **Fix Facts** is a fifth, for a reply that goes against what already happened.
 
 ### For replies
 
 | Prompt | What it is | Needs a reasoning model |
 | --- | --- | --- |
-| **A judge** | Tells the model it is the judge: how a passage reads is its job, and what happens in it is yours. Then one block for each rule: Instant Penalties, Dead Weight, Echoes, Rhythm, Dialogue, Body Language, Roll Call and The Finish, with a scorecard rule for all of them. The one to start with. | no |
-| **A judge that thinks** | The same role, then The Bar to clear, five Hot Spots, the writer's Voice, Roll Call, and Review the Tape for its own rewrite. Scores each area in `<REFINE_NOTES>`. | yes |
+| **Refine Reply** | Tells the model it is the judge: how a passage reads is its job, and what happens in it is yours. Then one block for each rule: Instant Penalties, Dead Weight, Echoes, Rhythm, Dialogue, Body Language, Roll Call and The Finish, with a scorecard rule for all of them. The one to start with. | no |
+| **Refine Reply (Thinking)** | The same role, then The Bar to clear, five Hot Spots, the writer's Voice, Roll Call, and Review the Tape for its own rewrite. Scores each area in `<REFINE_NOTES>`. | yes |
+| **Fix Facts** | Checks the reply against the story and fixes only what contradicts it: a question asked twice, a forgotten event, a wrong name or place. It sends the memories, the earlier turns, the cards and the lorebook. It does not touch style. | no |
 
 - In the two that think, the thinking steps are in **Hand It In**, after the passage, near the end of the prompt. The reasons are in [Put the thinking steps at the end](rules.md#more-ways-to-make-it-work-better).
 - The version for a model that thinks is the smaller one. A reasoning model is given the bar and applies it. A model that does not reason is given the full list instead, because it follows a list better than a principle.
 - The rules name kinds of stock writing, with a few examples each, because "cut clichés" gives a model nothing to act on. A model reads a kind as a pattern and catches the versions that are not listed. The kinds include held breaths and hammering hearts, stock faces, voices given a texture, the air doing the mood's job, fancy stand-ins for plain words, office talk in fiction, and the negation trick: "it wasn't a request, it was a command".
 - **Roll Call** is for scenes with one character or several. It keeps each line with its speaker and each character's way of talking. It keeps a name or a plain speech tag where it is the only thing saying who is talking, and it uses a name where a pronoun could mean two people. It keeps every character in the scene. It does not say who plays which character, so it works whether you write your own character or let the model write it too.
-- Both have a block called **Writers Plan**, switched off. It sends the reply's thinking. See [The writer's plan](#the-writers-plan).
-- Both have a block called **Checks Found**, switched off. It is for two models. See [Passing on what the checks found](two-models.md#passing-on-what-the-checks-found).
-- All four work as they are. They cannot be changed. To change one, load it, put a name in the box under **Presets**, and press **Save as new**. The copy is yours and opens for editing.
-- **When these change in a later version, the Prompt tab tells you**, with a **Got it** to hide the message. It only appears if you have loaded one of the four before. It never changes your prompt or loads one for you.
+- The two for replies that are not Fix Facts both have a block called **Writers Plan**, switched off. It sends the reply's thinking. See [The writer's plan](#the-writers-plan).
+- They also both have a block called **Checks Found**, switched off. It is for two models. See [Passing on what the checks found](two-models.md#passing-on-what-the-checks-found).
+- All five work as they are. They cannot be changed. To change one, load it, put a name in the box under **Presets**, and press **Save as new**. The copy is yours and opens for editing.
+- **When these change in a later version, the Prompt tab tells you**, with a **Got it** to hide the message. It only appears if you have loaded one of the five before. It never changes your prompt or loads one for you.
+
+**About Fix Facts:**
+
+- Press **Refine** on the reply that is wrong. It is not made to run on every reply.
+- It sends the **Memories** block, which is switched on in this prompt. How much it sends depends on your chat memory settings, and it is sent on every refine.
+- It reads the earlier turns as the **Context** tab sets them. In a long chat, raise **How much it is told** so the fact it needs is in the history.
+- It keeps the strength and the point of view of the passage. It does not rewrite lines that agree with the story.
+- If nothing contradicts the story, it hands the passage back as it was and says so outside the tags.
 
 ### For your own messages
 
@@ -233,8 +242,8 @@ The same two versions, for a different job. A reply is prose to improve. Your ow
 
 | Prompt | What it is | Needs a reasoning model |
 | --- | --- | --- |
-| **A line judge** | Tells the model it is a line judge: it calls clear faults on the way to the page and leaves your style alone. Then the full list, plus a block naming what is not a repair: adding a gesture, making a plain line vivid, finishing a thought you left open. Ends with one fix shown before and after. | no |
-| **A line judge that thinks** | The same role, then The Ruling for telling a mistake from a choice, and the Hot Spots where fast typing goes wrong. Scores each area in `<REFINE_NOTES>`. | yes |
+| **Refine My Message** | Tells the model it is a line judge: it calls clear faults on the way to the page and leaves your style alone. Then the full list, plus a block naming what is not a repair: adding a gesture, making a plain line vivid, finishing a thought you left open. Ends with one fix shown before and after. | no |
+| **Refine My Message (Thinking)** | The same role, then The Ruling for telling a mistake from a choice, and the Hot Spots where fast typing goes wrong. Scores each area in `<REFINE_NOTES>`. | yes |
 
 - Each ends by saying that when a slip cannot be told from a choice, it is a choice. So a plain "she left" stays as it is.
 - Their **Roll Call** block keeps every line with its speaker when you write more than one character. It adds no line for any character.
@@ -398,8 +407,8 @@ What happens:
 
 - It is empty by default. Empty, your messages run once, with your prompt for your messages.
 - Each name runs that preset's prompt for your messages, not its prompt for replies.
-- A built-in prompt for your messages, such as **A line judge**, runs as it is.
-- A built-in prompt for replies, such as **A judge**, is skipped in this list.
+- A built-in prompt for your messages, such as **Refine My Message**, runs as it is.
+- A built-in prompt for replies, such as **Refine Reply**, is skipped in this list.
 - The other rules below are the same for both lists, and so is **Each pass uses its preset's model setup**.
 - It is for messages you have sent. A draft still in the input box is refined once, with your prompt for your messages.
 

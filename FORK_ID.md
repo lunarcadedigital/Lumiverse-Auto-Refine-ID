@@ -21,8 +21,8 @@ docs and tests that quote that text, the README, and the repository links:
    Indonesian groups of the same kinds as the English ones.
 3. **`FILLER`**: a few Indonesian filler words (tiba-tiba, perlahan, sedikit,
    seolah-olah, sepertinya, tampaknya, benar-benar, sungguh, nyaris).
-4. **All built-in prompt text is in Indonesian** (the four prompts: A judge, A judge
-   that thinks, A line judge, A line judge that thinks). Block names, block ids and
+4. **All built-in prompt text is in Indonesian** (the four prompts: Refine Reply, Refine Reply
+   that thinks, Refine My Message, Refine My Message (Thinking)). Block names, block ids and
    tags such as `<instant_penalties>` stay in English, because the docs and tests
    refer to them. The macros, the `<REFINED>` and `<REFINE_NOTES>` tags and the
    `[[AR1]]` tokens are unchanged. The tests that pinned English phrases now pin
@@ -30,7 +30,7 @@ docs and tests that quote that text, the README, and the repository links:
    Indonesian ones, for a passage written in English. The paragraph about who a sex
    scene is between keeps its meaning and is quoted in `docs/prompt.md`.
 5. **A new prompt block, "Bahasa Indonesia"**, added to the two built-in reply prompts
-   (A judge, and A judge that thinks), right after The Finish and after Voice. It
+   (Refine Reply, and Refine Reply (Thinking)), right after The Finish and after Voice. It
    keeps the rewrite in Indonesian and in the register the passage already has,
    turns a denial plus its answer into the answer alone (with before and after
    pairs), cuts announcing and soothing lines, plain numbers, stock Indonesian
@@ -88,3 +88,9 @@ manifest and `package.json` point to this repository instead of upstream, and
 Install from the address where you host this copy, the same way as the original
 (Extensions, then the Git address). Or apply `anti-slop-id.patch` to a checkout
 of upstream `stable`: `git apply anti-slop-id.patch`.
+
+## Later changes
+
+- **The four built-in prompts have clearer names.** A judge, A judge that thinks, A line judge and A line judge that thinks are now Refine Reply, Refine Reply (Thinking), Refine My Message and Refine My Message (Thinking). A pick, a pass or a preset saved under an old name follows the rename.
+- **A fifth built-in prompt, Fix Facts**, for a reply that goes against what already happened. It sends the memories, the earlier turns, the cards and the lorebook, and rewrites only the lines that contradict them. See [docs/prompt.md](docs/prompt.md#the-prompts-built-in).
+- **Three more default checks** for what the second model looks at: paragraphs that each open on a character's name, three or more parts chained with "dan", and the same gesture repeated across characters.

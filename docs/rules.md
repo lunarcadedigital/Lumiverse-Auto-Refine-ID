@@ -73,9 +73,10 @@ To copy one:
 
 **Which one to start from:**
 
-- Your model reasons, or has a thinking mode: pick **A judge that thinks**.
-- Your model does not reason: pick **A judge**.
-- You want to fix your own messages: pick **A line judge** or **A line judge that thinks**.
+- Your model reasons, or has a thinking mode: pick **Refine Reply (Thinking)**.
+- Your model does not reason: pick **Refine Reply**.
+- A reply goes against what already happened, such as a question asked twice or a forgotten event: pick **Fix Facts** and press Refine on that reply.
+- You want to fix your own messages: pick **Refine My Message** or **Refine My Message (Thinking)**.
 
 ## Step 2: Find what annoys you
 

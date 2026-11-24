@@ -6,7 +6,7 @@ Settings that work well for most people, and when to change them. Everything her
 
 | Setting | Where | Use |
 | --- | --- | --- |
-| **Prompt** | Prompt tab | **A judge** for replies. **A line judge** for your own messages. |
+| **Prompt** | Prompt tab | **Refine Reply** for replies. **Refine My Message** for your own messages. **Fix Facts** for a reply that goes against the story. |
 | **Refine using** | Model tab | A fast, cheaper model that follows instructions well. It does not need to be the model you chat with. |
 | **Let it think first** | Model tab | **No, keep it quick.** |
 | **Temperature** | Model tab | Blank, or 0.5 to 0.7 if your model takes it. |
@@ -29,8 +29,8 @@ Thinking costs time and tokens on every refine. A reasoning model reads the whol
 
 **Match the prompt to the setting.**
 
-- Thinking off: use **A judge** or **A line judge**. They give rules the model can follow in one pass.
-- Thinking on: use **A judge that thinks** or **A line judge that thinks**. They ask the model to score the passage first, and the scores are kept on the Log tab.
+- Thinking off: use **Refine Reply** or **Refine My Message**. They give rules the model can follow in one pass.
+- Thinking on: use **Refine Reply (Thinking)** or **Refine My Message (Thinking)**. They ask the model to score the passage first, and the scores are kept on the Log tab.
 
 With thinking on, **Low** is enough for a refine. A higher level takes longer and rarely changes the result.
 
@@ -71,7 +71,7 @@ The Log tab shows how long each refine took, so you can compare settings.
 
 ## When the rewrite changes too much
 
-- Use **A judge** or **A line judge** as they come, before you add your own rules.
+- Use **Refine Reply** or **Refine My Message** as they come, before you add your own rules.
 - Lower the temperature.
 - Turn **Ask before saving a refine** on (Limits tab), to see each rewrite before it is saved.
 - Look at [Making your own prompt](rules.md) for how to write rules a model follows.

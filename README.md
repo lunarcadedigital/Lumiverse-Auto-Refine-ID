@@ -18,7 +18,7 @@ Ini adalah salinan [Auto Refine](https://github.com/starlitcode/Lumiverse-Auto-R
 - tujuh pemeriksaan baru untuk model kedua (kontras "bukan X, hanya Y", negasi yang dinarasikan, kalimat pengumuman, frasa klise Indonesia, hitungan bunyi, penutup lewat cuaca atau cahaya, bahasa terapis),
 - sembilan kelompok frasa Indonesia di blok **Instant Penalties**,
 - beberapa kata pengisi Indonesia di blok **Dead Weight**,
-- **seluruh teks prompt bawaan diterjemahkan ke Bahasa Indonesia** (keempat prompt: A judge, A judge that thinks, A line judge, A line judge that thinks), ditambah satu blok baru, **Bahasa Indonesia**, di dua prompt untuk balasan. Nama blok dan tag (misalnya `<instant_penalties>`) tetap bahasa Inggris, karena dokumen dan tes memakainya sebagai acuan.
+- **seluruh teks prompt bawaan diterjemahkan ke Bahasa Indonesia** (prompt: Refine Reply, Refine Reply (Thinking), Refine My Message, Refine My Message (Thinking)), ditambah satu blok baru, **Bahasa Indonesia**, di dua prompt untuk balasan. Nama blok dan tag (misalnya `<instant_penalties>`) tetap bahasa Inggris, karena dokumen dan tes memakainya sebagai acuan.
 
 Rinciannya ada di [FORK_ID.md](FORK_ID.md). Semua kredit untuk ekstensinya tetap milik pembuat aslinya. Masalah yang hanya terjadi pada versi asli sebaiknya dilaporkan ke repo aslinya.
 
@@ -108,8 +108,9 @@ Seluruh permintaan adalah daftar blok yang bisa kamu ubah, urutkan ulang, matika
 
 Empat prompt sudah disertakan:
 
-- **A judge**, untuk balasan. Memperbaiki cara balasan terbaca dan membiarkan apa yang terjadi.
-- **A line judge**, untuk pesanmu sendiri. Memperbaiki kesalahan dan membiarkan gayamu.
+- **Refine Reply**, untuk balasan. Memperbaiki cara balasan terbaca dan membiarkan apa yang terjadi.
+- **Refine My Message**, untuk pesanmu sendiri. Memperbaiki kesalahan dan membiarkan gayamu.
+- **Fix Facts**, untuk balasan yang bertentangan dengan fakta cerita (pertanyaan yang sudah dijawab ditanyakan lagi, kejadian yang terlupa, nama atau tempat yang salah). Membaca ingatan, riwayat, kartu, dan lorebook, lalu memperbaiki hanya kalimat yang bertentangan. Tekan Refine pada balasan itu.
 - Masing-masing punya versi lebih kecil **that thinks**, untuk model yang bernalar.
 
 Keempatnya hanya mengubah baris yang bisa dikutip model sebagai pelanggaran aturan. Dua yang untuk model yang berpikir memberi skor tiap area dan menuliskan skornya. Dua yang polos memberi batas yang sama sebagai aturan. Keduanya tidak meminta model memeriksa pekerjaannya, karena model yang tidak berpikir menulis jawabannya sekali jalan. Keempatnya bekerja dengan satu karakter maupun beberapa, termasuk di chat grup. Lihat [The scorecard](docs/prompt.md#the-scorecard).

@@ -13,7 +13,10 @@ import { __testing } from "../src/frontend";
 // left: that each pair really does get fuller, and that every one of them says
 // the passage means what it already meant.
 describe("the prompts that come with it", () => {
-  const { BUILT_IN_PROMPTS } = __testing as any;
+  // Fix Facts is a different job from the four that judge writing: it checks a
+  // reply against the story and leaves the style alone. These hold the four to
+  // what they promise, and Fix Facts has its own tests at the end of the file.
+  const BUILT_IN_PROMPTS = (__testing as any).BUILT_IN_PROMPTS.filter((p: any) => p.name !== "Fix Facts");
   // The blocks that carry the chat rather than the rules, by the ids they are
   // built under. "world" was in this list and is not a block id: the lore block
   // is "lore", so it was being weighed as a rule. What that measures is how
@@ -242,8 +245,8 @@ describe("the prompts that come with it", () => {
     const mine = forMine().map((p: any) => p.label);
     const replies = forReplies().map((p: any) => p.label);
     for (const one of mine) expect(replies).not.toContain(one);
-    expect(mine.every((l: string) => /^A line judge/.test(l))).toBe(true);
-    expect(replies.every((l: string) => /^A judge/.test(l))).toBe(true);
+    expect(mine.every((l: string) => /^Refine My Message/.test(l))).toBe(true);
+    expect(replies.every((l: string) => /^Refine Reply/.test(l))).toBe(true);
   });
 
   // A prompt for your own turn loaded over the prompt for replies would be the
@@ -256,8 +259,8 @@ describe("the prompts that come with it", () => {
   // hands the model: a line edit on a reply, a copy edit on your own turn. The
   // only thing separating them is which model they were written for.
   test("each set is named for the job it does", () => {
-    for (const [set, job] of [[forReplies(), "A judge"], [forMine(), "A line judge"]] as any) {
-      const stems = set.map((p: any) => p.label.replace(/ that thinks$/, "").trim());
+    for (const [set, job] of [[forReplies(), "Refine Reply"], [forMine(), "Refine My Message"]] as any) {
+      const stems = set.map((p: any) => p.label.replace(/ \(Thinking\)$/, "").trim());
       expect(stems.filter((n: string) => n === job).length).toBe(2);
     }
   });
@@ -267,7 +270,7 @@ describe("the prompts that come with it", () => {
   test("the ones that need a reasoning model say so in their name", () => {
     for (const p of BUILT_IN_PROMPTS) {
       const needs = p.thinking !== "off";
-      expect({ name: p.name, said: /that thinks/i.test(p.name) })
+      expect({ name: p.name, said: /\(thinking\)/i.test(p.name) })
         .toEqual({ name: p.name, said: needs });
     }
   });
@@ -277,8 +280,8 @@ describe("the prompts that come with it", () => {
   // so, and this is what holds that claim to the text.
   test("the one for a reasoning model is the smaller of its pair", () => {
     const pairs = [
-      ["A judge that thinks", "A judge"],
-      ["A line judge that thinks", "A line judge"],
+      ["Refine Reply (Thinking)", "Refine Reply"],
+      ["Refine My Message (Thinking)", "Refine My Message"],
     ];
     for (const [small, big] of pairs)
       expect(sizeOf(named(small))).toBeLessThan(sizeOf(named(big)));
@@ -627,4 +630,56 @@ describe("the paragraph about adults", () => {
       expect(whole).not.toMatch(/under eighteen|\bchild\b|\bminors?\b/i);
     });
   }
+});
+
+
+// Fix Facts reads the story and fixes what contradicts it.
+describe("Fix Facts", () => {
+  const { BUILT_IN_PROMPTS, MACROS } = __testing as any;
+  const fix = BUILT_IN_PROMPTS.find((p: any) => p.name === "Fix Facts");
+  const judge = BUILT_IN_PROMPTS.find((p: any) => p.name === "Refine Reply");
+  const on = (id: string) => fix.blocks.find((b: any) => b.id === id);
+
+  test("it is one of the built-in prompts, for replies, and not for a model that must reason", () => {
+    expect(fix).toBeDefined();
+    expect(fix.mine).toBe(false);
+    expect(fix.thinking).toBe("off");
+    expect(fix.label).toBe("Fix Facts");
+  });
+
+  test("it sends the memories, the earlier turns, the cards and the lorebook", () => {
+    for (const id of ["memory", "history", "character", "persona", "lore"]) {
+      expect(on(id)).toBeDefined();
+      expect(on(id).on).toBe(true);
+    }
+    expect(on("memory").text).toContain("{{memories}}");
+  });
+
+  test("it asks for the answer in the same tags, with the passage and the stand-in note", () => {
+    expect(on("turn").text).toContain("{{message}}");
+    expect(on("answer").text).toContain("<REFINED>");
+    expect(fix.blocks.some((b: any) => /protect_notes/.test(String(b.text)))).toBe(true);
+  });
+
+  test("it fixes only what contradicts the story, and leaves the style", () => {
+    const job = String(on("job").text);
+    expect(job).toContain("bertentangan");
+    expect(job).toContain("jangan memperbaiki gaya menulis");
+    expect(job).toContain("persis seperti aslinya");
+  });
+
+  test("it carries the same paragraph about who a sex scene is between as the judge", () => {
+    const line = String(judge.blocks.find((b: any) => b.id === "job").text)
+      .split("\n")
+      .find((l: string) => l.indexOf("Adegan seks adalah") === 0);
+    expect(line && line.length > 20).toBe(true);
+    expect(String(on("job").text)).toContain(line as string);
+  });
+
+  test("every macro it uses is one the panel knows", () => {
+    const known = (MACROS as any[]).map((m: any) => String(m.tag));
+    for (const b of fix.blocks)
+      for (const m of String(b.text).match(/\{\{[a-z_]+\}\}/g) || [])
+        expect(known.some((k: string) => k.indexOf(m) >= 0 || m.indexOf(k) >= 0)).toBe(true);
+  });
 });
